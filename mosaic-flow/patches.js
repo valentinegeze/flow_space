@@ -26,6 +26,10 @@ export const PATCH_PARAMS = {
     manningN: 0.1,
     infiltration: 25,
     erodibility: 0.3,
+    // T1-A: mm/hr lost to evapotranspiration (only from standing water)
+    etRate: 2.5,
+    // T1-B: mm depth that must pond before water mobilizes (detention storage)
+    connectivityThreshold: 0.5,
   },
   [PATCH_TYPES.FOREST]: {
     name: 'Forest',
@@ -33,6 +37,8 @@ export const PATCH_PARAMS = {
     manningN: 0.3,
     infiltration: 50,
     erodibility: 0.05,
+    etRate: 6.0,      // high ET: canopy transpiration + interception
+    connectivityThreshold: 1.5, // leaf litter + root channels hold water longer
   },
   [PATCH_TYPES.WETLAND]: {
     name: 'Wetland',
@@ -40,6 +46,8 @@ export const PATCH_PARAMS = {
     manningN: 0.15,
     infiltration: 80,
     erodibility: 0.1,
+    etRate: 8.0,      // highest ET: open water + macrophyte transpiration
+    connectivityThreshold: 0.0, // water body — no ponding threshold, flows freely
   },
   [PATCH_TYPES.BARE]: {
     name: 'Bare Soil',
@@ -47,6 +55,8 @@ export const PATCH_PARAMS = {
     manningN: 0.03,
     infiltration: 5,
     erodibility: 0.9,
+    etRate: 0.5,      // minimal ET: no vegetation
+    connectivityThreshold: 0.2, // slight surface roughness
   },
   [PATCH_TYPES.URBAN]: {
     name: 'Urban',
@@ -54,6 +64,8 @@ export const PATCH_PARAMS = {
     manningN: 0.015,
     infiltration: 2,
     erodibility: 0.2,
+    etRate: 0.2,      // near-zero ET: impervious surface
+    connectivityThreshold: 0.1, // smooth pavement — ponds almost nothing
   },
   [PATCH_TYPES.CORRIDOR]: {
     name: 'Corridor',
@@ -61,6 +73,8 @@ export const PATCH_PARAMS = {
     manningN: 0.03,
     infiltration: 15,
     erodibility: 0.4,
+    etRate: 1.5,
+    connectivityThreshold: 0.3,
   },
   [PATCH_TYPES.WATER]: {
     name: 'River/Canal/Lake',
@@ -68,6 +82,8 @@ export const PATCH_PARAMS = {
     manningN: 0.02,
     infiltration: 0,
     erodibility: 0,
+    etRate: 5.0,      // open water ET
+    connectivityThreshold: 0.0,
   },
 };
 

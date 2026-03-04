@@ -28,6 +28,7 @@ export function createUI(onUpdate) {
     demElevations: null,
     showElevationLines: false,
     showDrainageHeatmap: false,
+    useLBM: false,
     viewMode: 'design',
     sedimentMultiplier: 1,
     menuExpanded: true,
@@ -469,6 +470,23 @@ export function createUI(onUpdate) {
   drainageHeatmapLabel.appendChild(document.createTextNode('Show drainage network'));
   menuContent.appendChild(drainageHeatmapLabel);
 
+  // LBM density field toggle
+  const lbmLabel = document.createElement('label');
+  lbmLabel.style.display = 'flex';
+  lbmLabel.style.alignItems = 'center';
+  lbmLabel.style.marginTop = '6px';
+  lbmLabel.style.gap = '8px';
+  lbmLabel.style.cursor = 'pointer';
+  const lbmCheck = document.createElement('input');
+  lbmCheck.type = 'checkbox';
+  lbmCheck.checked = controls.useLBM;
+  lbmCheck.addEventListener('change', () => {
+    controls.useLBM = lbmCheck.checked;
+  });
+  lbmLabel.appendChild(lbmCheck);
+  lbmLabel.appendChild(document.createTextNode('LBM density field'));
+  menuContent.appendChild(lbmLabel);
+
   const sedimentLabel = document.createElement('label');
   sedimentLabel.innerHTML = `Sediment rate: <span id="sediment-val">${controls.sedimentMultiplier}</span>×`;
   sedimentLabel.style.display = 'block';
@@ -870,7 +888,7 @@ export function createUI(onUpdate) {
 
   return {
     controls,
-    updateMetrics: ({ flowHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers }) => {
+    updateMetrics: ({ flowHistory, etHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers }) => {
       const ctx = sparklineCanvas.getContext('2d');
       const W = sparklineCanvas.width;
       const H = sparklineCanvas.height;
@@ -947,7 +965,8 @@ export function createUI(onUpdate) {
       // Metrics text
       let currentPeak = 0;
       for (const v of (flowHistory ?? [])) { if (v > currentPeak) currentPeak = v; }
-      let text = `Peak: ${currentPeak.toFixed(2)} | Particles: ${sedimentCount ?? 0} | Conn: ${(connectivity ?? 0).toFixed(2)}`;
+      const currentET = etHistory?.length > 0 ? etHistory[etHistory.length - 1] : 0;
+      let text = `Peak: ${currentPeak.toFixed(2)} | ET: ${currentET.toFixed(3)} mm | Conn: ${(connectivity ?? 0).toFixed(2)}`;
 
       // Percentage delta vs baseline — more readable than raw Δ numbers
       if (baselineSnapshot) {

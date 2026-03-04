@@ -7,6 +7,7 @@ import { PATCH_TYPES, PATCH_PARAMS, DEFAULT_MATRIX } from './patches.js';
 import { createUI } from './ui.js';
 import { computeConnectivity } from './connectivity.js';
 import { spawnParticles, advectParticles } from './particles.js';
+import { createLBMState, stepLBM } from './lbm.js';
 
 const COLS = 64;
 const ROWS = 64;
@@ -24,6 +25,8 @@ let drainageContrib = null;
 let baselineSnapshot = null;
 let contributingArea = null;   // Uint8Array mask for right-click upstream highlight
 let interventionMarkers = [];  // { framesAgo, patchKey } logged when user paints while running
+let lbmState = null;
+let etHistory = [];
 let cellPx = 8;
 let canvasW = 0;
 let canvasH = 0;
@@ -145,9 +148,11 @@ const sketch = (p) => {
         particles.length = 0;
         sedimentCount = 0;
         flowHistory = [];
+        etHistory = [];
         drainageContrib = null;
         baselineSnapshot = null;
         interventionMarkers = [];
+        lbmState = null;
       } else if (msg === 'restore') {
         const wetlandIdx = patchKeys.indexOf('wetland');
         const forestIdx = patchKeys.indexOf('forest');
@@ -243,6 +248,7 @@ const sketch = (p) => {
     const runLoop = () => {
       if (controls.running) {
         const mult = Math.max(1, controls.speedMultiplier ?? 1);
+        let stepET = 0;
         for (let s = 0; s < mult; s++) {
           const result = stepFlow(
             { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
@@ -253,6 +259,7 @@ const sketch = (p) => {
           );
           depths = result.depths;
           fluxes = result.fluxes;
+          stepET += result.totalET ?? 0;
 
           const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
           connectivity = connResult.connectivity;
@@ -260,6 +267,12 @@ const sketch = (p) => {
 
           spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
           advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
+        }
+
+        // LBM density field step (runs after Manning to consume final fluxes/depths)
+        if (controls.useLBM) {
+          if (!lbmState) lbmState = createLBMState(COLS, ROWS);
+          stepLBM(lbmState, fluxes, depths, sedimentDepth, COLS, ROWS);
         }
 
         // Total outflow across entire grid boundary for sparkline
@@ -275,6 +288,9 @@ const sketch = (p) => {
         }
         flowHistory.push(totalOutflow * 0.001);
         if (flowHistory.length > 200) flowHistory.shift();
+
+        etHistory.push(stepET * 1000); // convert m → mm for display
+        if (etHistory.length > 200) etHistory.shift();
 
         // Age out intervention markers
         for (const m of interventionMarkers) m.framesAgo++;
@@ -294,7 +310,7 @@ const sketch = (p) => {
           controls.requestSnapshot = false;
         }
 
-        updateMetrics({ flowHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers });
+        updateMetrics({ flowHistory, etHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers });
       }
     };
 
@@ -330,7 +346,7 @@ const sketch = (p) => {
         // Water: visible in design mode (tinted), faint in flow mode, hidden in sediment mode
         const h = depths[idx];
         if (h > 0.0005 && viewMode !== 'sediment') {
-          const alpha = Math.min(255, 160 + h * 3000);
+          const alpha = Math.min(255, 120 + Math.log1p(h * 3000) * 42);
           if (viewMode === 'design') {
             const wr = Math.round(80 * 0.7 + pr * 0.3);
             const wg = Math.round(130 * 0.7 + pg * 0.3);
@@ -352,8 +368,8 @@ const sketch = (p) => {
           const sd = sedimentDepth[i * COLS + j];
           if (sd > 0) {
             const alpha = viewMode === 'sediment'
-              ? Math.min(240, 120 + sd * 20)
-              : Math.min(220, 80 + sd * 12);
+              ? Math.min(240, Math.log1p(sd) * 55)
+              : Math.min(220, Math.log1p(sd) * 47);
             p.fill(139, 90, 43, alpha);
             p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
           }
@@ -403,8 +419,36 @@ const sketch = (p) => {
       // (the target is the brightest cell — it will be included in the mask)
     }
 
-    // ── Layer 6: Particles ───────────────────────────────────────────────────
-    if (viewMode !== 'flow') {
+    // ── Layer 6: Particles or LBM density field ──────────────────────────────
+    if (window.mosaicControls?.useLBM && lbmState) {
+      // LBM mode: render smooth density fields for water and sediment
+      let maxW = 0, maxS = 0;
+      for (let k = 0; k < lbmState.rhoWater.length; k++) {
+        if (lbmState.rhoWater[k] > maxW) maxW = lbmState.rhoWater[k];
+        if (lbmState.rhoSediment[k] > maxS) maxS = lbmState.rhoSediment[k];
+      }
+      p.noStroke();
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          const idx = i * COLS + j;
+          if (maxW > 0) {
+            const tw = lbmState.rhoWater[idx] / maxW;
+            if (tw > 0.02) {
+              p.fill(60, 140, 230, Math.min(200, Math.round(tw * 210)));
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+          if (maxS > 0) {
+            const ts = lbmState.rhoSediment[idx] / maxS;
+            if (ts > 0.02) {
+              p.fill(160, 90, 30, Math.min(200, Math.round(ts * 210)));
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+        }
+      }
+    } else if (viewMode !== 'flow') {
+      // Particle mode (default)
       for (const pt of particles) {
         if (pt.settled) continue;
         p.fill(pt.color[0], pt.color[1], pt.color[2], 255);
@@ -448,6 +492,12 @@ const sketch = (p) => {
     }
 
     const isFlow = viewMode === 'flow';
+    // Animated dash parameters: phase shifts each frame so dashes appear to move downstream
+    const dashLen = 8;
+    const gapLen = 6;
+    const period = dashLen + gapLen;
+    const frameOffset = Math.floor(p.frameCount * 0.3) % period;
+
     p.noFill();
 
     for (const [sy, sx] of seeds) {
@@ -480,7 +530,8 @@ const sketch = (p) => {
 
       if (pts.length < 2) continue;
 
-      // Draw each segment with width ∝ log(discharge)
+      // Draw each segment as an animated dash — phase advances each frame so
+      // dashes appear to travel downstream, making direction immediately readable
       for (let k = 1; k < pts.length; k++) {
         const prev = pts[k - 1];
         const curr = pts[k];
@@ -489,9 +540,48 @@ const sketch = (p) => {
         const w = Math.min(7, 0.5 + Math.log1p(d * 25000) * 1.8);
         const alpha = isFlow ? Math.min(220, 80 + w * 20) : Math.min(90, 30 + w * 10);
 
-        p.stroke(100, 180, 255, alpha);
-        p.strokeWeight(w);
-        p.line(prev.x * cellPx, prev.y * cellPx, curr.x * cellPx, curr.y * cellPx);
+        const phase = (k + frameOffset) % period;
+        if (phase < dashLen) {
+          p.stroke(100, 180, 255, alpha);
+          p.strokeWeight(w);
+          p.line(prev.x * cellPx, prev.y * cellPx, curr.x * cellPx, curr.y * cellPx);
+        }
+      }
+
+      // Chevron arrowheads every 50 steps and at the streamline end
+      const arrowInterval = 50;
+      const arrowPositions = [];
+      for (let k = arrowInterval; k < pts.length - 1; k += arrowInterval) arrowPositions.push(k);
+      if (pts.length >= 3) arrowPositions.push(pts.length - 1);
+
+      for (const k of arrowPositions) {
+        if (k < 2) continue;
+        const tip = pts[k];
+        const ref = pts[k - 2]; // 2 steps back for a stable direction vector
+        const d = pts[k - 1].discharge;
+        const w = Math.min(5, 0.8 + Math.log1p(d * 25000) * 1.2);
+        const alpha = isFlow ? 200 : 90;
+
+        const dx = tip.x - ref.x;
+        const dy = tip.y - ref.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = dx / len;
+        const ny = dy / len;
+        const px2 = -ny; // perpendicular
+        const py2 = nx;
+
+        const aLen = Math.max(5, w * 3);   // arrowhead length in px
+        const aWid = Math.max(3, w * 1.5); // arrowhead half-width in px
+
+        const tipX = tip.x * cellPx;
+        const tipY = tip.y * cellPx;
+        const bx = tipX - nx * aLen;
+        const by = tipY - ny * aLen;
+
+        p.stroke(160, 210, 255, alpha);
+        p.strokeWeight(Math.max(0.8, w * 0.55));
+        p.line(bx + px2 * aWid, by + py2 * aWid, tipX, tipY);
+        p.line(bx - px2 * aWid, by - py2 * aWid, tipX, tipY);
       }
     }
   }

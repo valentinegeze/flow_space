@@ -69,6 +69,7 @@ export function flowWeights(i, j, elevations, cols, rows) {
  * @param {number} dt - timestep (s)
  * @param {Object} opts - { patchParams, patchKeys } from patches.js
  * @param {Float32Array} [patchState] - sediment accumulation per cell; reduces infiltration when nonzero
+ * @returns {{ depths, fluxes, totalET, totalOutflow }}
  */
 export function stepFlow(state, rainfall, dt, opts, patchState) {
   const { depths, patchGrid, elevations, cols, rows } = state;
@@ -80,6 +81,8 @@ export function stepFlow(state, rainfall, dt, opts, patchState) {
 
   const newDepths = new Float32Array(depths.length);
   const fluxes = new Float32Array(depths.length * 2);
+  let totalET = 0;
+  let totalOutflow = 0;
 
   for (let i = 0; i < rows; i++) {
     for (let j = 0; j < cols; j++) {
@@ -95,34 +98,69 @@ export function stepFlow(state, rainfall, dt, opts, patchState) {
       let effectiveSlope = 0;
       for (const w of weights) effectiveSlope += w.weight * w.gradient;
 
-      // Sediment load progressively reduces infiltration capacity (Fix 5)
+      // Sediment load progressively reduces infiltration capacity
       const siltLoad = patchState ? patchState[idx] : 0;
       const effectiveInfil = params.infiltration / (1 + siltLoad * 0.1);
 
-      const v = manningVelocity(h, Math.max(0.001, effectiveSlope), params.manningN);
+      // T1-A: Evapotranspiration — subtract from standing water each step
+      const etRateMs = (params.etRate ?? 0) / 1000 / 3600;
+      const evapotranspired = Math.min(h, etRateMs * dt);
+      totalET += evapotranspired;
+
+      // T1-B: Connectivity threshold — water must pond above threshold before it mobilizes
+      const threshold = params.connectivityThreshold ?? 0;
+      const thresholdM = threshold / 1000; // threshold in mm → m
+      const mobilizableH = Math.max(0, h - evapotranspired - thresholdM);
+
+      // T1-C: Patch edge resistance — blend Manning's n with neighbors at patch boundaries
+      let effectiveN = params.manningN;
+      if (weights.length > 0) {
+        let nSum = 0;
+        let nCount = 0;
+        for (const w of weights) {
+          const nPatchIdx = patchGrid[w.ni * cols + w.nj];
+          const nKey = patchKeys[nPatchIdx] || patchKeys[0];
+          const nParams = patchParams[nKey] || patchParams[patchKeys[0]];
+          if (nPatchIdx !== patchIdx) {
+            // At a patch boundary: blend current and neighbor roughness
+            // Geometric mean gives physically appropriate resistance at edges
+            nSum += Math.sqrt(params.manningN * nParams.manningN) * w.weight;
+            nCount += w.weight;
+          }
+        }
+        if (nCount > 0) {
+          // Weighted blend: (1 - edgeFraction)*own_n + edgeFraction*edge_blend
+          effectiveN = params.manningN * (1 - nCount) + nSum;
+        }
+      }
+
+      const v = manningVelocity(mobilizableH, Math.max(0.001, effectiveSlope), effectiveN);
       const infiltrationRate = effectiveInfil / 1000 / 3600;
-      const infiltrated = Math.min(h, infiltrationRate * dt);
+      const infiltrated = Math.min(mobilizableH, infiltrationRate * dt);
 
-      const outflow = v * h * dt / cellSize;
-      const actualOutflow = Math.min(Math.max(0, h - infiltrated), outflow);
+      const outflow = v * mobilizableH * dt / cellSize;
+      const actualOutflow = Math.min(Math.max(0, mobilizableH - infiltrated), outflow);
 
-      newDepths[idx] += h + rainfallMs - infiltrated - actualOutflow;
+      // Water that stays: original depth minus ET minus infiltration minus outflow, plus rain
+      newDepths[idx] += h - evapotranspired - infiltrated - actualOutflow + rainfallMs;
 
       if (actualOutflow > 0) {
         if (weights.length === 0) {
-          // Flat cell or sink — water stays
-          newDepths[idx] += actualOutflow;
+          // Interior depressions pond; boundary cells drain off the domain.
+          const atBoundary = i === 0 || i === rows - 1 || j === 0 || j === cols - 1;
+          if (!atBoundary) newDepths[idx] += actualOutflow;
+          else totalOutflow += actualOutflow;
         } else {
           for (const w of weights) {
             const nidx = w.ni * cols + w.nj;
             newDepths[nidx] += actualOutflow * w.weight;
-            fluxes[idx * 2] += w.di * v * w.weight;
-            fluxes[idx * 2 + 1] += w.dj * v * w.weight;
+            fluxes[idx * 2] += w.dj * v * w.weight;      // col (j) → vx (horizontal)
+            fluxes[idx * 2 + 1] += w.di * v * w.weight;  // row (i) → vy (vertical)
           }
         }
       }
     }
   }
 
-  return { depths: newDepths, fluxes };
+  return { depths: newDepths, fluxes, totalET, totalOutflow };
 }
