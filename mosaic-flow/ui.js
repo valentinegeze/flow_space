@@ -27,10 +27,13 @@ export function createUI(onUpdate) {
     elevationMode: 'slope',
     demElevations: null,
     showElevationLines: false,
+    showDrainageHeatmap: false,
+    viewMode: 'design',
     sedimentMultiplier: 1,
     menuExpanded: true,
     brushSize: 3,
     speedMultiplier: 1,
+    requestSnapshot: false,
   };
 
   const mosaicContainer = document.getElementById('mosaic-container');
@@ -449,6 +452,23 @@ export function createUI(onUpdate) {
   elevationLinesLabel.appendChild(document.createTextNode('Show elevation contours'));
   menuContent.appendChild(elevationLinesLabel);
 
+  // Fix 4: drainage heatmap toggle
+  const drainageHeatmapLabel = document.createElement('label');
+  drainageHeatmapLabel.style.display = 'flex';
+  drainageHeatmapLabel.style.alignItems = 'center';
+  drainageHeatmapLabel.style.marginTop = '6px';
+  drainageHeatmapLabel.style.gap = '8px';
+  drainageHeatmapLabel.style.cursor = 'pointer';
+  const drainageHeatmapCheck = document.createElement('input');
+  drainageHeatmapCheck.type = 'checkbox';
+  drainageHeatmapCheck.checked = controls.showDrainageHeatmap;
+  drainageHeatmapCheck.addEventListener('change', () => {
+    controls.showDrainageHeatmap = drainageHeatmapCheck.checked;
+  });
+  drainageHeatmapLabel.appendChild(drainageHeatmapCheck);
+  drainageHeatmapLabel.appendChild(document.createTextNode('Show drainage network'));
+  menuContent.appendChild(drainageHeatmapLabel);
+
   const sedimentLabel = document.createElement('label');
   sedimentLabel.innerHTML = `Sediment rate: <span id="sediment-val">${controls.sedimentMultiplier}</span>×`;
   sedimentLabel.style.display = 'block';
@@ -521,6 +541,46 @@ export function createUI(onUpdate) {
   resetBtn.addEventListener('click', () => onUpdate?.('reset'));
   menuContent.appendChild(resetBtn);
 
+  // View mode cycle buttons: Design / Flow / Sediment
+  const viewModeDiv = document.createElement('div');
+  viewModeDiv.style.cssText = 'display: flex; gap: 4px; margin-top: 8px;';
+  const viewModes = [
+    { id: 'design', label: 'Design', title: 'Full patch colors with water overlay' },
+    { id: 'flow',   label: 'Flow',   title: 'Desaturated patches, prominent streamlines' },
+    { id: 'sediment', label: 'Sediment', title: 'Amplified sediment deposition view' },
+  ];
+  const viewBtns = viewModes.map(({ id, label, title }) => {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.title = title;
+    const isActive = () => controls.viewMode === id;
+    const refresh = () => {
+      btn.style.background = isActive() ? '#4a5a7d' : 'transparent';
+      btn.style.color = isActive() ? '#fff' : '#888';
+      btn.style.borderColor = isActive() ? '#6a7aad' : '#444';
+    };
+    btn.style.cssText = `
+      flex: 1;
+      padding: 5px 4px;
+      border: 1px solid #444;
+      background: transparent;
+      color: #888;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: background 0.15s;
+    `;
+    btn.addEventListener('click', () => {
+      controls.viewMode = id;
+      viewBtns.forEach(b => b._refresh());
+    });
+    btn._refresh = refresh;
+    refresh();
+    return btn;
+  });
+  viewBtns.forEach(btn => viewModeDiv.appendChild(btn));
+  menuContent.appendChild(viewModeDiv);
+
   const restoreBtn = document.createElement('button');
   restoreBtn.textContent = 'Restore';
   restoreBtn.style.cssText = `
@@ -538,6 +598,27 @@ export function createUI(onUpdate) {
   restoreBtn.title = 'Replace ~30% of patches with wetland/forest';
   restoreBtn.addEventListener('click', () => onUpdate?.('restore'));
   menuContent.appendChild(restoreBtn);
+
+  // Fix 6: snapshot button for scenario comparison baseline
+  const snapshotBtn = document.createElement('button');
+  snapshotBtn.textContent = 'Snapshot';
+  snapshotBtn.title = 'Capture current flow state as baseline. Click again to clear.';
+  snapshotBtn.style.cssText = `
+    display: block;
+    margin-top: 8px;
+    padding: 8px 16px;
+    background: #4a5a7d;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    width: 100%;
+  `;
+  snapshotBtn.addEventListener('click', () => {
+    controls.requestSnapshot = true;
+  });
+  menuContent.appendChild(snapshotBtn);
 
   const exportBtn = document.createElement('button');
   exportBtn.textContent = 'Export';
@@ -594,8 +675,21 @@ export function createUI(onUpdate) {
 
   const metricsDiv = document.createElement('div');
   metricsDiv.id = 'mosaic-metrics';
-  metricsDiv.style.cssText = 'margin-top: 12px; font-size: 11px; color: #aaa;';
-  metricsDiv.innerHTML = 'Peak flow: — | Sediment: — | Connectivity: —';
+  metricsDiv.style.cssText = 'margin-top: 12px;';
+
+  // Fix 1: sparkline canvas for flow time series
+  const sparklineCanvas = document.createElement('canvas');
+  sparklineCanvas.width = 248;
+  sparklineCanvas.height = 44;
+  sparklineCanvas.style.cssText = 'display: block; border: 1px solid #333; border-radius: 3px; margin-bottom: 5px;';
+  metricsDiv.appendChild(sparklineCanvas);
+
+  const metricsText = document.createElement('div');
+  metricsText.id = 'mosaic-metrics-text';
+  metricsText.style.cssText = 'font-size: 11px; color: #aaa; line-height: 1.5;';
+  metricsText.innerHTML = 'Peak: — | Particles: — | Conn: —';
+  metricsDiv.appendChild(metricsText);
+
   menuContent.appendChild(metricsDiv);
 
   const sedimentHint = document.createElement('div');
@@ -609,7 +703,7 @@ export function createUI(onUpdate) {
   infoBtn.style.cssText = `
     position: absolute;
     bottom: 16px;
-    left: 16px;
+    right: 16px;
     padding: 8px 14px;
     background: rgba(50, 50, 65, 0.9);
     border: 1px solid #555;
@@ -639,7 +733,7 @@ export function createUI(onUpdate) {
   infoPanel.style.cssText = `
     background: #1e1e26;
     color: #e0e0e0;
-    max-width: 560px;
+    max-width: 640px;
     max-height: 85vh;
     overflow-y: auto;
     padding: 24px;
@@ -688,6 +782,77 @@ export function createUI(onUpdate) {
       </thead>
       <tbody>${patchTable}</tbody>
     </table>
+
+    <h3 style="margin-top:28px;font-size:14px;border-top:1px solid #333;padding-top:20px">Agent system</h3>
+    <p style="color:#888;font-size:12px;margin-bottom:14px">This model is developed with a set of specialized Claude agents. Each agent has a focused role and persistent memory across sessions. Invoke them from the Claude Code CLI inside this project directory.</p>
+
+    <div style="display:grid;gap:10px">
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#7ab3ff;font-weight:bold;font-size:12px">orchestrator</span>
+          <span style="color:#555;font-size:10px">entry point</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Routes any question to the right specialist agents, collects their outputs, and returns a synthesized response. Start here for broad or multi-domain questions — e.g. "my flow outputs feel wrong, what should I fix?"</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#ff7a7a;font-weight:bold;font-size:12px">model-diagnostician</span>
+          <span style="color:#555;font-size:10px">diagnosis</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Audits the model code and returns exactly: one genuine strength, three specific failure modes (naming files, functions, data structures), and the hardest question the model cannot currently answer. Run this first before any dev sprint or crit.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#ff7a7a;font-weight:bold;font-size:12px">representation-critic</span>
+          <span style="color:#555;font-size:10px">diagnosis</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Evaluates whether the visualization actually communicates the dynamics it models. Asks: can a viewer see how changing a patch changes a corridor? Returns three specific representational changes ranked by legibility impact. Run before every studio review.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#b8e04a;font-weight:bold;font-size:12px">theory-scout</span>
+          <span style="color:#555;font-size:10px">theory</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Finds the 2–3 most relevant theoretical frameworks for a specific model question (e.g. "how should patch permeability affect corridor width?") and translates them into computational terms. Flags where the literature is contested or silent. Feed output to flow-physics-translator.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#b8e04a;font-weight:bold;font-size:12px">flow-physics-translator</span>
+          <span style="color:#555;font-size:10px">theory → code</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Translates ecological concepts (corridor connectivity, resistance surfaces, percolation thresholds) into data structures and algorithms. Returns a recommended approach with rationale, a minimal code sketch, and key parameters to calibrate. Flags computational bottlenecks before you hit them.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#b8e04a;font-weight:bold;font-size:12px">flow-specialist</span>
+          <span style="color:#555;font-size:10px">hydrology</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Deep technical grounding in how water moves through heterogeneous landscapes — surface runoff, infiltration, subsurface lateral flow, patch-edge effects. Use when flow logic feels too simple or when outputs don't match physical intuition. Keeps advice implementation-ready.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#ffa84a;font-weight:bold;font-size:12px">scenario-logic-generator</span>
+          <span style="color:#555;font-size:10px">testing</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Generates 5–10 graduated what-if test scenarios ordered by complexity (single-patch edits → cascading multi-patch disturbances). Each scenario specifies the input change, expected output, and what a broken model response looks like. Use to build a validation suite before any major revision.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#7ab3ff;font-weight:bold;font-size:12px">design-fix</span>
+          <span style="color:#555;font-size:10px">roadmap</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Synthesizes outputs from all other agents into a prioritized development roadmap: immediate fixes (this week), medium-term restructuring, longer-term extensions. Each item includes root cause, minimum change, expected improvement, and a success criterion. Run before any dev sprint or crit prep.</p>
+      </div>
+
+    </div>
   `;
 
   infoModal.appendChild(infoPanel);
@@ -705,8 +870,108 @@ export function createUI(onUpdate) {
 
   return {
     controls,
-    updateMetrics: (peakFlow, sediment, connectivity) => {
-      metricsDiv.innerHTML = `Peak flow: ${(peakFlow ?? 0).toFixed(2)} m³/s | Sediment: ${(sediment ?? 0).toFixed(0)} | Connectivity: ${(connectivity ?? 0).toFixed(2)}`;
+    updateMetrics: ({ flowHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers }) => {
+      const ctx = sparklineCanvas.getContext('2d');
+      const W = sparklineCanvas.width;
+      const H = sparklineCanvas.height;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#0f0f12';
+      ctx.fillRect(0, 0, W, H);
+
+      if (flowHistory && flowHistory.length > 1) {
+        let maxVal = 0.001;
+        for (const v of flowHistory) { if (v > maxVal) maxVal = v; }
+        // Also include baseline peak in the y-scale so the marker stays in frame
+        if (baselineSnapshot?.peakFlow > maxVal) maxVal = baselineSnapshot.peakFlow;
+
+        // Shade area under curve
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(74, 158, 255, 0.12)';
+        ctx.moveTo(0, H);
+        for (let k = 0; k < flowHistory.length; k++) {
+          const x = (k / (flowHistory.length - 1)) * W;
+          const y = H - (flowHistory[k] / maxVal) * (H - 6) - 3;
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Intervention marker ticks (before the flow line so line sits on top)
+        if (interventionMarkers?.length > 0) {
+          for (const m of interventionMarkers) {
+            const x = (1 - m.framesAgo / 200) * W;
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(255, 210, 80, 0.55)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 2]);
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, H);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // Tiny patch label
+            ctx.fillStyle = 'rgba(255, 210, 80, 0.8)';
+            ctx.font = 'bold 8px system-ui';
+            ctx.fillText(m.patchKey.slice(0, 3), x + 2, 9);
+          }
+        }
+
+        // Flow line
+        ctx.beginPath();
+        ctx.strokeStyle = '#4a9eff';
+        ctx.lineWidth = 1.5;
+        for (let k = 0; k < flowHistory.length; k++) {
+          const x = (k / (flowHistory.length - 1)) * W;
+          const y = H - (flowHistory[k] / maxVal) * (H - 6) - 3;
+          k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Baseline peak dashed line
+        if (baselineSnapshot?.peakFlow > 0) {
+          const baseY = H - (baselineSnapshot.peakFlow / maxVal) * (H - 6) - 3;
+          ctx.beginPath();
+          ctx.strokeStyle = '#ff6b6b';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.moveTo(0, baseY);
+          ctx.lineTo(W, baseY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = '#ff6b6b';
+          ctx.font = '9px system-ui';
+          ctx.fillText('baseline', 3, Math.max(10, baseY - 2));
+        }
+      }
+
+      // Metrics text
+      let currentPeak = 0;
+      for (const v of (flowHistory ?? [])) { if (v > currentPeak) currentPeak = v; }
+      let text = `Peak: ${currentPeak.toFixed(2)} | Particles: ${sedimentCount ?? 0} | Conn: ${(connectivity ?? 0).toFixed(2)}`;
+
+      // Percentage delta vs baseline — more readable than raw Δ numbers
+      if (baselineSnapshot) {
+        const basePeak = baselineSnapshot.peakFlow ?? 0;
+        const baseConn = baselineSnapshot.connectivity ?? 0;
+        const deltaPeak = currentPeak - basePeak;
+        const deltaConn = (connectivity ?? 0) - baseConn;
+        const pctPeak = basePeak > 0.001 ? Math.round((deltaPeak / basePeak) * 100) : 0;
+        const pctConn = Math.abs(baseConn) > 0.01 ? Math.round((deltaConn / baseConn) * 100) : 0;
+        const peakColor = deltaPeak < 0 ? '#5c9' : '#e66';
+        const connColor = deltaConn > 0 ? '#5c9' : '#e66';
+        const peakArrow = deltaPeak < 0 ? '↓' : '↑';
+        const connArrow = deltaConn > 0 ? '↑' : '↓';
+        text += `<br><span style="color:${peakColor}">${peakArrow}${Math.abs(pctPeak)}% peak</span>`
+              + `<span style="color:#666"> &nbsp;·&nbsp; </span>`
+              + `<span style="color:${connColor}">${connArrow}${Math.abs(pctConn)}% conn vs baseline</span>`;
+        snapshotBtn.textContent = 'Clear Baseline';
+        snapshotBtn.style.background = '#7a3d3d';
+      } else {
+        snapshotBtn.textContent = 'Snapshot';
+        snapshotBtn.style.background = '#4a5a7d';
+      }
+
+      metricsText.innerHTML = text;
     },
   };
 }

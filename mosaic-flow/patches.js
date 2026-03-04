@@ -57,7 +57,7 @@ export const PATCH_PARAMS = {
   },
   [PATCH_TYPES.CORRIDOR]: {
     name: 'Corridor',
-    color: '#c47a5a',
+    color: '#b8e04a',
     manningN: 0.03,
     infiltration: 15,
     erodibility: 0.4,

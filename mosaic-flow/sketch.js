@@ -2,7 +2,7 @@
  * Main sketch: land mosaic grid, physics loop, visualization.
  */
 
-import { stepFlow, getElevation } from './flow.js';
+import { stepFlow, getElevation, flowWeights } from './flow.js';
 import { PATCH_TYPES, PATCH_PARAMS, DEFAULT_MATRIX } from './patches.js';
 import { createUI } from './ui.js';
 import { computeConnectivity } from './connectivity.js';
@@ -17,14 +17,68 @@ let elevations;
 let fluxes;
 let sedimentDepth;
 let particles = [];
-let peakFlow = 0;
 let sedimentCount = 0;
 let connectivity = 0;
+let flowHistory = [];
+let drainageContrib = null;
+let baselineSnapshot = null;
+let contributingArea = null;   // Uint8Array mask for right-click upstream highlight
+let interventionMarkers = [];  // { framesAgo, patchKey } logged when user paints while running
 let cellPx = 8;
 let canvasW = 0;
 let canvasH = 0;
 
 const patchKeys = Object.keys(PATCH_PARAMS);
+
+/** Parse a 6-digit hex color string to [r, g, b]. */
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [
+    parseInt(h.slice(0, 2), 16),
+    parseInt(h.slice(2, 4), 16),
+    parseInt(h.slice(4, 6), 16),
+  ];
+}
+
+/** Lerp a color toward its luminance (desaturate). factor=1 full color, 0=grayscale. */
+function desaturate(r, g, b, factor) {
+  const lum = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+  return [
+    Math.round(lum + (r - lum) * factor),
+    Math.round(lum + (g - lum) * factor),
+    Math.round(lum + (b - lum) * factor),
+  ];
+}
+
+/**
+ * BFS upstream from (targetI, targetJ) through the elevation field.
+ * Returns Uint8Array mask where 1 = cell drains to target.
+ */
+function computeContributingArea(targetI, targetJ) {
+  const mask = new Uint8Array(COLS * ROWS);
+  const queue = [[targetI, targetJ]];
+  mask[targetI * COLS + targetJ] = 1;
+
+  while (queue.length > 0) {
+    const [ci, cj] = queue.shift();
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        if (di === 0 && dj === 0) continue;
+        const ni = ci + di;
+        const nj = cj + dj;
+        if (ni < 0 || ni >= ROWS || nj < 0 || nj >= COLS) continue;
+        if (mask[ni * COLS + nj]) continue;
+        // Does (ni, nj) route any flow into (ci, cj)?
+        const weights = flowWeights(ni, nj, elevations, COLS, ROWS);
+        if (weights.some(w => w.ni === ci && w.nj === cj)) {
+          mask[ni * COLS + nj] = 1;
+          queue.push([ni, nj]);
+        }
+      }
+    }
+  }
+  return mask;
+}
 
 function initGrid() {
   patchGrid = new Uint8Array(COLS * ROWS);
@@ -66,6 +120,7 @@ function updateElevations() {
       }
     }
   }
+  contributingArea = null; // terrain changed, clear stale upstream mask
 }
 
 const sketch = (p) => {
@@ -73,6 +128,8 @@ const sketch = (p) => {
     resizeCanvas(p);
     const canvas = p.createCanvas(canvasW, canvasH);
     canvas.parent('mosaic-container');
+    // Prevent browser context menu so right-click can be used for contributing area
+    canvas.elt.addEventListener('contextmenu', e => e.preventDefault());
 
     p.windowResized = () => {
       resizeCanvas(p);
@@ -86,8 +143,11 @@ const sketch = (p) => {
         depths.fill(0);
         sedimentDepth.fill(0);
         particles.length = 0;
-        peakFlow = 0;
         sedimentCount = 0;
+        flowHistory = [];
+        drainageContrib = null;
+        baselineSnapshot = null;
+        interventionMarkers = [];
       } else if (msg === 'restore') {
         const wetlandIdx = patchKeys.indexOf('wetland');
         const forestIdx = patchKeys.indexOf('forest');
@@ -188,16 +248,21 @@ const sketch = (p) => {
             { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
             controls.rainfall,
             1,
-            { patchParams: PATCH_PARAMS, patchKeys }
+            { patchParams: PATCH_PARAMS, patchKeys },
+            sedimentDepth
           );
           depths = result.depths;
           fluxes = result.fluxes;
 
-          connectivity = computeConnectivity(depths, fluxes, patchGrid, COLS, ROWS);
+          const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
+          connectivity = connResult.connectivity;
+          drainageContrib = connResult.drainageContrib;
+
           spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
           advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
         }
 
+        // Total outflow across entire grid boundary for sparkline
         let totalOutflow = 0;
         for (let i = 0; i < ROWS; i++) {
           for (let j = 0; j < COLS; j++) {
@@ -208,9 +273,28 @@ const sketch = (p) => {
             totalOutflow += v * depths[idx];
           }
         }
-        peakFlow = Math.max(peakFlow, totalOutflow * 0.001);
-        sedimentCount = particles.filter(pp => pp.settled).length + particles.filter(pp => !pp.settled).length;
-        updateMetrics(peakFlow, sedimentCount, connectivity);
+        flowHistory.push(totalOutflow * 0.001);
+        if (flowHistory.length > 200) flowHistory.shift();
+
+        // Age out intervention markers
+        for (const m of interventionMarkers) m.framesAgo++;
+        interventionMarkers = interventionMarkers.filter(m => m.framesAgo <= 200);
+
+        sedimentCount = particles.length;
+
+        // Snapshot toggle
+        if (controls.requestSnapshot) {
+          if (baselineSnapshot) {
+            baselineSnapshot = null;
+          } else {
+            let peakVal = 0;
+            for (const v of flowHistory) { if (v > peakVal) peakVal = v; }
+            baselineSnapshot = { flowHistory: [...flowHistory], peakFlow: peakVal, connectivity };
+          }
+          controls.requestSnapshot = false;
+        }
+
+        updateMetrics({ flowHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers });
       }
     };
 
@@ -219,61 +303,122 @@ const sketch = (p) => {
 
   p.draw = () => {
     p.background(18, 18, 24);
+    const viewMode = window.mosaicControls?.viewMode ?? 'design';
 
+    // ── Layer 1: Patches + water overlay ────────────────────────────────────
     for (let i = 0; i < ROWS; i++) {
       for (let j = 0; j < COLS; j++) {
         const idx = i * COLS + j;
         const patchIdx = patchGrid[idx];
         const params = PATCH_PARAMS[patchKeys[patchIdx]] || PATCH_PARAMS.grass;
+        const [pr, pg, pb] = hexToRgb(params.color);
 
-        p.fill(params.color);
+        if (viewMode === 'design') {
+          p.fill(pr, pg, pb);
+        } else if (viewMode === 'flow') {
+          // Heavily desaturate so streamlines dominate
+          const [dr, dg, db] = desaturate(pr, pg, pb, 0.25);
+          p.fill(dr, dg, db, 180);
+        } else {
+          // sediment mode: patches fade back
+          const [dr, dg, db] = desaturate(pr, pg, pb, 0.5);
+          p.fill(dr, dg, db, 120);
+        }
         p.noStroke();
         p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
 
+        // Water: visible in design mode (tinted), faint in flow mode, hidden in sediment mode
         const h = depths[idx];
-        if (h > 0.0005) {
+        if (h > 0.0005 && viewMode !== 'sediment') {
           const alpha = Math.min(255, 160 + h * 3000);
-          p.fill(80, 130, 200, alpha);
-          p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
-        }
-
-        const vx = fluxes[idx * 2];
-        const vy = fluxes[idx * 2 + 1];
-        if (Math.abs(vx) > 0.001 || Math.abs(vy) > 0.001) {
-          const cx = j * cellPx + cellPx / 2;
-          const cy = i * cellPx + cellPx / 2;
-          const scale = 3;
-          p.stroke(255, 200, 100, 150);
-          p.strokeWeight(1);
-          p.line(cx, cy, cx + vx * scale, cy + vy * scale);
-        }
-      }
-    }
-
-    for (let i = 0; i < ROWS; i++) {
-      for (let j = 0; j < COLS; j++) {
-        const sd = sedimentDepth[i * COLS + j];
-        if (sd > 0) {
-          const alpha = Math.min(220, 80 + sd * 12);
-          p.fill(139, 90, 43, alpha);
-          p.noStroke();
+          if (viewMode === 'design') {
+            const wr = Math.round(80 * 0.7 + pr * 0.3);
+            const wg = Math.round(130 * 0.7 + pg * 0.3);
+            const wb = Math.round(200 * 0.7 + pb * 0.3);
+            p.fill(wr, wg, wb, alpha);
+          } else {
+            p.fill(80, 130, 200, Math.round(alpha * 0.35));
+          }
           p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
         }
       }
     }
 
-    for (const pt of particles) {
-      if (pt.settled) continue;
-      const size = 2;
-      p.fill(pt.color[0], pt.color[1], pt.color[2], 255);
+    // ── Layer 2: Sediment deposits ───────────────────────────────────────────
+    if (viewMode !== 'flow') {
       p.noStroke();
-      p.ellipse(pt.x * cellPx + cellPx / 2, pt.y * cellPx + cellPx / 2, size, size);
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          const sd = sedimentDepth[i * COLS + j];
+          if (sd > 0) {
+            const alpha = viewMode === 'sediment'
+              ? Math.min(240, 120 + sd * 20)
+              : Math.min(220, 80 + sd * 12);
+            p.fill(139, 90, 43, alpha);
+            p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+          }
+        }
+      }
     }
 
+    // ── Layer 3: Drainage heatmap ────────────────────────────────────────────
+    if (window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
+      let maxDC = 0;
+      for (let k = 0; k < drainageContrib.length; k++) {
+        if (drainageContrib[k] > maxDC) maxDC = drainageContrib[k];
+      }
+      if (maxDC > 0) {
+        p.noStroke();
+        for (let i = 0; i < ROWS; i++) {
+          for (let j = 0; j < COLS; j++) {
+            const idx = i * COLS + j;
+            const t = drainageContrib[idx] / maxDC;
+            if (t > 0.02) {
+              const alpha = Math.min(190, t * 220);
+              p.fill(255, Math.round(200 * (1 - t)), 0, alpha);
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+        }
+      }
+    }
+
+    // ── Layer 4: Streamlines (replaces per-cell arrows) ──────────────────────
+    if (viewMode !== 'sediment') {
+      drawStreamlines(p, viewMode);
+    }
+
+    // ── Layer 5: Contributing area highlight ─────────────────────────────────
+    if (contributingArea) {
+      p.noStroke();
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          if (contributingArea[i * COLS + j]) {
+            p.fill(255, 230, 50, 65);
+            p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+          }
+        }
+      }
+      // Highlight the clicked cell itself
+      // (the target is the brightest cell — it will be included in the mask)
+    }
+
+    // ── Layer 6: Particles ───────────────────────────────────────────────────
+    if (viewMode !== 'flow') {
+      for (const pt of particles) {
+        if (pt.settled) continue;
+        p.fill(pt.color[0], pt.color[1], pt.color[2], 255);
+        p.noStroke();
+        p.ellipse(pt.x * cellPx + cellPx / 2, pt.y * cellPx + cellPx / 2, 2, 2);
+      }
+    }
+
+    // ── Layer 7: Elevation contours ──────────────────────────────────────────
     if (window.mosaicControls?.showElevationLines && elevations) {
       drawElevationContours(p);
     }
 
+    // ── Brush cursor ─────────────────────────────────────────────────────────
     const brushRadius = (window.mosaicControls?.brushSize ?? 3) * cellPx;
     if (p.mouseX >= 0 && p.mouseX < canvasW && p.mouseY >= 0 && p.mouseY < canvasH) {
       p.noFill();
@@ -282,12 +427,74 @@ const sketch = (p) => {
       p.ellipse(p.mouseX, p.mouseY, brushRadius * 2, brushRadius * 2);
     }
 
-    p.fill(220, 220, 220);
-    p.textSize(Math.max(10, cellPx * 0.6));
+    // ── Help text ─────────────────────────────────────────────────────────────
+    p.fill(140, 140, 140);
+    p.textSize(Math.max(9, cellPx * 0.55));
     p.textAlign(p.LEFT, p.BOTTOM);
     p.noStroke();
-    p.text('Click to paint patches', 8, canvasH - 8);
+    p.text('Left: paint · Right: upstream area', 8, canvasH - 8);
   };
+
+  // ── Streamlines: seed-and-trace through flux field ────────────────────────
+  function drawStreamlines(p, viewMode) {
+    if (!fluxes) return;
+
+    // Seeds: grid every 12 cells — gives ~25 starting points
+    const seeds = [];
+    for (let i = 6; i < ROWS; i += 12) {
+      for (let j = 6; j < COLS; j += 12) {
+        seeds.push([i + 0.5, j + 0.5]);
+      }
+    }
+
+    const isFlow = viewMode === 'flow';
+    p.noFill();
+
+    for (const [sy, sx] of seeds) {
+      let x = sx;
+      let y = sy;
+      const maxSteps = 350;
+      const stepSize = 0.4;
+
+      // Collect segments with per-point discharge for width encoding
+      const pts = [{ x, y, discharge: 0 }];
+
+      for (let step = 0; step < maxSteps; step++) {
+        const j = Math.floor(x);
+        const i = Math.floor(y);
+        if (i < 0 || i >= ROWS || j < 0 || j >= COLS) break;
+
+        const idx = i * COLS + j;
+        const vx = fluxes[idx * 2];
+        const vy = fluxes[idx * 2 + 1];
+        const v = Math.sqrt(vx * vx + vy * vy);
+        if (v < 0.0006) break;
+
+        const h = depths ? depths[idx] : 0;
+        pts[pts.length - 1].discharge = v * h;
+
+        x += (vx / v) * stepSize;
+        y += (vy / v) * stepSize;
+        pts.push({ x, y, discharge: 0 });
+      }
+
+      if (pts.length < 2) continue;
+
+      // Draw each segment with width ∝ log(discharge)
+      for (let k = 1; k < pts.length; k++) {
+        const prev = pts[k - 1];
+        const curr = pts[k];
+        const d = prev.discharge;
+        // Log scale so thin=diffuse sheet, thick=concentrated channel
+        const w = Math.min(7, 0.5 + Math.log1p(d * 25000) * 1.8);
+        const alpha = isFlow ? Math.min(220, 80 + w * 20) : Math.min(90, 30 + w * 10);
+
+        p.stroke(100, 180, 255, alpha);
+        p.strokeWeight(w);
+        p.line(prev.x * cellPx, prev.y * cellPx, curr.x * cellPx, curr.y * cellPx);
+      }
+    }
+  }
 
   function drawElevationContours(p) {
     if (!elevations) return;
@@ -337,11 +544,23 @@ const sketch = (p) => {
 
   p.mousePressed = () => {
     if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
+    if (p.mouseButton === p.RIGHT) {
+      // Right-click: toggle contributing area for clicked cell
+      const j = Math.floor(p.mouseX / cellPx);
+      const i = Math.floor(p.mouseY / cellPx);
+      if (contributingArea) {
+        contributingArea = null;
+      } else {
+        contributingArea = computeContributingArea(i, j);
+      }
+      return false;
+    }
     paintAt(p.mouseX, p.mouseY);
   };
 
   p.mouseDragged = () => {
     if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
+    if (p.mouseButton === p.RIGHT) return; // don't paint on right-drag
     paintAt(p.mouseX, p.mouseY);
   };
 };
@@ -350,8 +569,10 @@ function paintAt(x, y) {
   const j = Math.floor(x / cellPx);
   const i = Math.floor(y / cellPx);
   const radius = window.mosaicControls?.brushSize ?? 3;
+  const ctrl = window.mosaicControls;
+
   if (i >= 0 && i < ROWS && j >= 0 && j < COLS) {
-    const key = window.mosaicControls?.activePatch ?? PATCH_TYPES.GRASS;
+    const key = ctrl?.activePatch ?? PATCH_TYPES.GRASS;
     const idx = Object.keys(PATCH_PARAMS).indexOf(key);
     if (idx >= 0) {
       for (let di = -radius; di <= radius; di++) {
@@ -359,11 +580,19 @@ function paintAt(x, y) {
           const ni = i + di;
           const nj = j + dj;
           if (ni >= 0 && ni < ROWS && nj >= 0 && nj < COLS) {
-            const dist = Math.sqrt(di * di + dj * dj);
-            if (dist <= radius) {
+            if (Math.sqrt(di * di + dj * dj) <= radius) {
               patchGrid[ni * COLS + nj] = idx;
             }
           }
+        }
+      }
+
+      // Record intervention marker when simulation is running.
+      // Debounce: only one marker per 3-frame window per patch type.
+      if (ctrl?.running) {
+        const recentSame = interventionMarkers.some(m => m.framesAgo < 3 && m.patchKey === key);
+        if (!recentSame) {
+          interventionMarkers.push({ framesAgo: 0, patchKey: key });
         }
       }
     }
