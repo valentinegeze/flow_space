@@ -25,7 +25,7 @@ Open `standalone.html` in a browser (or download it from GitHub). External scrip
 ## Features
 
 - **Site Analysis tab**: Geocode a location, draw a parcel on satellite imagery, load NLCD 2021 land cover (or a synthetic fallback), export data, and optionally mirror the simulation on the map
-- **Fire mode**: Spread simulation with per-patch fuel parameters (see UI)
+- **FireSweep tab**: Standalone 8-neighbor percolation lab (spread probability **p**, forest density **ρ**, phase transition near **p<sub>c</sub> ≈ 0.41**). Landscape-integrated fire on the Mosaic tab is on hold.
 - **Patch brush**: Paint forest, wetland, urban, grassland, bare soil, corridor, or open water patches
 - **Physics**: Manning's equation for overland flow, infiltration by patch type, steepest-descent routing
 - **Sediment particles**: Colored particles spawn in erodible patches, advect with flow, settle when velocity drops

@@ -53,7 +53,7 @@
     }
 
     /* ── View containers ── */
-    #mosaic-container, #site-analysis-container {
+    #mosaic-container, #site-analysis-container, #firesweep-container {
       position: fixed;
       top: 36px; left: 0; right: 0; bottom: 0;
     }
@@ -75,6 +75,11 @@
       display: none;
       z-index: 1;
     }
+
+    #firesweep-container {
+      display: none;
+      z-index: 1;
+    }
   </style>
 </head>
 <body>
@@ -83,6 +88,8 @@
     <button class="tab-btn active" data-tab="mosaic">Mosaic Design</button>
     <div class="tab-divider"></div>
     <button class="tab-btn" data-tab="site">◈ Site Analysis</button>
+    <div class="tab-divider"></div>
+    <button class="tab-btn" data-tab="firesweep">FireSweep</button>
     <span id="tab-title">Land Mosaic Flow Model</span>
   </div>
 
@@ -91,6 +98,9 @@
 
   <!-- Site analysis view (Leaflet map + parcel workflow) -->
   <div id="site-analysis-container"></div>
+
+  <!-- FireSweep percolation lab (dedicated tab) -->
+  <div id="firesweep-container"></div>
 
   <!-- Main simulation sketch -->
   <script>
@@ -117,13 +127,12 @@ const PATCH_TYPES = {
  * infiltration: mm/hr max infiltration rate
  * erodibility: 0-1, relative sediment contribution when eroded
  *
- * Fire parameters:
- * fuelLoad:    0-1; directly equivalent to density p in site-percolation theory.
- *              8-neighbor percolation threshold ≈ 0.41.
- *              Below threshold: fire burns out locally (subcritical).
- *              Above threshold: fire sweeps the landscape (supercritical).
- * burnDuration: how many fire-ticks a cell stays BURNING before going BURNED.
- *              Each fire-tick ≈ 150 ms at default speed.
+ * Fire parameters (FireSweep / site-percolation on 8-neighbors, p_c ≈ 0.41):
+ * fuelLoad:     Base ignition probability p for an unburned neighbor (before continuity).
+ *               Tuned near p_c so sparse / isolated cells are often subcritical (fire dies)
+ *               and clusters with nearby forest/grass become supercritical.
+ * crownSpreadOut: Multiplier for spread *from* this cell while it burns (crown / intensity).
+ * burnDuration:  Fire-ticks the cell stays BURNING (longer = slower to go dark; reads as fuel depth).
  */
 const PATCH_PARAMS = {
   [PATCH_TYPES.GRASS]: {
@@ -134,7 +143,8 @@ const PATCH_PARAMS = {
     erodibility: 0.3,
     etRate: 2.5,
     connectivityThreshold: 0.5,
-    fuelLoad: 0.70,    // supercritical — fire spreads through grassland
+    fuelLoad: 0.37,       // alone: below p_c; needs grass/forest neighbors (continuity)
+    crownSpreadOut: 1.0,
     burnDuration: 2,
   },
   [PATCH_TYPES.FOREST]: {
@@ -145,8 +155,9 @@ const PATCH_PARAMS = {
     erodibility: 0.05,
     etRate: 6.0,
     connectivityThreshold: 1.5,
-    fuelLoad: 1.0,     // always ignites; guaranteed percolation
-    burnDuration: 4,
+    fuelLoad: 0.28,       // lone trees: subcritical; dense canopy: neighbor boost pushes over p_c
+    crownSpreadOut: 1.38, // strong outgoing crown fire
+    burnDuration: 5,      // burns longer = slower advance through heavy fuel
   },
   [PATCH_TYPES.WETLAND]: {
     name: 'Wetland',
@@ -156,7 +167,8 @@ const PATCH_PARAMS = {
     erodibility: 0.1,
     etRate: 8.0,
     connectivityThreshold: 0.0,
-    fuelLoad: 0.05,    // strongly subcritical; acts as firebreak
+    fuelLoad: 0.02,       // firebreak / moisture — almost never carries
+    crownSpreadOut: 0.55,
     burnDuration: 1,
   },
   [PATCH_TYPES.BARE]: {
@@ -167,7 +179,8 @@ const PATCH_PARAMS = {
     erodibility: 0.9,
     etRate: 0.5,
     connectivityThreshold: 0.2,
-    fuelLoad: 0.18,    // subcritical; fire does not carry through bare soil
+    fuelLoad: 0.11,
+    crownSpreadOut: 0.74,
     burnDuration: 1,
   },
   [PATCH_TYPES.URBAN]: {
@@ -178,7 +191,8 @@ const PATCH_PARAMS = {
     erodibility: 0.2,
     etRate: 0.2,
     connectivityThreshold: 0.1,
-    fuelLoad: 0.32,    // subcritical; fire stops in built-up areas
+    fuelLoad: 0.21,       // below p_c — built fabric blocks sustained spread
+    crownSpreadOut: 0.66,
     burnDuration: 2,
   },
   [PATCH_TYPES.CORRIDOR]: {
@@ -189,7 +203,8 @@ const PATCH_PARAMS = {
     erodibility: 0.4,
     etRate: 1.5,
     connectivityThreshold: 0.3,
-    fuelLoad: 0.62,    // slightly supercritical; corridors can carry fire
+    fuelLoad: 0.39,       // near p_c — linear strips need connectivity to run
+    crownSpreadOut: 1.12,
     burnDuration: 2,
   },
   [PATCH_TYPES.WATER]: {
@@ -200,7 +215,8 @@ const PATCH_PARAMS = {
     erodibility: 0,
     etRate: 5.0,
     connectivityThreshold: 0.0,
-    fuelLoad: 0.0,     // no fuel
+    fuelLoad: 0.0,
+    crownSpreadOut: 0.0,
     burnDuration: 0,
   },
 };
@@ -690,31 +706,15 @@ function stepLBM(state, fluxes, depths, sedimentDepth, cols, rows) {
 
 /* ─── fire.js ─── */
 /**
- * fire.js — Phase-transition wildfire model (FireSweep style).
+ * fire.js — FireSweep-style phase-transition wildfire (8-neighbor site percolation, p_c ≈ 0.41).
  *
- * Cell states: UNBURNED → BURNING → BURNED
+ * UNBURNED → BURNING → BURNED. Each tick, burning cells try to ignite unburned neighbors.
  *
- * Spread mechanic (percolation):
- *   Each fire tick, every BURNING cell attempts to ignite each of its 8
- *   unburned neighbors exactly once. Spread probability P = fuelLoad_neighbor
- *   multiplied by optional wind and slope factors. This makes fuelLoad
- *   directly equivalent to the density parameter p in site-percolation theory.
- *
- *   Site-percolation threshold on a 2D square lattice:
- *     4-neighbor: p_c ≈ 0.593
- *     8-neighbor: p_c ≈ 0.407
- *
- *   Below p_c: fire burns out locally (subcritical).
- *   Above p_c: fire percolates across the landscape (supercritical).
- *   Near p_c:  fractal fire-front boundary, characteristic of phase transitions.
- *
- * Patch fuelLoad values are tuned so the interesting threshold falls between
- * urban (~0.32, subcritical) and corridor (~0.62, supercritical). Grassland
- * (0.70) and forest (1.0) are firmly supercritical; bare soil and wetland
- * are subcritical.
- *
- * Wind adds directional bias without shifting the percolation threshold.
- * Ember spotting creates long-range jumps (realistic firebrand behavior).
+ * P(ignite) = min(1, fuelLoad_target × continuity × wind × slope × crownSpreadOut_source)
+ * - fuelLoad: base p for that land use (tuned near p_c so sparse cells often go out).
+ * - continuity: 1 + weights×(#forest, #grass, #corridor neighbors of the *target* cell).
+ *   Isolated fuel = low continuity; embedded clusters push p above threshold (supercritical runs).
+ * - crownSpreadOut: stronger spread from crown fires (e.g. forest) vs weak from urban/wetland.
  */
 
 const FIRE = { UNBURNED: 0, BURNING: 1, BURNED: 2 };
@@ -722,6 +722,36 @@ const FIRE = { UNBURNED: 0, BURNING: 1, BURNED: 2 };
 // 8-directional neighbor offsets [drow, dcol]
 const DIRS   = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
 const IS_DIAG = [true,  false, true,  false, false,true,  false,true ];
+
+/** How much nearby same-landscape fuel raises P — models canopy / prairie continuity. */
+const W_FOREST = 0.11;
+const W_GRASS = 0.068;
+const W_CORRIDOR = 0.048;
+const CONTINUITY_CAP = 2.08;
+
+/**
+ * Count forest / grass / corridor neighbors (8-neighbor) of (r,c) for connectivity.
+ * Isolated cells get ~1.0; embedded clusters get >1, pushing p past p_c.
+ */
+function neighborContinuity(patchGrid, patchKeys, r, c, cols, rows) {
+  const kForest = patchKeys.indexOf('forest');
+  const kGrass = patchKeys.indexOf('grass');
+  const kCorridor = patchKeys.indexOf('corridor');
+  let nf = 0;
+  let ng = 0;
+  let nc = 0;
+  for (let d = 0; d < 8; d++) {
+    const ni = r + DIRS[d][0];
+    const nj = c + DIRS[d][1];
+    if (ni < 0 || ni >= rows || nj < 0 || nj >= cols) continue;
+    const pi = patchGrid[ni * cols + nj];
+    if (pi === kForest) nf++;
+    else if (pi === kGrass) ng++;
+    else if (pi === kCorridor) nc++;
+  }
+  const raw = 1 + W_FOREST * nf + W_GRASS * ng + W_CORRIDOR * nc;
+  return Math.min(CONTINUITY_CAP, raw);
+}
 
 function createFireState(cols, rows) {
   return {
@@ -737,14 +767,19 @@ function resetFireState(fs) {
   fs.embers = [];
 }
 
-/** Set a single cell alight. Safe to call from mouse handlers. */
-function igniteAt(fs, row, col, cols, rows) {
+/**
+ * Set a single cell alight. If patchParams is passed, cells with no fuel (e.g. open water) are skipped.
+ */
+function igniteAt(fs, row, col, cols, rows, patchGrid, patchKeys, patchParams) {
   if (row < 0 || row >= rows || col < 0 || col >= cols) return;
   const idx = row * cols + col;
-  if (fs.cell[idx] === FIRE.UNBURNED) {
-    fs.cell[idx] = FIRE.BURNING;
-    fs.age[idx]  = 0;
+  if (fs.cell[idx] !== FIRE.UNBURNED) return;
+  if (patchParams && patchKeys && patchGrid) {
+    const pp = patchParams[patchKeys[patchGrid[idx]]] || {};
+    if ((pp.fuelLoad ?? 0) <= 0) return;
   }
+  fs.cell[idx] = FIRE.BURNING;
+  fs.age[idx]  = 0;
 }
 
 /** Returns true if any cell is still burning. */
@@ -792,6 +827,10 @@ function stepFire(fs, patchGrid, patchKeys, patchParams,
         // (don't continue — still try to spread on the final tick)
       }
 
+      const srcParams = patchParams[patchKeys[patchGrid[idx]]] || {};
+      const crownOut = srcParams.crownSpreadOut ?? 1.0;
+      if (crownOut <= 0) continue;
+
       // ── Attempt spread to all 8 neighbors ──────────────────────────────────
       for (let d = 0; d < 8; d++) {
         const ni = r + DIRS[d][0];
@@ -805,24 +844,21 @@ function stepFire(fs, patchGrid, patchKeys, patchParams,
         if (fuel <= 0) continue;
         if (depths[nidx] > 0.012) continue; // standing water suppresses ignition
 
+        const continuity = neighborContinuity(patchGrid, patchKeys, ni, nj, cols, rows);
+
         // ── Wind factor ───────────────────────────────────────────────────────
-        // Dot product of spread direction with wind push vector.
-        // Downwind neighbors get a boost; upwind get a penalty.
         const scale  = IS_DIAG[d] ? 1.414 : 1.0;
-        const sdx    = DIRS[d][1] / scale;  // east  component of spread dir
-        const sdy    = DIRS[d][0] / scale;  // south component
-        const dot    = sdx * wx + sdy * wy; // −1 … +1
+        const sdx    = DIRS[d][1] / scale;
+        const sdy    = DIRS[d][0] / scale;
+        const dot    = sdx * wx + sdy * wy;
         const windF  = Math.max(0.06, 1 + dot * windSpeed * 0.45);
 
         // ── Slope factor ──────────────────────────────────────────────────────
-        // Fire climbs hills faster; slight penalty going downhill.
         const dElev  = elevations[nidx] - elevations[idx];
         const slopeF = Math.max(0.2, 1 + dElev * 14);
 
-        // ── Core percolation step ─────────────────────────────────────────────
-        // P = fuelLoad × windFactor × slopeFactor
-        // fuelLoad IS the density parameter p — this is the FireSweep model.
-        const P = Math.min(1.0, fuel * windF * slopeF);
+        // P = p_target × continuity × wind × slope × crown from source cell
+        const P = Math.min(1.0, fuel * continuity * windF * slopeF * crownOut);
         if (Math.random() < P) {
           nextCell[nidx] = FIRE.BURNING;
           nextAge[nidx]  = 0;
@@ -861,7 +897,9 @@ function stepFire(fs, patchGrid, patchKeys, patchParams,
         const lp   = patchParams[patchKeys[patchGrid[lidx]]] || {};
         const fuel = lp.fuelLoad ?? 0;
         if (nextCell[lidx] === FIRE.UNBURNED && fuel > 0 && depths[lidx] < 0.01) {
-          if (Math.random() < 0.4 * fuel) {
+          const cont = neighborContinuity(patchGrid, patchKeys, li, lj, cols, rows);
+          const pEmber = Math.min(1.0, 0.42 * fuel * cont);
+          if (Math.random() < pEmber) {
             nextCell[lidx] = FIRE.BURNING;
             nextAge[lidx]  = 0;
           }
@@ -1860,13 +1898,13 @@ function _approxAreaKm2(bounds) {
 
 function getPatchBehavior(key, p) {
   const behaviors = {
-    [PATCH_TYPES.GRASS]: 'Moderate roughness; holds some water; moderate sediment source.',
-    [PATCH_TYPES.FOREST]: 'High roughness, slow flow; high infiltration; traps sediment.',
-    [PATCH_TYPES.WETLAND]: 'Moderate flow; very high infiltration (holds water); low erosion.',
-    [PATCH_TYPES.BARE]: 'Low roughness, fast flow; minimal infiltration; high sediment source.',
-    [PATCH_TYPES.URBAN]: 'Very low roughness, fast runoff; nearly no infiltration; some sediment.',
-    [PATCH_TYPES.CORRIDOR]: 'Channel-like; fast flow, moderate infiltration; conveys water and sediment.',
-    [PATCH_TYPES.WATER]: 'Water body; very low roughness, conveys flow; no infiltration or erosion.',
+    [PATCH_TYPES.GRASS]: 'Moderate roughness; holds some water. Fire: needs fuel continuity to sustain spread.',
+    [PATCH_TYPES.FOREST]: 'High roughness, slow flow. Fire: crown spread strong; spread faster when trees cluster.',
+    [PATCH_TYPES.WETLAND]: 'Moderate flow; very high infiltration. Fire: strong firebreak (low spread).',
+    [PATCH_TYPES.BARE]: 'Low roughness, fast flow. Fire: sparse fuel, slow / patchy burn.',
+    [PATCH_TYPES.URBAN]: 'Fast runoff. Fire: spread usually stalls (built resistance).',
+    [PATCH_TYPES.CORRIDOR]: 'Channel-like hydraulics. Fire: linear fuel—needs connectivity to run.',
+    [PATCH_TYPES.WATER]: 'Open water: no fuel; cannot ignite.',
   };
   return behaviors[key] || '—';
 }
@@ -2037,61 +2075,10 @@ function createUI(onUpdate) {
 
   menuContent.appendChild(patchSection);
 
-  // ── Simulation Mode toggle ──────────────────────────────────────────────────
-  const simModeSection = document.createElement('div');
-  simModeSection.style.cssText = 'margin-top: 12px; margin-bottom: 4px;';
-  simModeSection.innerHTML = '<strong>Simulation Mode</strong>';
-
-  const simModeDiv = document.createElement('div');
-  simModeDiv.style.cssText = 'display: flex; gap: 6px; margin-top: 6px;';
-
-  const waterModeBtn = document.createElement('button');
-  waterModeBtn.textContent = 'Water / Sediment';
-  waterModeBtn.style.cssText = `
-    flex: 1; padding: 6px 8px; border: 1px solid #4a9eff;
-    background: #4a9eff30; color: #4a9eff;
-    border-radius: 4px; cursor: pointer; font-size: 12px;
-  `;
-
-  const fireModeBtn = document.createElement('button');
-  fireModeBtn.textContent = 'Fire';
-  fireModeBtn.style.cssText = `
-    flex: 1; padding: 6px 8px; border: 1px solid #444;
-    background: transparent; color: #888;
-    border-radius: 4px; cursor: pointer; font-size: 12px;
-  `;
-
-  const refreshSimModeBtns = () => {
-    const isWater = controls.simMode === 'water';
-    waterModeBtn.style.background = isWater ? '#4a9eff30' : 'transparent';
-    waterModeBtn.style.color = isWater ? '#4a9eff' : '#888';
-    waterModeBtn.style.borderColor = isWater ? '#4a9eff' : '#444';
-    fireModeBtn.style.background = !isWater ? '#ff6a2030' : 'transparent';
-    fireModeBtn.style.color = !isWater ? '#ff8c42' : '#888';
-    fireModeBtn.style.borderColor = !isWater ? '#ff6a20' : '#444';
-  };
-
-  waterModeBtn.addEventListener('click', () => {
-    controls.simMode = 'water';
-    controls.activeTool = 'paint';
-    refreshSimModeBtns();
-    if (typeof fireSectionDiv !== 'undefined') fireSectionDiv.style.display = 'none';
-    if (typeof waterSourceSectionDiv !== 'undefined') waterSourceSectionDiv.style.display = 'block';
-    onUpdate?.();
-  });
-  fireModeBtn.addEventListener('click', () => {
-    controls.simMode = 'fire';
-    controls.activeTool = 'paint';
-    refreshSimModeBtns();
-    if (typeof fireSectionDiv !== 'undefined') fireSectionDiv.style.display = 'block';
-    if (typeof waterSourceSectionDiv !== 'undefined') waterSourceSectionDiv.style.display = 'none';
-    onUpdate?.();
-  });
-
-  simModeDiv.appendChild(waterModeBtn);
-  simModeDiv.appendChild(fireModeBtn);
-  simModeSection.appendChild(simModeDiv);
-  menuContent.appendChild(simModeSection);
+  const fireSweepNote = document.createElement('div');
+  fireSweepNote.style.cssText = 'margin-top:12px;padding:9px 11px;background:rgba(255,106,32,0.07);border:1px solid rgba(255,106,32,0.22);border-radius:6px;font-size:11px;color:#9a9a9a;line-height:1.5';
+  fireSweepNote.innerHTML = 'Pure <strong style="color:#ff9a60">percolation</strong> wildfire (FireSweep-style) lives on the <strong style="color:#ccc">FireSweep</strong> tab. This panel is water / sediment only for now.';
+  menuContent.appendChild(fireSweepNote);
 
   const rainLabel = document.createElement('label');
   rainLabel.innerHTML = `Rainfall: <span id="rain-val">${controls.rainfall}</span> mm/hr`;
@@ -2133,7 +2120,6 @@ function createUI(onUpdate) {
   waterSourceToolBtn.addEventListener('click', () => {
     controls.activeTool = controls.activeTool === 'water-source' ? 'paint' : 'water-source';
     refreshWaterSourceBtn();
-    if (typeof igniteToolBtn !== 'undefined') refreshIgniteBtn();
   });
   waterSourceSectionDiv.appendChild(waterSourceToolBtn);
 
@@ -2169,76 +2155,6 @@ function createUI(onUpdate) {
   clearSourcesBtn.addEventListener('click', () => onUpdate?.('clear-sources'));
   waterSourceSectionDiv.appendChild(clearSourcesBtn);
   menuContent.appendChild(waterSourceSectionDiv);
-
-  // ── Fire Controls section ───────────────────────────────────────────────────
-  var fireSectionDiv = document.createElement('div');
-  fireSectionDiv.style.cssText = 'margin-top: 12px; display: none;';
-  fireSectionDiv.innerHTML = '<strong>Fire Controls</strong>';
-
-  var igniteToolBtn = document.createElement('button');
-  igniteToolBtn.textContent = 'Ignite Tool';
-  igniteToolBtn.style.cssText = `
-    display: block; width: 100%; margin-top: 6px; padding: 6px 10px;
-    border: 1px solid #ff6a20; background: transparent; color: #ff8c42;
-    border-radius: 4px; cursor: pointer; font-size: 12px;
-  `;
-  const refreshIgniteBtn = () => {
-    const active = controls.activeTool === 'ignite';
-    igniteToolBtn.style.background = active ? '#ff6a2040' : 'transparent';
-    igniteToolBtn.style.fontWeight = active ? 'bold' : 'normal';
-  };
-  igniteToolBtn.addEventListener('click', () => {
-    controls.activeTool = controls.activeTool === 'ignite' ? 'paint' : 'ignite';
-    refreshIgniteBtn();
-    refreshWaterSourceBtn();
-  });
-  fireSectionDiv.appendChild(igniteToolBtn);
-
-  const windAngleLabelEl = document.createElement('label');
-  windAngleLabelEl.innerHTML = `Wind direction: <span id="wind-angle-val">${controls.windAngle}</span>&deg;`;
-  windAngleLabelEl.style.cssText = 'display: block; margin-top: 8px; font-size: 12px;';
-  const windAngleSlider = document.createElement('input');
-  windAngleSlider.type = 'range';
-  windAngleSlider.min = 0;
-  windAngleSlider.max = 360;
-  windAngleSlider.step = 5;
-  windAngleSlider.value = controls.windAngle;
-  windAngleSlider.style.width = '100%';
-  windAngleSlider.addEventListener('input', () => {
-    controls.windAngle = Number(windAngleSlider.value);
-    document.getElementById('wind-angle-val').textContent = controls.windAngle;
-    onUpdate?.();
-  });
-  fireSectionDiv.appendChild(windAngleLabelEl);
-  fireSectionDiv.appendChild(windAngleSlider);
-
-  const windSpeedLabelEl = document.createElement('label');
-  windSpeedLabelEl.innerHTML = `Wind speed: <span id="wind-speed-val">${controls.windSpeed}</span>`;
-  windSpeedLabelEl.style.cssText = 'display: block; margin-top: 6px; font-size: 12px;';
-  const windSpeedSlider = document.createElement('input');
-  windSpeedSlider.type = 'range';
-  windSpeedSlider.min = 0;
-  windSpeedSlider.max = 5;
-  windSpeedSlider.step = 0.1;
-  windSpeedSlider.value = controls.windSpeed;
-  windSpeedSlider.style.width = '100%';
-  windSpeedSlider.addEventListener('input', () => {
-    controls.windSpeed = Number(windSpeedSlider.value);
-    document.getElementById('wind-speed-val').textContent = controls.windSpeed.toFixed(1);
-    onUpdate?.();
-  });
-  fireSectionDiv.appendChild(windSpeedLabelEl);
-  fireSectionDiv.appendChild(windSpeedSlider);
-
-  const clearFireBtn = document.createElement('button');
-  clearFireBtn.textContent = 'Clear Fire';
-  clearFireBtn.style.cssText = `
-    margin-top: 6px; padding: 5px 10px; background: #5a3030;
-    color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;
-  `;
-  clearFireBtn.addEventListener('click', () => onUpdate?.('clear-fire'));
-  fireSectionDiv.appendChild(clearFireBtn);
-  menuContent.appendChild(fireSectionDiv);
 
   const topoSection = document.createElement('div');
   topoSection.style.marginTop = '12px';
@@ -2544,7 +2460,6 @@ const elevations = await loadDemFile(file, targetCols, targetRows);
     { id: 'design', label: 'Design', title: 'Full patch colors with water overlay' },
     { id: 'flow',   label: 'Flow',   title: 'Desaturated patches, prominent streamlines' },
     { id: 'sediment', label: 'Sediment', title: 'Amplified sediment deposition view' },
-    { id: 'fire', label: 'Fire', title: 'Fire spread states and ember particles' },
   ];
   const viewBtns = viewModes.map(({ id, label, title }) => {
     const btn = document.createElement('button');
@@ -2767,6 +2682,9 @@ const elevations = await loadDemFile(file, targetCols, targetRows);
       </thead>
       <tbody>${patchTable}</tbody>
     </table>
+
+    <h3 style="margin-top:28px;font-size:14px;border-top:1px solid #333;padding-top:20px">FireSweep tab</h3>
+    <p style="font-size:12px;color:#ccc;line-height:1.55">Use the <strong>FireSweep</strong> tab for a dedicated pure percolation model (sliders for <strong>p</strong> and forest density <strong>ρ</strong>). The mosaic view below is hydrology-focused; integrated landscape fire is paused while that lab is refined.</p>
 
     <h3 style="margin-top:28px;font-size:14px;border-top:1px solid #333;padding-top:20px">Agent system</h3>
     <p style="color:#888;font-size:12px;margin-bottom:14px">This model is developed with a set of specialized Claude agents. Each agent has a focused role and persistent memory across sessions. Invoke them from the Claude Code CLI inside this project directory.</p>
@@ -3219,6 +3137,24 @@ const sketch = (p) => {
         fireTickAccum = 0;
       } else if (msg === 'clear-sources') {
         waterSources = [];
+      } else if (msg === 'sim-fire') {
+        depths.fill(0);
+        fluxes.fill(0);
+        sedimentDepth.fill(0);
+        particles.length = 0;
+        waterSources = [];
+        floodRect = null;
+        chartHistory = [];
+        drainageContrib = null;
+        connectivity = 0;
+        lbmState = null;
+        if (fireState) resetFireState(fireState);
+        fireTickAccum = 0;
+        updateElevations();
+      } else if (msg === 'sim-water') {
+        if (fireState) resetFireState(fireState);
+        fireTickAccum = 0;
+        updateElevations();
       } else if (msg === 'import' && data) {
         const grid = data.patchGrid;
         if (Array.isArray(grid) && grid.length === COLS * ROWS) {
@@ -3249,97 +3185,95 @@ const sketch = (p) => {
     updateElevations(); // apply initial DEM from controls
 
     const runLoop = () => {
-      if (controls.running) {
+      if (!controls.running) return;
+
+      // Fire mode: only wildfire spread — no rainfall, flow, or sediment
+      if (controls.simMode === 'fire') {
         const mult = Math.max(1, controls.speedMultiplier ?? 1);
-        let stepET = 0;
-        let stepTotalOutflow = 0;
-        for (let s = 0; s < mult; s++) {
-          const result = stepFlow(
-            { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
-            controls.rainfall,
-            1,
-            { patchParams: PATCH_PARAMS, patchKeys },
-            sedimentDepth
-          );
-          depths = result.depths;
-          fluxes = result.fluxes;
-          stepET += result.totalET ?? 0;
-          stepTotalOutflow += result.totalOutflow ?? 0;
-
-          const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
-          connectivity = connResult.connectivity;
-          drainageContrib = connResult.drainageContrib;
-
-          spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
-          advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
-        }
-
-        // LBM density field step (runs after Manning to consume final fluxes/depths)
-        if (controls.useLBM) {
-          if (!lbmState) lbmState = createLBMState(COLS, ROWS);
-          stepLBM(lbmState, fluxes, depths, sedimentDepth, COLS, ROWS);
-        }
-
-        // ── Compute 4 chart metrics ─────────────────────────────────────────
-        const rainfallVol = (controls.rainfall / 1000 / 3600) * mult * COLS * ROWS;
-
-        // 1. Runoff ratio: boundary outflow / rainfall input
-        const runoffRatio = rainfallVol > 0.0001 ? Math.min(1, stepTotalOutflow / rainfallVol) : 0;
-
-        // 2. Mean water storage (mean depth across all cells, m)
-        let depthSum = 0;
-        for (let k = 0; k < depths.length; k++) depthSum += depths[k];
-        const meanStorage = depthSum / (COLS * ROWS);
-
-        // 3. ET fraction: ET lost / rainfall input
-        const etFraction = rainfallVol > 0.0001 ? Math.min(1, stepET / rainfallVol) : 0;
-
-        // 4. Flow concentration: fraction of cells carrying 80% of flux
-        let concentration = 0;
-        if (drainageContrib) {
-          const dc = Array.from(drainageContrib).sort((a, b) => b - a);
-          let cum = 0, count = 0;
-          for (let k = 0; k < dc.length; k++) {
-            cum += dc[k]; count++;
-            if (cum >= 0.8) break;
-          }
-          concentration = 1 - count / (COLS * ROWS);
-        }
-
-        chartHistory.push({ runoffRatio, meanStorage, etFraction, concentration });
-        if (chartHistory.length > 300) chartHistory.shift();
-
-        // Fire simulation — ticks on its own slower clock so the CA
-        // front is visually legible regardless of the water-flow speed.
-        // One fire tick every ~150 ms (every 1.5 run-loop calls on average).
-        if (controls.simMode === 'fire' && fireState) {
-          fireTickAccum += 1;
-          if (fireTickAccum >= 1.5) {
-            fireTickAccum -= 1.5;
-            stepFire(
-              fireState, patchGrid, patchKeys, PATCH_PARAMS,
-              elevations,
-              controls.windAngle ?? 225,
-              controls.windSpeed ?? 2.5,
-              depths, COLS, ROWS
-            );
+        if (fireState) {
+          for (let s = 0; s < mult; s++) {
+            fireTickAccum += 1;
+            if (fireTickAccum >= 1.5) {
+              fireTickAccum -= 1.5;
+              stepFire(
+                fireState, patchGrid, patchKeys, PATCH_PARAMS,
+                elevations,
+                controls.windAngle ?? 225,
+                controls.windSpeed ?? 2.5,
+                depths, COLS, ROWS
+              );
+            }
           }
         }
-
-        // Persistent water sources — inject water each step
-        for (const src of waterSources) {
-          const rate = controls.waterSourceRate ?? 0.04;
-          depths[src.i * COLS + src.j] += rate;
-        }
-
-        // Age out intervention markers
-        for (const m of interventionMarkers) m.framesAgo++;
-        interventionMarkers = interventionMarkers.filter(m => m.framesAgo <= 300);
-
-        sedimentCount = particles.length;
-
+        sedimentCount = 0;
         updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
+        return;
       }
+
+      // Water / flood mode: hydrology + sediment
+      const mult = Math.max(1, controls.speedMultiplier ?? 1);
+      let stepET = 0;
+      let stepTotalOutflow = 0;
+      for (let s = 0; s < mult; s++) {
+        const result = stepFlow(
+          { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
+          controls.rainfall,
+          1,
+          { patchParams: PATCH_PARAMS, patchKeys },
+          sedimentDepth
+        );
+        depths = result.depths;
+        fluxes = result.fluxes;
+        stepET += result.totalET ?? 0;
+        stepTotalOutflow += result.totalOutflow ?? 0;
+
+        const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
+        connectivity = connResult.connectivity;
+        drainageContrib = connResult.drainageContrib;
+
+        spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
+        advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
+      }
+
+      if (controls.useLBM) {
+        if (!lbmState) lbmState = createLBMState(COLS, ROWS);
+        stepLBM(lbmState, fluxes, depths, sedimentDepth, COLS, ROWS);
+      }
+
+      const rainfallVol = (controls.rainfall / 1000 / 3600) * mult * COLS * ROWS;
+      const runoffRatio = rainfallVol > 0.0001 ? Math.min(1, stepTotalOutflow / rainfallVol) : 0;
+
+      let depthSum = 0;
+      for (let k = 0; k < depths.length; k++) depthSum += depths[k];
+      const meanStorage = depthSum / (COLS * ROWS);
+
+      const etFraction = rainfallVol > 0.0001 ? Math.min(1, stepET / rainfallVol) : 0;
+
+      let concentration = 0;
+      if (drainageContrib) {
+        const dc = Array.from(drainageContrib).sort((a, b) => b - a);
+        let cum = 0, count = 0;
+        for (let k = 0; k < dc.length; k++) {
+          cum += dc[k]; count++;
+          if (cum >= 0.8) break;
+        }
+        concentration = 1 - count / (COLS * ROWS);
+      }
+
+      chartHistory.push({ runoffRatio, meanStorage, etFraction, concentration });
+      if (chartHistory.length > 300) chartHistory.shift();
+
+      for (const src of waterSources) {
+        const rate = controls.waterSourceRate ?? 0.04;
+        depths[src.i * COLS + src.j] += rate;
+      }
+
+      for (const m of interventionMarkers) m.framesAgo++;
+      interventionMarkers = interventionMarkers.filter(m => m.framesAgo <= 300);
+
+      sedimentCount = particles.length;
+
+      updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
     };
 
     setInterval(runLoop, 100);
@@ -3348,6 +3282,7 @@ const sketch = (p) => {
   p.draw = () => {
     p.background(18, 18, 24);
     const viewMode = window.mosaicControls?.viewMode ?? 'design';
+    const fireSim = window.mosaicControls?.simMode === 'fire';
 
     // ── Layer 1: Patches + water overlay ────────────────────────────────────
     for (let i = 0; i < ROWS; i++) {
@@ -3371,9 +3306,9 @@ const sketch = (p) => {
         p.noStroke();
         p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
 
-        // Water: visible in design mode (tinted), faint in flow mode, hidden in sediment mode
+        // Water: not shown in fire mode (hydrology is off)
         const h = depths[idx];
-        if (h > 0.0005 && viewMode !== 'sediment') {
+        if (!fireSim && h > 0.0005 && viewMode !== 'sediment') {
           const alpha = Math.min(255, 120 + Math.log1p(h * 3000) * 42);
           if (viewMode === 'design') {
             const wr = Math.round(80 * 0.7 + pr * 0.3);
@@ -3389,7 +3324,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 2: Sediment deposits ───────────────────────────────────────────
-    if (viewMode !== 'flow') {
+    if (!fireSim && viewMode !== 'flow') {
       p.noStroke();
       for (let i = 0; i < ROWS; i++) {
         for (let j = 0; j < COLS; j++) {
@@ -3406,7 +3341,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 3: Drainage heatmap ────────────────────────────────────────────
-    if (window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
+    if (!fireSim && window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
       let maxDC = 0;
       for (let k = 0; k < drainageContrib.length; k++) {
         if (drainageContrib[k] > maxDC) maxDC = drainageContrib[k];
@@ -3428,12 +3363,12 @@ const sketch = (p) => {
     }
 
     // ── Layer 4: Streamlines (replaces per-cell arrows) ──────────────────────
-    if (viewMode !== 'sediment') {
+    if (!fireSim && viewMode !== 'sediment') {
       drawStreamlines(p, viewMode);
     }
 
     // ── Layer 5: Contributing area highlight ─────────────────────────────────
-    if (contributingArea) {
+    if (!fireSim && contributingArea) {
       p.noStroke();
       for (let i = 0; i < ROWS; i++) {
         for (let j = 0; j < COLS; j++) {
@@ -3448,7 +3383,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 6: Particles or LBM density field ──────────────────────────────
-    if (window.mosaicControls?.useLBM && lbmState) {
+    if (!fireSim && window.mosaicControls?.useLBM && lbmState) {
       // LBM mode: render smooth density fields for water and sediment
       let maxW = 0, maxS = 0;
       for (let k = 0; k < lbmState.rhoWater.length; k++) {
@@ -3475,7 +3410,7 @@ const sketch = (p) => {
           }
         }
       }
-    } else if (viewMode !== 'flow') {
+    } else if (!fireSim && viewMode !== 'flow') {
       // Particle mode (default)
       for (const pt of particles) {
         if (pt.settled) continue;
@@ -3497,7 +3432,9 @@ const sketch = (p) => {
             p.fill(38, 26, 20, 210);
             p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
           } else if (state === FIRE.BURNING) {
-            const intens = fireState.intensity[idx];
+            const pParams = PATCH_PARAMS[patchKeys[patchGrid[idx]]] || PATCH_PARAMS.grass;
+            const burnLife = Math.max(1, pParams.burnDuration ?? 3);
+            const intens = Math.min(1, (fireState.age[idx] + 0.5) / burnLife);
             const flicker = 0.6 + 0.4 * Math.sin(fc * 0.22 + idx * 0.051);
             const brightness = intens * flicker;
             // Outer orange layer
@@ -3506,24 +3443,26 @@ const sketch = (p) => {
             // Inner bright core
             const cx = (j + 0.5) * cellPx;
             const cy = (i + 0.5) * cellPx;
-            const r = cellPx * 0.45 * brightness;
+            const r = cellPx * 0.45 * Math.max(0.15, brightness);
             p.fill(255, Math.floor(200 + brightness * 55), 40, Math.floor(brightness * 190));
             p.ellipse(cx, cy, r * 2, r * 2);
           }
         }
       }
 
-      // Embers
+      // Embers (age/life from fire.js — not .progress)
       p.noStroke();
       for (const e of fireState.embers) {
-        const alpha = Math.floor((1 - e.progress) * 230);
-        p.fill(255, 140 + Math.floor(Math.random() * 50), 0, alpha);
+        const life = Math.max(1, e.life ?? 1);
+        const t = Math.min(1, (e.age ?? 0) / life);
+        const alpha = Math.floor((1 - t) * 230);
+        p.fill(255, 140 + Math.floor(Math.sin(fc * 0.3 + e.x) * 30), 0, alpha);
         p.ellipse(e.x * cellPx, e.y * cellPx, 3.5, 3.5);
       }
     }
 
     // ── Layer 9: Water source markers ────────────────────────────────────────
-    if (waterSources.length > 0) {
+    if (!fireSim && waterSources.length > 0) {
       const pulse = 0.5 + 0.5 * Math.sin(p.frameCount * 0.14);
       for (const src of waterSources) {
         const cx = (src.j + 0.5) * cellPx;
@@ -3539,8 +3478,8 @@ const sketch = (p) => {
       p.noStroke();
     }
 
-    // ── Layer 10: Flood-area preview (shift+drag) ─────────────────────────────
-    if (floodRect) {
+    // ── Layer 10: Flood-area preview (shift+drag) — water mode only
+    if (floodRect && !fireSim) {
       const { r0, c0, r1, c1 } = floodRect;
       const x0 = Math.min(c0, c1) * cellPx;
       const y0 = Math.min(r0, r1) * cellPx;
@@ -3574,7 +3513,7 @@ const sketch = (p) => {
     p.noStroke();
     const toolHints = {
       paint: 'Left: paint \u00B7 Right: upstream \u00B7 Shift+drag: flood area',
-      ignite: 'Click to ignite · Right: upstream',
+      ignite: 'Click/drag to ignite · Run to spread · Paint: edit land cover',
       'water-source': 'Click to toggle water source · Right: upstream',
     };
     const hint = toolHints[window.mosaicControls?.activeTool ?? 'paint'] ?? '';
@@ -3751,7 +3690,7 @@ const sketch = (p) => {
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (activeTool === 'ignite') {
-      if (fireState) igniteAt(fireState, i, j, COLS, ROWS);
+      if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (activeTool === 'water-source') {
       const existing = waterSources.findIndex(s => s.i === i && s.j === j);
       if (existing >= 0) {
@@ -3759,7 +3698,11 @@ const sketch = (p) => {
       } else {
         waterSources.push({ i, j });
       }
-    } else if (activeTool === 'paint' && p.keyIsDown(p.SHIFT)) {
+    } else if (
+      activeTool === 'paint' &&
+      p.keyIsDown(p.SHIFT) &&
+      window.mosaicControls?.simMode !== 'fire'
+    ) {
       floodRect = { r0: i, c0: j, r1: i, c1: j };
     } else {
       paintAt(p.mouseX, p.mouseY);
@@ -3773,7 +3716,7 @@ const sketch = (p) => {
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (activeTool === 'ignite') {
-      if (fireState) igniteAt(fireState, i, j, COLS, ROWS);
+      if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (floodRect) {
       floodRect.r1 = i;
       floodRect.c1 = j;
@@ -3783,7 +3726,7 @@ const sketch = (p) => {
   };
 
   p.mouseReleased = () => {
-    if (floodRect) {
+    if (floodRect && window.mosaicControls?.simMode !== 'fire') {
       const rMin = Math.min(floodRect.r0, floodRect.r1);
       const rMax = Math.max(floodRect.r0, floodRect.r1);
       const cMin = Math.min(floodRect.c0, floodRect.c1);

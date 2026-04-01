@@ -210,6 +210,24 @@ const sketch = (p) => {
         fireTickAccum = 0;
       } else if (msg === 'clear-sources') {
         waterSources = [];
+      } else if (msg === 'sim-fire') {
+        depths.fill(0);
+        fluxes.fill(0);
+        sedimentDepth.fill(0);
+        particles.length = 0;
+        waterSources = [];
+        floodRect = null;
+        chartHistory = [];
+        drainageContrib = null;
+        connectivity = 0;
+        lbmState = null;
+        if (fireState) resetFireState(fireState);
+        fireTickAccum = 0;
+        updateElevations();
+      } else if (msg === 'sim-water') {
+        if (fireState) resetFireState(fireState);
+        fireTickAccum = 0;
+        updateElevations();
       } else if (msg === 'import' && data) {
         const grid = data.patchGrid;
         if (Array.isArray(grid) && grid.length === COLS * ROWS) {
@@ -240,97 +258,95 @@ const sketch = (p) => {
     updateElevations(); // apply initial DEM from controls
 
     const runLoop = () => {
-      if (controls.running) {
+      if (!controls.running) return;
+
+      // Fire mode: only wildfire spread — no rainfall, flow, or sediment
+      if (controls.simMode === 'fire') {
         const mult = Math.max(1, controls.speedMultiplier ?? 1);
-        let stepET = 0;
-        let stepTotalOutflow = 0;
-        for (let s = 0; s < mult; s++) {
-          const result = stepFlow(
-            { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
-            controls.rainfall,
-            1,
-            { patchParams: PATCH_PARAMS, patchKeys },
-            sedimentDepth
-          );
-          depths = result.depths;
-          fluxes = result.fluxes;
-          stepET += result.totalET ?? 0;
-          stepTotalOutflow += result.totalOutflow ?? 0;
-
-          const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
-          connectivity = connResult.connectivity;
-          drainageContrib = connResult.drainageContrib;
-
-          spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
-          advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
-        }
-
-        // LBM density field step (runs after Manning to consume final fluxes/depths)
-        if (controls.useLBM) {
-          if (!lbmState) lbmState = createLBMState(COLS, ROWS);
-          stepLBM(lbmState, fluxes, depths, sedimentDepth, COLS, ROWS);
-        }
-
-        // ── Compute 4 chart metrics ─────────────────────────────────────────
-        const rainfallVol = (controls.rainfall / 1000 / 3600) * mult * COLS * ROWS;
-
-        // 1. Runoff ratio: boundary outflow / rainfall input
-        const runoffRatio = rainfallVol > 0.0001 ? Math.min(1, stepTotalOutflow / rainfallVol) : 0;
-
-        // 2. Mean water storage (mean depth across all cells, m)
-        let depthSum = 0;
-        for (let k = 0; k < depths.length; k++) depthSum += depths[k];
-        const meanStorage = depthSum / (COLS * ROWS);
-
-        // 3. ET fraction: ET lost / rainfall input
-        const etFraction = rainfallVol > 0.0001 ? Math.min(1, stepET / rainfallVol) : 0;
-
-        // 4. Flow concentration: fraction of cells carrying 80% of flux
-        let concentration = 0;
-        if (drainageContrib) {
-          const dc = Array.from(drainageContrib).sort((a, b) => b - a);
-          let cum = 0, count = 0;
-          for (let k = 0; k < dc.length; k++) {
-            cum += dc[k]; count++;
-            if (cum >= 0.8) break;
-          }
-          concentration = 1 - count / (COLS * ROWS);
-        }
-
-        chartHistory.push({ runoffRatio, meanStorage, etFraction, concentration });
-        if (chartHistory.length > 300) chartHistory.shift();
-
-        // Fire simulation — ticks on its own slower clock so the CA
-        // front is visually legible regardless of the water-flow speed.
-        // One fire tick every ~150 ms (every 1.5 run-loop calls on average).
-        if (controls.simMode === 'fire' && fireState) {
-          fireTickAccum += 1;
-          if (fireTickAccum >= 1.5) {
-            fireTickAccum -= 1.5;
-            stepFire(
-              fireState, patchGrid, patchKeys, PATCH_PARAMS,
-              elevations,
-              controls.windAngle ?? 225,
-              controls.windSpeed ?? 2.5,
-              depths, COLS, ROWS
-            );
+        if (fireState) {
+          for (let s = 0; s < mult; s++) {
+            fireTickAccum += 1;
+            if (fireTickAccum >= 1.5) {
+              fireTickAccum -= 1.5;
+              stepFire(
+                fireState, patchGrid, patchKeys, PATCH_PARAMS,
+                elevations,
+                controls.windAngle ?? 225,
+                controls.windSpeed ?? 2.5,
+                depths, COLS, ROWS
+              );
+            }
           }
         }
-
-        // Persistent water sources — inject water each step
-        for (const src of waterSources) {
-          const rate = controls.waterSourceRate ?? 0.04;
-          depths[src.i * COLS + src.j] += rate;
-        }
-
-        // Age out intervention markers
-        for (const m of interventionMarkers) m.framesAgo++;
-        interventionMarkers = interventionMarkers.filter(m => m.framesAgo <= 300);
-
-        sedimentCount = particles.length;
-
+        sedimentCount = 0;
         updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
+        return;
       }
+
+      // Water / flood mode: hydrology + sediment
+      const mult = Math.max(1, controls.speedMultiplier ?? 1);
+      let stepET = 0;
+      let stepTotalOutflow = 0;
+      for (let s = 0; s < mult; s++) {
+        const result = stepFlow(
+          { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
+          controls.rainfall,
+          1,
+          { patchParams: PATCH_PARAMS, patchKeys },
+          sedimentDepth
+        );
+        depths = result.depths;
+        fluxes = result.fluxes;
+        stepET += result.totalET ?? 0;
+        stepTotalOutflow += result.totalOutflow ?? 0;
+
+        const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
+        connectivity = connResult.connectivity;
+        drainageContrib = connResult.drainageContrib;
+
+        spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
+        advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
+      }
+
+      if (controls.useLBM) {
+        if (!lbmState) lbmState = createLBMState(COLS, ROWS);
+        stepLBM(lbmState, fluxes, depths, sedimentDepth, COLS, ROWS);
+      }
+
+      const rainfallVol = (controls.rainfall / 1000 / 3600) * mult * COLS * ROWS;
+      const runoffRatio = rainfallVol > 0.0001 ? Math.min(1, stepTotalOutflow / rainfallVol) : 0;
+
+      let depthSum = 0;
+      for (let k = 0; k < depths.length; k++) depthSum += depths[k];
+      const meanStorage = depthSum / (COLS * ROWS);
+
+      const etFraction = rainfallVol > 0.0001 ? Math.min(1, stepET / rainfallVol) : 0;
+
+      let concentration = 0;
+      if (drainageContrib) {
+        const dc = Array.from(drainageContrib).sort((a, b) => b - a);
+        let cum = 0, count = 0;
+        for (let k = 0; k < dc.length; k++) {
+          cum += dc[k]; count++;
+          if (cum >= 0.8) break;
+        }
+        concentration = 1 - count / (COLS * ROWS);
+      }
+
+      chartHistory.push({ runoffRatio, meanStorage, etFraction, concentration });
+      if (chartHistory.length > 300) chartHistory.shift();
+
+      for (const src of waterSources) {
+        const rate = controls.waterSourceRate ?? 0.04;
+        depths[src.i * COLS + src.j] += rate;
+      }
+
+      for (const m of interventionMarkers) m.framesAgo++;
+      interventionMarkers = interventionMarkers.filter(m => m.framesAgo <= 300);
+
+      sedimentCount = particles.length;
+
+      updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
     };
 
     setInterval(runLoop, 100);
@@ -339,6 +355,7 @@ const sketch = (p) => {
   p.draw = () => {
     p.background(18, 18, 24);
     const viewMode = window.mosaicControls?.viewMode ?? 'design';
+    const fireSim = window.mosaicControls?.simMode === 'fire';
 
     // ── Layer 1: Patches + water overlay ────────────────────────────────────
     for (let i = 0; i < ROWS; i++) {
@@ -354,6 +371,26 @@ const sketch = (p) => {
           // Heavily desaturate so streamlines dominate
           const [dr, dg, db] = desaturate(pr, pg, pb, 0.25);
           p.fill(dr, dg, db, 180);
+        } else if (viewMode === 'fuel') {
+          // Fuel-risk heatmap: fuelLoad → color. Percolation threshold ≈ 0.41.
+          // Below threshold: blue→green. Above: yellow→red.
+          const fuel = params.fuelLoad ?? 0;
+          const PC = 0.41;
+          let fr, fg, fb;
+          if (fuel <= 0) {
+            fr = 40; fg = 100; fb = 200; // water / no fuel: deep blue
+          } else if (fuel < PC) {
+            const t = fuel / PC;
+            fr = Math.round(30  + t * 200);   // 30→230
+            fg = Math.round(120 + t * 130);   // 120→250
+            fb = Math.round(200 - t * 200);   // 200→0
+          } else {
+            const t = (fuel - PC) / (1 - PC);
+            fr = 255;
+            fg = Math.round(250 - t * 250);   // 250→0
+            fb = 0;
+          }
+          p.fill(fr, fg, fb);
         } else {
           // sediment mode: patches fade back
           const [dr, dg, db] = desaturate(pr, pg, pb, 0.5);
@@ -362,9 +399,9 @@ const sketch = (p) => {
         p.noStroke();
         p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
 
-        // Water: visible in design mode (tinted), faint in flow mode, hidden in sediment mode
+        // Water: not shown in fire mode (hydrology is off)
         const h = depths[idx];
-        if (h > 0.0005 && viewMode !== 'sediment') {
+        if (!fireSim && h > 0.0005 && viewMode !== 'sediment') {
           const alpha = Math.min(255, 120 + Math.log1p(h * 3000) * 42);
           if (viewMode === 'design') {
             const wr = Math.round(80 * 0.7 + pr * 0.3);
@@ -380,7 +417,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 2: Sediment deposits ───────────────────────────────────────────
-    if (viewMode !== 'flow') {
+    if (!fireSim && viewMode !== 'flow') {
       p.noStroke();
       for (let i = 0; i < ROWS; i++) {
         for (let j = 0; j < COLS; j++) {
@@ -397,7 +434,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 3: Drainage heatmap ────────────────────────────────────────────
-    if (window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
+    if (!fireSim && window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
       let maxDC = 0;
       for (let k = 0; k < drainageContrib.length; k++) {
         if (drainageContrib[k] > maxDC) maxDC = drainageContrib[k];
@@ -419,12 +456,12 @@ const sketch = (p) => {
     }
 
     // ── Layer 4: Streamlines (replaces per-cell arrows) ──────────────────────
-    if (viewMode !== 'sediment') {
+    if (!fireSim && viewMode !== 'sediment') {
       drawStreamlines(p, viewMode);
     }
 
     // ── Layer 5: Contributing area highlight ─────────────────────────────────
-    if (contributingArea) {
+    if (!fireSim && contributingArea) {
       p.noStroke();
       for (let i = 0; i < ROWS; i++) {
         for (let j = 0; j < COLS; j++) {
@@ -439,7 +476,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 6: Particles or LBM density field ──────────────────────────────
-    if (window.mosaicControls?.useLBM && lbmState) {
+    if (!fireSim && window.mosaicControls?.useLBM && lbmState) {
       // LBM mode: render smooth density fields for water and sediment
       let maxW = 0, maxS = 0;
       for (let k = 0; k < lbmState.rhoWater.length; k++) {
@@ -466,7 +503,7 @@ const sketch = (p) => {
           }
         }
       }
-    } else if (viewMode !== 'flow') {
+    } else if (!fireSim && viewMode !== 'flow') {
       // Particle mode (default)
       for (const pt of particles) {
         if (pt.settled) continue;
@@ -488,7 +525,9 @@ const sketch = (p) => {
             p.fill(38, 26, 20, 210);
             p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
           } else if (state === FIRE.BURNING) {
-            const intens = fireState.intensity[idx];
+            const pParams = PATCH_PARAMS[patchKeys[patchGrid[idx]]] || PATCH_PARAMS.grass;
+            const burnLife = Math.max(1, pParams.burnDuration ?? 3);
+            const intens = Math.min(1, (fireState.age[idx] + 0.5) / burnLife);
             const flicker = 0.6 + 0.4 * Math.sin(fc * 0.22 + idx * 0.051);
             const brightness = intens * flicker;
             // Outer orange layer
@@ -497,24 +536,26 @@ const sketch = (p) => {
             // Inner bright core
             const cx = (j + 0.5) * cellPx;
             const cy = (i + 0.5) * cellPx;
-            const r = cellPx * 0.45 * brightness;
+            const r = cellPx * 0.45 * Math.max(0.15, brightness);
             p.fill(255, Math.floor(200 + brightness * 55), 40, Math.floor(brightness * 190));
             p.ellipse(cx, cy, r * 2, r * 2);
           }
         }
       }
 
-      // Embers
+      // Embers (age/life from fire.js — not .progress)
       p.noStroke();
       for (const e of fireState.embers) {
-        const alpha = Math.floor((1 - e.progress) * 230);
-        p.fill(255, 140 + Math.floor(Math.random() * 50), 0, alpha);
+        const life = Math.max(1, e.life ?? 1);
+        const t = Math.min(1, (e.age ?? 0) / life);
+        const alpha = Math.floor((1 - t) * 230);
+        p.fill(255, 140 + Math.floor(Math.sin(fc * 0.3 + e.x) * 30), 0, alpha);
         p.ellipse(e.x * cellPx, e.y * cellPx, 3.5, 3.5);
       }
     }
 
     // ── Layer 9: Water source markers ────────────────────────────────────────
-    if (waterSources.length > 0) {
+    if (!fireSim && waterSources.length > 0) {
       const pulse = 0.5 + 0.5 * Math.sin(p.frameCount * 0.14);
       for (const src of waterSources) {
         const cx = (src.j + 0.5) * cellPx;
@@ -530,8 +571,8 @@ const sketch = (p) => {
       p.noStroke();
     }
 
-    // ── Layer 10: Flood-area preview (shift+drag) ─────────────────────────────
-    if (floodRect) {
+    // ── Layer 10: Flood-area preview (shift+drag) — water mode only
+    if (floodRect && !fireSim) {
       const { r0, c0, r1, c1 } = floodRect;
       const x0 = Math.min(c0, c1) * cellPx;
       const y0 = Math.min(r0, r1) * cellPx;
@@ -558,6 +599,45 @@ const sketch = (p) => {
       p.ellipse(p.mouseX, p.mouseY, brushRadius * 2, brushRadius * 2);
     }
 
+    // ── Wind compass (fire mode only) ────────────────────────────────────────
+    if (fireSim) {
+      const wAngle = window.mosaicControls?.windAngle ?? 225;
+      const wSpeed = window.mosaicControls?.windSpeed ?? 2.5;
+      const cx = canvasW - 36, cy = canvasH - 36, cr = 22;
+      // Background circle
+      p.noStroke();
+      p.fill(20, 20, 28, 180);
+      p.ellipse(cx, cy, cr * 2 + 8, cr * 2 + 8);
+      p.stroke(80, 80, 90);
+      p.strokeWeight(1);
+      p.noFill();
+      p.ellipse(cx, cy, cr * 2, cr * 2);
+      // Wind arrow: points in the direction wind is blowing TOWARD
+      const rad2 = (wAngle * Math.PI) / 180;
+      const wx2 = Math.sin(rad2), wy2 = -Math.cos(rad2);
+      const len = cr * 0.72 * Math.min(1, wSpeed / 3.5 + 0.25);
+      p.stroke(255, 160, 60, 200);
+      p.strokeWeight(2);
+      p.line(cx - wx2 * len * 0.55, cy - wy2 * len * 0.55, cx + wx2 * len, cy + wy2 * len);
+      // Arrowhead
+      const tipX = cx + wx2 * len, tipY = cy + wy2 * len;
+      const px3 = -wy2, py3 = wx2;
+      const al = 6, aw = 3.5;
+      p.fill(255, 160, 60, 200);
+      p.noStroke();
+      p.triangle(
+        tipX, tipY,
+        tipX - wx2 * al + px3 * aw, tipY - wy2 * al + py3 * aw,
+        tipX - wx2 * al - px3 * aw, tipY - wy2 * al - py3 * aw
+      );
+      // Speed label
+      p.fill(200, 200, 200, 180);
+      p.noStroke();
+      p.textSize(9);
+      p.textAlign(p.CENTER, p.CENTER);
+      p.text(`${wSpeed.toFixed(1)}`, cx, cy + cr + 9);
+    }
+
     // ── Help text ─────────────────────────────────────────────────────────────
     p.fill(140, 140, 140);
     p.textSize(Math.max(9, cellPx * 0.55));
@@ -565,8 +645,8 @@ const sketch = (p) => {
     p.noStroke();
     const toolHints = {
       paint: 'Left: paint \u00B7 Right: upstream \u00B7 Shift+drag: flood area',
-      ignite: 'Click to ignite · Right: upstream',
-      'water-source': 'Click to toggle water source · Right: upstream',
+      ignite: 'Click/drag to ignite \u00B7 Run to spread \u00B7 Paint: edit land cover',
+      'water-source': 'Click to toggle water source \u00B7 Right: upstream',
     };
     const hint = toolHints[window.mosaicControls?.activeTool ?? 'paint'] ?? '';
     p.text(hint, 8, canvasH - 8);
@@ -742,7 +822,7 @@ const sketch = (p) => {
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (activeTool === 'ignite') {
-      if (fireState) igniteAt(fireState, i, j, COLS, ROWS);
+      if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (activeTool === 'water-source') {
       const existing = waterSources.findIndex(s => s.i === i && s.j === j);
       if (existing >= 0) {
@@ -750,7 +830,11 @@ const sketch = (p) => {
       } else {
         waterSources.push({ i, j });
       }
-    } else if (activeTool === 'paint' && p.keyIsDown(p.SHIFT)) {
+    } else if (
+      activeTool === 'paint' &&
+      p.keyIsDown(p.SHIFT) &&
+      window.mosaicControls?.simMode !== 'fire'
+    ) {
       floodRect = { r0: i, c0: j, r1: i, c1: j };
     } else {
       paintAt(p.mouseX, p.mouseY);
@@ -764,7 +848,7 @@ const sketch = (p) => {
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (activeTool === 'ignite') {
-      if (fireState) igniteAt(fireState, i, j, COLS, ROWS);
+      if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (floodRect) {
       floodRect.r1 = i;
       floodRect.c1 = j;
@@ -774,7 +858,7 @@ const sketch = (p) => {
   };
 
   p.mouseReleased = () => {
-    if (floodRect) {
+    if (floodRect && window.mosaicControls?.simMode !== 'fire') {
       const rMin = Math.min(floodRect.r0, floodRect.r1);
       const rMax = Math.max(floodRect.r0, floodRect.r1);
       const cMin = Math.min(floodRect.c0, floodRect.c1);

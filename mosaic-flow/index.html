@@ -53,7 +53,7 @@
     }
 
     /* ── View containers ── */
-    #mosaic-container, #site-analysis-container {
+    #mosaic-container, #site-analysis-container, #firesweep-container {
       position: fixed;
       top: 36px; left: 0; right: 0; bottom: 0;
     }
@@ -75,6 +75,11 @@
       display: none;
       z-index: 1;
     }
+
+    #firesweep-container {
+      display: none;
+      z-index: 1;
+    }
   </style>
 </head>
 <body>
@@ -83,6 +88,8 @@
     <button class="tab-btn active" data-tab="mosaic">Mosaic Design</button>
     <div class="tab-divider"></div>
     <button class="tab-btn" data-tab="site">◈ Site Analysis</button>
+    <div class="tab-divider"></div>
+    <button class="tab-btn" data-tab="firesweep">FireSweep</button>
     <span id="tab-title">Land Mosaic Flow Model</span>
   </div>
 
@@ -92,30 +99,47 @@
   <!-- Site analysis view (Leaflet map + parcel workflow) -->
   <div id="site-analysis-container"></div>
 
+  <!-- FireSweep percolation lab (dedicated tab) -->
+  <div id="firesweep-container"></div>
+
   <!-- Main simulation sketch -->
   <script type="module" src="./sketch.js"></script>
 
   <!-- Tab switching + parcel analysis init -->
   <script type="module">
     import { initParcelAnalysis, onTabActivated, stopSimOverlay } from './parcel-analysis.js';
+    import { initFireSweepTab, pauseFireSweep, onFireSweepTabActivated } from './firesweep-tab.js';
 
-    const mosaicEl  = document.getElementById('mosaic-container');
-    const siteEl    = document.getElementById('site-analysis-container');
-    const tabBtns   = document.querySelectorAll('.tab-btn');
+    const mosaicEl    = document.getElementById('mosaic-container');
+    const siteEl      = document.getElementById('site-analysis-container');
+    const firesweepEl = document.getElementById('firesweep-container');
+    const tabBtns     = document.querySelectorAll('.tab-btn');
+
+    function hideAllPanes() {
+      mosaicEl.style.display = 'none';
+      siteEl.style.display = 'none';
+      firesweepEl.style.display = 'none';
+    }
 
     tabBtns.forEach(btn => {
       btn.addEventListener('click', () => {
         tabBtns.forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
 
-        if (btn.dataset.tab === 'mosaic') {
+        const tab = btn.dataset.tab;
+        hideAllPanes();
+        pauseFireSweep();
+
+        if (tab === 'mosaic') {
           mosaicEl.style.display = 'flex';
-          siteEl.style.display = 'none';
           stopSimOverlay();
-        } else {
-          mosaicEl.style.display = 'none';
-          siteEl.style.display = 'block';  // must be explicit — CSS default is none
+        } else if (tab === 'site') {
+          siteEl.style.display = 'block';
           onTabActivated();
+        } else if (tab === 'firesweep') {
+          firesweepEl.style.display = 'block';
+          initFireSweepTab('firesweep-container');
+          onFireSweepTabActivated();
         }
       });
     });
