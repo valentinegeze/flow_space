@@ -24,9 +24,9 @@ export function createUI(onUpdate) {
     slopeAngle: 270,
     slopeMagnitude: 0.01,
     running: false,
-    elevationMode: 'slope',
+    elevationMode: 'dem',
     demElevations: null,
-    showElevationLines: false,
+    showElevationLines: true,
     showDrainageHeatmap: false,
     useLBM: false,
     viewMode: 'design',
@@ -34,7 +34,11 @@ export function createUI(onUpdate) {
     menuExpanded: true,
     brushSize: 3,
     speedMultiplier: 1,
-    requestSnapshot: false,
+    simMode: 'water',        // 'water' | 'fire'
+    windAngle: 225,          // compass degrees 0=N, 90=E
+    windSpeed: 2.5,          // 0–5
+    activeTool: 'paint',     // 'paint' | 'ignite' | 'water-source'
+    waterSourceRate: 0.04,   // meters of water added per step per source cell
   };
 
   const mosaicContainer = document.getElementById('mosaic-container');
@@ -179,6 +183,62 @@ export function createUI(onUpdate) {
 
   menuContent.appendChild(patchSection);
 
+  // ── Simulation Mode toggle ──────────────────────────────────────────────────
+  const simModeSection = document.createElement('div');
+  simModeSection.style.cssText = 'margin-top: 12px; margin-bottom: 4px;';
+  simModeSection.innerHTML = '<strong>Simulation Mode</strong>';
+
+  const simModeDiv = document.createElement('div');
+  simModeDiv.style.cssText = 'display: flex; gap: 6px; margin-top: 6px;';
+
+  const waterModeBtn = document.createElement('button');
+  waterModeBtn.textContent = 'Water / Sediment';
+  waterModeBtn.style.cssText = `
+    flex: 1; padding: 6px 8px; border: 1px solid #4a9eff;
+    background: #4a9eff30; color: #4a9eff;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+
+  const fireModeBtn = document.createElement('button');
+  fireModeBtn.textContent = 'Fire';
+  fireModeBtn.style.cssText = `
+    flex: 1; padding: 6px 8px; border: 1px solid #444;
+    background: transparent; color: #888;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+
+  const refreshSimModeBtns = () => {
+    const isWater = controls.simMode === 'water';
+    waterModeBtn.style.background = isWater ? '#4a9eff30' : 'transparent';
+    waterModeBtn.style.color = isWater ? '#4a9eff' : '#888';
+    waterModeBtn.style.borderColor = isWater ? '#4a9eff' : '#444';
+    fireModeBtn.style.background = !isWater ? '#ff6a2030' : 'transparent';
+    fireModeBtn.style.color = !isWater ? '#ff8c42' : '#888';
+    fireModeBtn.style.borderColor = !isWater ? '#ff6a20' : '#444';
+  };
+
+  waterModeBtn.addEventListener('click', () => {
+    controls.simMode = 'water';
+    controls.activeTool = 'paint';
+    refreshSimModeBtns();
+    if (typeof fireSectionDiv !== 'undefined') fireSectionDiv.style.display = 'none';
+    if (typeof waterSourceSectionDiv !== 'undefined') waterSourceSectionDiv.style.display = 'block';
+    onUpdate?.();
+  });
+  fireModeBtn.addEventListener('click', () => {
+    controls.simMode = 'fire';
+    controls.activeTool = 'paint';
+    refreshSimModeBtns();
+    if (typeof fireSectionDiv !== 'undefined') fireSectionDiv.style.display = 'block';
+    if (typeof waterSourceSectionDiv !== 'undefined') waterSourceSectionDiv.style.display = 'none';
+    onUpdate?.();
+  });
+
+  simModeDiv.appendChild(waterModeBtn);
+  simModeDiv.appendChild(fireModeBtn);
+  simModeSection.appendChild(simModeDiv);
+  menuContent.appendChild(simModeSection);
+
   const rainLabel = document.createElement('label');
   rainLabel.innerHTML = `Rainfall: <span id="rain-val">${controls.rainfall}</span> mm/hr`;
   rainLabel.style.display = 'block';
@@ -199,108 +259,147 @@ export function createUI(onUpdate) {
   menuContent.appendChild(rainLabel);
   menuContent.appendChild(rainSlider);
 
+  // ── Water Sources section ───────────────────────────────────────────────────
+  var waterSourceSectionDiv = document.createElement('div');
+  waterSourceSectionDiv.style.cssText = 'margin-top: 12px;';
+  waterSourceSectionDiv.innerHTML = '<strong>Water Sources</strong>';
+
+  const waterSourceToolBtn = document.createElement('button');
+  waterSourceToolBtn.textContent = 'Point Source';
+  waterSourceToolBtn.style.cssText = `
+    display: block; width: 100%; margin-top: 6px; padding: 6px 10px;
+    border: 1px solid #4a9eff; background: transparent; color: #4a9eff;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  const refreshWaterSourceBtn = () => {
+    const active = controls.activeTool === 'water-source';
+    waterSourceToolBtn.style.background = active ? '#4a9eff40' : 'transparent';
+    waterSourceToolBtn.style.fontWeight = active ? 'bold' : 'normal';
+  };
+  waterSourceToolBtn.addEventListener('click', () => {
+    controls.activeTool = controls.activeTool === 'water-source' ? 'paint' : 'water-source';
+    refreshWaterSourceBtn();
+    if (typeof igniteToolBtn !== 'undefined') refreshIgniteBtn();
+  });
+  waterSourceSectionDiv.appendChild(waterSourceToolBtn);
+
+  const floodHint = document.createElement('div');
+  floodHint.textContent = 'Shift+drag on canvas to flood area';
+  floodHint.style.cssText = 'font-size: 10px; color: #888; margin-top: 4px;';
+  waterSourceSectionDiv.appendChild(floodHint);
+
+  const wsRateLabel = document.createElement('label');
+  wsRateLabel.innerHTML = `Source rate: <span id="ws-rate-val">${controls.waterSourceRate}</span> m/step`;
+  wsRateLabel.style.cssText = 'display: block; margin-top: 6px; font-size: 12px;';
+  const wsRateSlider = document.createElement('input');
+  wsRateSlider.type = 'range';
+  wsRateSlider.min = 0.01;
+  wsRateSlider.max = 0.2;
+  wsRateSlider.step = 0.01;
+  wsRateSlider.value = controls.waterSourceRate;
+  wsRateSlider.style.width = '100%';
+  wsRateSlider.addEventListener('input', () => {
+    controls.waterSourceRate = Number(wsRateSlider.value);
+    document.getElementById('ws-rate-val').textContent = controls.waterSourceRate.toFixed(2);
+    onUpdate?.();
+  });
+  waterSourceSectionDiv.appendChild(wsRateLabel);
+  waterSourceSectionDiv.appendChild(wsRateSlider);
+
+  const clearSourcesBtn = document.createElement('button');
+  clearSourcesBtn.textContent = 'Clear Sources';
+  clearSourcesBtn.style.cssText = `
+    margin-top: 6px; padding: 5px 10px; background: #555;
+    color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  clearSourcesBtn.addEventListener('click', () => onUpdate?.('clear-sources'));
+  waterSourceSectionDiv.appendChild(clearSourcesBtn);
+  menuContent.appendChild(waterSourceSectionDiv);
+
+  // ── Fire Controls section ───────────────────────────────────────────────────
+  var fireSectionDiv = document.createElement('div');
+  fireSectionDiv.style.cssText = 'margin-top: 12px; display: none;';
+  fireSectionDiv.innerHTML = '<strong>Fire Controls</strong>';
+
+  var igniteToolBtn = document.createElement('button');
+  igniteToolBtn.textContent = 'Ignite Tool';
+  igniteToolBtn.style.cssText = `
+    display: block; width: 100%; margin-top: 6px; padding: 6px 10px;
+    border: 1px solid #ff6a20; background: transparent; color: #ff8c42;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  const refreshIgniteBtn = () => {
+    const active = controls.activeTool === 'ignite';
+    igniteToolBtn.style.background = active ? '#ff6a2040' : 'transparent';
+    igniteToolBtn.style.fontWeight = active ? 'bold' : 'normal';
+  };
+  igniteToolBtn.addEventListener('click', () => {
+    controls.activeTool = controls.activeTool === 'ignite' ? 'paint' : 'ignite';
+    refreshIgniteBtn();
+    refreshWaterSourceBtn();
+  });
+  fireSectionDiv.appendChild(igniteToolBtn);
+
+  const windAngleLabelEl = document.createElement('label');
+  windAngleLabelEl.innerHTML = `Wind direction: <span id="wind-angle-val">${controls.windAngle}</span>&deg;`;
+  windAngleLabelEl.style.cssText = 'display: block; margin-top: 8px; font-size: 12px;';
+  const windAngleSlider = document.createElement('input');
+  windAngleSlider.type = 'range';
+  windAngleSlider.min = 0;
+  windAngleSlider.max = 360;
+  windAngleSlider.step = 5;
+  windAngleSlider.value = controls.windAngle;
+  windAngleSlider.style.width = '100%';
+  windAngleSlider.addEventListener('input', () => {
+    controls.windAngle = Number(windAngleSlider.value);
+    document.getElementById('wind-angle-val').textContent = controls.windAngle;
+    onUpdate?.();
+  });
+  fireSectionDiv.appendChild(windAngleLabelEl);
+  fireSectionDiv.appendChild(windAngleSlider);
+
+  const windSpeedLabelEl = document.createElement('label');
+  windSpeedLabelEl.innerHTML = `Wind speed: <span id="wind-speed-val">${controls.windSpeed}</span>`;
+  windSpeedLabelEl.style.cssText = 'display: block; margin-top: 6px; font-size: 12px;';
+  const windSpeedSlider = document.createElement('input');
+  windSpeedSlider.type = 'range';
+  windSpeedSlider.min = 0;
+  windSpeedSlider.max = 5;
+  windSpeedSlider.step = 0.1;
+  windSpeedSlider.value = controls.windSpeed;
+  windSpeedSlider.style.width = '100%';
+  windSpeedSlider.addEventListener('input', () => {
+    controls.windSpeed = Number(windSpeedSlider.value);
+    document.getElementById('wind-speed-val').textContent = controls.windSpeed.toFixed(1);
+    onUpdate?.();
+  });
+  fireSectionDiv.appendChild(windSpeedLabelEl);
+  fireSectionDiv.appendChild(windSpeedSlider);
+
+  const clearFireBtn = document.createElement('button');
+  clearFireBtn.textContent = 'Clear Fire';
+  clearFireBtn.style.cssText = `
+    margin-top: 6px; padding: 5px 10px; background: #5a3030;
+    color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  clearFireBtn.addEventListener('click', () => onUpdate?.('clear-fire'));
+  fireSectionDiv.appendChild(clearFireBtn);
+  menuContent.appendChild(fireSectionDiv);
+
   const topoSection = document.createElement('div');
   topoSection.style.marginTop = '12px';
   topoSection.innerHTML = '<strong>Topography</strong>';
-
-  const slopeRadio = document.createElement('label');
-  slopeRadio.style.display = 'block';
-  slopeRadio.style.marginTop = '6px';
-  const slopeRadioInput = document.createElement('input');
-  slopeRadioInput.type = 'radio';
-  slopeRadioInput.name = 'topo-mode';
-  slopeRadioInput.value = 'slope';
-  slopeRadioInput.checked = true;
-  slopeRadioInput.addEventListener('change', () => {
-    controls.elevationMode = 'slope';
-    controls.demElevations = null;
-    topoSlopeDiv.style.display = 'block';
-    topoDemDiv.style.display = 'none';
-    onUpdate?.();
-  });
-  slopeRadio.appendChild(slopeRadioInput);
-  slopeRadio.appendChild(document.createTextNode(' Simple slope'));
-
-  const demRadio = document.createElement('label');
-  demRadio.style.display = 'block';
-  demRadio.style.marginTop = '4px';
-  const demRadioInput = document.createElement('input');
-  demRadioInput.type = 'radio';
-  demRadioInput.name = 'topo-mode';
-  demRadioInput.value = 'dem';
-  demRadioInput.addEventListener('change', () => {
-    controls.elevationMode = 'dem';
-    topoSlopeDiv.style.display = 'none';
-    topoDemDiv.style.display = 'block';
-    onUpdate?.();
-  });
-  demRadio.appendChild(demRadioInput);
-  demRadio.appendChild(document.createTextNode(' DEM file'));
-
-  topoSection.appendChild(slopeRadio);
-  topoSection.appendChild(demRadio);
   menuContent.appendChild(topoSection);
-
-  const topoSlopeDiv = document.createElement('div');
-  topoSlopeDiv.id = 'topo-slope-div';
-  topoSlopeDiv.style.marginTop = '8px';
-
-  const slopeLabel = document.createElement('label');
-  slopeLabel.innerHTML = `Slope direction: <span id="slope-val">${controls.slopeAngle}</span>°`;
-  slopeLabel.style.display = 'block';
-
-  const slopeSlider = document.createElement('input');
-  slopeSlider.type = 'range';
-  slopeSlider.min = 0;
-  slopeSlider.max = 360;
-  slopeSlider.value = controls.slopeAngle;
-  slopeSlider.style.width = '100%';
-  slopeSlider.addEventListener('input', () => {
-    controls.slopeAngle = Number(slopeSlider.value);
-    document.getElementById('slope-val').textContent = controls.slopeAngle;
-    onUpdate?.();
-  });
-
-  topoSlopeDiv.appendChild(slopeLabel);
-  topoSlopeDiv.appendChild(slopeSlider);
-
-  const slopeMagLabel = document.createElement('label');
-  slopeMagLabel.innerHTML = `Slope steepness: <span id="slope-mag-val">${controls.slopeMagnitude.toFixed(2)}</span>`;
-  slopeMagLabel.style.display = 'block';
-
-  const slopeMagSlider = document.createElement('input');
-  slopeMagSlider.type = 'range';
-  slopeMagSlider.min = 0.001;
-  slopeMagSlider.max = 0.05;
-  slopeMagSlider.step = 0.001;
-  slopeMagSlider.value = controls.slopeMagnitude;
-  slopeMagSlider.style.width = '100%';
-  slopeMagSlider.addEventListener('input', () => {
-    controls.slopeMagnitude = Number(slopeMagSlider.value);
-    document.getElementById('slope-mag-val').textContent = controls.slopeMagnitude.toFixed(2);
-    onUpdate?.();
-  });
-
-  topoSlopeDiv.appendChild(slopeMagLabel);
-  topoSlopeDiv.appendChild(slopeMagSlider);
-  menuContent.appendChild(topoSlopeDiv);
 
   const topoDemDiv = document.createElement('div');
   topoDemDiv.id = 'topo-dem-div';
   topoDemDiv.style.marginTop = '8px';
-  topoDemDiv.style.display = 'none';
 
   const demInput = document.createElement('input');
   demInput.type = 'file';
   demInput.accept = '.asc,.grd,.csv,.txt,.json';
   demInput.style.display = 'none';
   demInput.title = 'ASCII Grid (.asc), CSV, or JSON elevation data. Resampled to 64×64.';
-
-  const demLabel = document.createElement('label');
-  demLabel.innerHTML = 'DEM: <span id="dem-file-name">—</span>';
-  demLabel.style.display = 'block';
-  demLabel.style.fontSize = '12px';
-  demLabel.style.marginBottom = '4px';
 
   const demBtn = document.createElement('button');
   demBtn.textContent = 'Load DEM';
@@ -316,6 +415,15 @@ export function createUI(onUpdate) {
   demBtn.addEventListener('click', () => demInput.click());
 
   const sampleDems = {
+    'Simple Slope': (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          elevs[i * n + j] = (n - j) * 0.01;
+        }
+      }
+      return elevs;
+    },
     Valley: (n) => {
       const elevs = new Float32Array(n * n);
       for (let i = 0; i < n; i++) {
@@ -384,6 +492,9 @@ export function createUI(onUpdate) {
     },
   };
 
+  // Set the initial DEM to simple slope
+  controls.demElevations = sampleDems['Simple Slope'](64);
+
   const sampleDemDiv = document.createElement('div');
   sampleDemDiv.style.marginTop = '6px';
   sampleDemDiv.style.display = 'flex';
@@ -404,7 +515,6 @@ export function createUI(onUpdate) {
     btn.title = `Sample ${name} DEM`;
     btn.addEventListener('click', () => {
       controls.demElevations = sampleDems[name](64);
-      document.getElementById('dem-file-name').textContent = `(${name.toLowerCase()})`;
       onUpdate?.();
     });
     sampleDemDiv.appendChild(btn);
@@ -419,16 +529,13 @@ export function createUI(onUpdate) {
     const elevations = await loadDemFile(file, targetCols, targetRows);
     if (elevations) {
       controls.demElevations = elevations;
-      document.getElementById('dem-file-name').textContent = file.name;
       onUpdate?.();
     } else {
-      document.getElementById('dem-file-name').textContent = 'Failed';
       alert('Could not parse DEM file. Try ASCII Grid (.asc), CSV, or JSON.');
     }
     demInput.value = '';
   });
 
-  topoDemDiv.appendChild(demLabel);
   const demBtnRow = document.createElement('div');
   demBtnRow.appendChild(demBtn);
   topoDemDiv.appendChild(demBtnRow);
@@ -559,6 +666,24 @@ export function createUI(onUpdate) {
   resetBtn.addEventListener('click', () => onUpdate?.('reset'));
   menuContent.appendChild(resetBtn);
 
+  const resetAllBtn = document.createElement('button');
+  resetAllBtn.textContent = 'Reset All';
+  resetAllBtn.title = 'Clear patches, water, and sediment back to defaults';
+  resetAllBtn.style.cssText = `
+    display: block;
+    margin-top: 6px;
+    padding: 8px 16px;
+    background: #6b3030;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    width: 100%;
+  `;
+  resetAllBtn.addEventListener('click', () => onUpdate?.('resetAll'));
+  menuContent.appendChild(resetAllBtn);
+
   // View mode cycle buttons: Design / Flow / Sediment
   const viewModeDiv = document.createElement('div');
   viewModeDiv.style.cssText = 'display: flex; gap: 4px; margin-top: 8px;';
@@ -566,6 +691,7 @@ export function createUI(onUpdate) {
     { id: 'design', label: 'Design', title: 'Full patch colors with water overlay' },
     { id: 'flow',   label: 'Flow',   title: 'Desaturated patches, prominent streamlines' },
     { id: 'sediment', label: 'Sediment', title: 'Amplified sediment deposition view' },
+    { id: 'fire', label: 'Fire', title: 'Fire spread states and ember particles' },
   ];
   const viewBtns = viewModes.map(({ id, label, title }) => {
     const btn = document.createElement('button');
@@ -617,26 +743,6 @@ export function createUI(onUpdate) {
   restoreBtn.addEventListener('click', () => onUpdate?.('restore'));
   menuContent.appendChild(restoreBtn);
 
-  // Fix 6: snapshot button for scenario comparison baseline
-  const snapshotBtn = document.createElement('button');
-  snapshotBtn.textContent = 'Snapshot';
-  snapshotBtn.title = 'Capture current flow state as baseline. Click again to clear.';
-  snapshotBtn.style.cssText = `
-    display: block;
-    margin-top: 8px;
-    padding: 8px 16px;
-    background: #4a5a7d;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    width: 100%;
-  `;
-  snapshotBtn.addEventListener('click', () => {
-    controls.requestSnapshot = true;
-  });
-  menuContent.appendChild(snapshotBtn);
 
   const exportBtn = document.createElement('button');
   exportBtn.textContent = 'Export';
@@ -695,25 +801,33 @@ export function createUI(onUpdate) {
   metricsDiv.id = 'mosaic-metrics';
   metricsDiv.style.cssText = 'margin-top: 12px;';
 
-  // Fix 1: sparkline canvas for flow time series
-  const sparklineCanvas = document.createElement('canvas');
-  sparklineCanvas.width = 248;
-  sparklineCanvas.height = 44;
-  sparklineCanvas.style.cssText = 'display: block; border: 1px solid #333; border-radius: 3px; margin-bottom: 5px;';
-  metricsDiv.appendChild(sparklineCanvas);
-
   const metricsText = document.createElement('div');
   metricsText.id = 'mosaic-metrics-text';
-  metricsText.style.cssText = 'font-size: 11px; color: #aaa; line-height: 1.5;';
-  metricsText.innerHTML = 'Peak: — | Particles: — | Conn: —';
+  metricsText.style.cssText = 'font-size: 11px; color: #aaa; line-height: 1.6;';
+  metricsText.innerHTML = 'Conn: — | Particles: —';
   metricsDiv.appendChild(metricsText);
 
   menuContent.appendChild(metricsDiv);
 
-  const sedimentHint = document.createElement('div');
-  sedimentHint.style.cssText = 'margin-top: 8px; font-size: 10px; color: #888;';
-  sedimentHint.innerHTML = 'Colored particles = sediment (brown from grass/bare, green from forest, etc.)';
-  menuContent.appendChild(sedimentHint);
+  // ── Right-side time-series chart panel ──────────────────────────────────
+  const CHART_W = 220;
+  const CHART_H = 400;
+  const PANEL_H = CHART_H / 4;
+
+  const chartCanvas = document.createElement('canvas');
+  chartCanvas.width = CHART_W;
+  chartCanvas.height = CHART_H;
+  chartCanvas.style.cssText = `
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(12, 12, 16, 0.95);
+    border: 1px solid #2a2a3a;
+    border-radius: 6px;
+    z-index: 100;
+    pointer-events: none;
+  `;
+  mosaicContainer.appendChild(chartCanvas);
 
   const infoBtn = document.createElement('button');
   infoBtn.textContent = 'ℹ Info';
@@ -886,111 +1000,154 @@ export function createUI(onUpdate) {
     if (e.target === infoModal) infoModal.style.display = 'none';
   });
 
-  return {
-    controls,
-    updateMetrics: ({ flowHistory, etHistory, sedimentCount, connectivity, baselineSnapshot, interventionMarkers }) => {
-      const ctx = sparklineCanvas.getContext('2d');
-      const W = sparklineCanvas.width;
-      const H = sparklineCanvas.height;
-      ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = '#0f0f12';
-      ctx.fillRect(0, 0, W, H);
+  // Chart panel config
+  const PANELS = [
+    { key: 'runoffRatio',  label: 'RUNOFF',  unit: '0–1',      color: '#4a9eff', fmt: v => v.toFixed(2) },
+    { key: 'meanStorage',  label: 'STORAGE', unit: 'mm depth', color: '#3dd6a3', fmt: v => (v * 1000).toFixed(2) },
+    { key: 'etFraction',   label: 'ET',      unit: '0–1',      color: '#7dd87d', fmt: v => v.toFixed(2) },
+    { key: 'concentration',label: 'CONCEN.', unit: '0–1',      color: '#f0b429', fmt: v => v.toFixed(2) },
+  ];
 
-      if (flowHistory && flowHistory.length > 1) {
-        let maxVal = 0.001;
-        for (const v of flowHistory) { if (v > maxVal) maxVal = v; }
-        // Also include baseline peak in the y-scale so the marker stays in frame
-        if (baselineSnapshot?.peakFlow > maxVal) maxVal = baselineSnapshot.peakFlow;
+  function drawChartPanel(chartHistory, interventionMarkers, running) {
+    const ctx = chartCanvas.getContext('2d');
+    ctx.clearRect(0, 0, CHART_W, CHART_H);
+    ctx.fillStyle = 'rgba(12, 12, 16, 0.95)';
+    ctx.fillRect(0, 0, CHART_W, CHART_H);
 
-        // Shade area under curve
+    if (!running) {
+      ctx.fillStyle = '#444';
+      ctx.font = '11px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('PAUSED', CHART_W / 2, CHART_H / 2);
+      ctx.textAlign = 'left';
+    }
+
+    const n = chartHistory.length;
+    const PAD = 4;
+
+    PANELS.forEach((panel, pi) => {
+      const py = pi * PANEL_H;
+
+      // Panel divider
+      if (pi > 0) {
+        ctx.strokeStyle = '#2a2a3a';
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.fillStyle = 'rgba(74, 158, 255, 0.12)';
-        ctx.moveTo(0, H);
-        for (let k = 0; k < flowHistory.length; k++) {
-          const x = (k / (flowHistory.length - 1)) * W;
-          const y = H - (flowHistory[k] / maxVal) * (H - 6) - 3;
-          ctx.lineTo(x, y);
-        }
-        ctx.lineTo(W, H);
-        ctx.closePath();
-        ctx.fill();
-
-        // Intervention marker ticks (before the flow line so line sits on top)
-        if (interventionMarkers?.length > 0) {
-          for (const m of interventionMarkers) {
-            const x = (1 - m.framesAgo / 200) * W;
-            ctx.beginPath();
-            ctx.strokeStyle = 'rgba(255, 210, 80, 0.55)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([2, 2]);
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, H);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            // Tiny patch label
-            ctx.fillStyle = 'rgba(255, 210, 80, 0.8)';
-            ctx.font = 'bold 8px system-ui';
-            ctx.fillText(m.patchKey.slice(0, 3), x + 2, 9);
-          }
-        }
-
-        // Flow line
-        ctx.beginPath();
-        ctx.strokeStyle = '#4a9eff';
-        ctx.lineWidth = 1.5;
-        for (let k = 0; k < flowHistory.length; k++) {
-          const x = (k / (flowHistory.length - 1)) * W;
-          const y = H - (flowHistory[k] / maxVal) * (H - 6) - 3;
-          k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        }
+        ctx.moveTo(0, py);
+        ctx.lineTo(CHART_W, py);
         ctx.stroke();
+      }
 
-        // Baseline peak dashed line
-        if (baselineSnapshot?.peakFlow > 0) {
-          const baseY = H - (baselineSnapshot.peakFlow / maxVal) * (H - 6) - 3;
-          ctx.beginPath();
-          ctx.strokeStyle = '#ff6b6b';
+      // Mid-level faint rule
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, py + PANEL_H * 0.5);
+      ctx.lineTo(CHART_W, py + PANEL_H * 0.5);
+      ctx.stroke();
+
+      if (n < 2) {
+        // Labels only
+        ctx.fillStyle = panel.color;
+        ctx.font = 'bold 9px system-ui';
+        ctx.fillText(panel.label, PAD, py + 12);
+        return;
+      }
+
+      // Auto-scale y to visible window
+      let maxVal = 1e-9;
+      for (const d of chartHistory) { if (d[panel.key] > maxVal) maxVal = d[panel.key]; }
+      maxVal *= 1.12; // 12% headroom
+
+      const chartTop = py + PAD + 16;
+      const chartBot = py + PANEL_H - PAD;
+      const chartH = chartBot - chartTop;
+      const chartLeft = PAD;
+      const chartRight = CHART_W - PAD;
+      const chartW = chartRight - chartLeft;
+
+      // Intervention tick lines (across full panel height)
+      if (interventionMarkers?.length > 0) {
+        for (const m of interventionMarkers) {
+          const x = chartLeft + (1 - m.framesAgo / 300) * chartW;
+          if (x < chartLeft) continue;
+          ctx.strokeStyle = 'rgba(255, 210, 80, 0.3)';
           ctx.lineWidth = 1;
-          ctx.setLineDash([3, 3]);
-          ctx.moveTo(0, baseY);
-          ctx.lineTo(W, baseY);
+          ctx.setLineDash([2, 3]);
+          ctx.beginPath();
+          ctx.moveTo(x, py);
+          ctx.lineTo(x, py + PANEL_H);
           ctx.stroke();
           ctx.setLineDash([]);
-          ctx.fillStyle = '#ff6b6b';
-          ctx.font = '9px system-ui';
-          ctx.fillText('baseline', 3, Math.max(10, baseY - 2));
+          // Label only on top panel
+          if (pi === 0) {
+            ctx.fillStyle = 'rgba(255, 210, 80, 0.75)';
+            ctx.font = '7px system-ui';
+            ctx.fillText(m.patchKey.slice(0, 3), x + 2, py + 10);
+          }
         }
       }
 
-      // Metrics text
-      let currentPeak = 0;
-      for (const v of (flowHistory ?? [])) { if (v > currentPeak) currentPeak = v; }
-      const currentET = etHistory?.length > 0 ? etHistory[etHistory.length - 1] : 0;
-      let text = `Peak: ${currentPeak.toFixed(2)} | ET: ${currentET.toFixed(3)} mm | Conn: ${(connectivity ?? 0).toFixed(2)}`;
-
-      // Percentage delta vs baseline — more readable than raw Δ numbers
-      if (baselineSnapshot) {
-        const basePeak = baselineSnapshot.peakFlow ?? 0;
-        const baseConn = baselineSnapshot.connectivity ?? 0;
-        const deltaPeak = currentPeak - basePeak;
-        const deltaConn = (connectivity ?? 0) - baseConn;
-        const pctPeak = basePeak > 0.001 ? Math.round((deltaPeak / basePeak) * 100) : 0;
-        const pctConn = Math.abs(baseConn) > 0.01 ? Math.round((deltaConn / baseConn) * 100) : 0;
-        const peakColor = deltaPeak < 0 ? '#5c9' : '#e66';
-        const connColor = deltaConn > 0 ? '#5c9' : '#e66';
-        const peakArrow = deltaPeak < 0 ? '↓' : '↑';
-        const connArrow = deltaConn > 0 ? '↑' : '↓';
-        text += `<br><span style="color:${peakColor}">${peakArrow}${Math.abs(pctPeak)}% peak</span>`
-              + `<span style="color:#666"> &nbsp;·&nbsp; </span>`
-              + `<span style="color:${connColor}">${connArrow}${Math.abs(pctConn)}% conn vs baseline</span>`;
-        snapshotBtn.textContent = 'Clear Baseline';
-        snapshotBtn.style.background = '#7a3d3d';
-      } else {
-        snapshotBtn.textContent = 'Snapshot';
-        snapshotBtn.style.background = '#4a5a7d';
+      // Area fill under curve
+      ctx.beginPath();
+      ctx.fillStyle = panel.color.replace(')', ', 0.12)').replace('rgb', 'rgba').replace('#', '');
+      // Use a simpler approach for hex color fill
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = panel.color;
+      ctx.moveTo(chartLeft, chartBot);
+      for (let k = 0; k < n; k++) {
+        const x = chartLeft + (k / (n - 1)) * chartW;
+        const v = chartHistory[k][panel.key];
+        const y = chartBot - Math.min(1, v / maxVal) * chartH;
+        ctx.lineTo(x, y);
       }
+      ctx.lineTo(chartRight, chartBot);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
 
-      metricsText.innerHTML = text;
+      // Line
+      ctx.beginPath();
+      ctx.strokeStyle = panel.color;
+      ctx.lineWidth = 1.5;
+      for (let k = 0; k < n; k++) {
+        const x = chartLeft + (k / (n - 1)) * chartW;
+        const v = chartHistory[k][panel.key];
+        const y = chartBot - Math.min(1, v / maxVal) * chartH;
+        k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Panel label (top-left)
+      ctx.fillStyle = panel.color;
+      ctx.font = 'bold 9px system-ui';
+      ctx.fillText(panel.label, PAD, py + 12);
+
+      // Current value (top-right)
+      const cur = chartHistory[n - 1][panel.key];
+      const valStr = panel.fmt(cur);
+      ctx.font = '9px system-ui';
+      const tw = ctx.measureText(valStr).width;
+      ctx.fillText(valStr, CHART_W - PAD - tw, py + 12);
+    });
+
+    // Bottom legend
+    ctx.fillStyle = '#444';
+    ctx.font = '7px system-ui';
+    ctx.fillText('runoff · storage(mm) · ET · concentration', PAD, CHART_H - 3);
+  }
+
+  return {
+    controls,
+    updateMetrics: ({ chartHistory, interventionMarkers, connectivity, sedimentCount }) => {
+      // Left panel metrics text
+      const last = chartHistory?.length > 0 ? chartHistory[chartHistory.length - 1] : null;
+      metricsText.innerHTML = last
+        ? `Runoff: ${last.runoffRatio.toFixed(2)} | ET: ${last.etFraction.toFixed(2)} | Conn: ${(connectivity ?? 0).toFixed(2)} | Sed: ${sedimentCount ?? 0}`
+        : `Conn: ${(connectivity ?? 0).toFixed(2)} | Particles: ${sedimentCount ?? 0}`;
+
+      // Right chart panel
+      drawChartPanel(chartHistory ?? [], interventionMarkers ?? [], true);
     },
   };
 }

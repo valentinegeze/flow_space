@@ -1,0 +1,3938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Land Mosaic Flow Model</title>
+
+  <!-- p5.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+
+  <!-- Leaflet CSS + JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.draw CSS + JS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: #0f0f12;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    /* ── Tab bar ── */
+    #tab-bar {
+      position: fixed; top: 0; left: 0; right: 0; height: 36px;
+      background: rgba(12, 12, 18, 0.98);
+      border-bottom: 1px solid rgba(255,255,255,0.09);
+      display: flex; align-items: center; gap: 2px; padding: 0 10px;
+      z-index: 10000;
+    }
+    .tab-btn {
+      padding: 4px 15px; background: transparent;
+      border: 1px solid transparent; border-radius: 5px;
+      color: #777; font-size: 12px; cursor: pointer;
+      transition: all 0.15s; font-family: inherit;
+    }
+    .tab-btn:hover { color: #ccc; background: rgba(255,255,255,0.05); }
+    .tab-btn.active {
+      background: rgba(184,224,74,0.1);
+      border-color: rgba(184,224,74,0.35);
+      color: #b8e04a;
+    }
+    .tab-divider {
+      width: 1px; height: 16px; background: rgba(255,255,255,0.1); margin: 0 4px;
+    }
+    #tab-title {
+      margin-left: 8px; font-size: 12px; color: #555;
+      font-style: italic; letter-spacing: 0.02em;
+    }
+
+    /* ── View containers ── */
+    #mosaic-container, #site-analysis-container {
+      position: fixed;
+      top: 36px; left: 0; right: 0; bottom: 0;
+    }
+
+    /* Existing mosaic layout */
+    #mosaic-container {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      padding-left: 300px;
+      z-index: 1;
+    }
+    #mosaic-container canvas {
+      display: block; position: relative; z-index: 0;
+    }
+
+    /* Site analysis fills the pane */
+    #site-analysis-container {
+      display: none;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <!-- Tab bar -->
+  <div id="tab-bar">
+    <button class="tab-btn active" data-tab="mosaic">Mosaic Design</button>
+    <div class="tab-divider"></div>
+    <button class="tab-btn" data-tab="site">◈ Site Analysis</button>
+    <span id="tab-title">Land Mosaic Flow Model</span>
+  </div>
+
+  <!-- Mosaic simulation view -->
+  <div id="mosaic-container"></div>
+
+  <!-- Site analysis view (Leaflet map + parcel workflow) -->
+  <div id="site-analysis-container"></div>
+
+  <!-- Main simulation sketch -->
+  <script>
+
+/* ─── patches.js ─── */
+/**
+ * Patch types and lookup tables for land mosaic flow model.
+ * Each patch type maps to physical parameters: Manning's n, infiltration, erodibility.
+ */
+
+const PATCH_TYPES = {
+  GRASS: 'grass',
+  FOREST: 'forest',
+  WETLAND: 'wetland',
+  BARE: 'bare',
+  URBAN: 'urban',
+  CORRIDOR: 'corridor',
+  WATER: 'water',
+};
+
+/**
+ * Physical parameters per patch type.
+ * manningN:    roughness (higher = slower flow)
+ * infiltration: mm/hr max infiltration rate
+ * erodibility: 0-1, relative sediment contribution when eroded
+ *
+ * Fire parameters:
+ * fuelLoad:    0-1; directly equivalent to density p in site-percolation theory.
+ *              8-neighbor percolation threshold ≈ 0.41.
+ *              Below threshold: fire burns out locally (subcritical).
+ *              Above threshold: fire sweeps the landscape (supercritical).
+ * burnDuration: how many fire-ticks a cell stays BURNING before going BURNED.
+ *              Each fire-tick ≈ 150 ms at default speed.
+ */
+const PATCH_PARAMS = {
+  [PATCH_TYPES.GRASS]: {
+    name: 'Grass',
+    color: '#6B8E23',
+    manningN: 0.1,
+    infiltration: 25,
+    erodibility: 0.3,
+    etRate: 2.5,
+    connectivityThreshold: 0.5,
+    fuelLoad: 0.70,    // supercritical — fire spreads through grassland
+    burnDuration: 2,
+  },
+  [PATCH_TYPES.FOREST]: {
+    name: 'Forest',
+    color: '#228B22',
+    manningN: 0.3,
+    infiltration: 50,
+    erodibility: 0.05,
+    etRate: 6.0,
+    connectivityThreshold: 1.5,
+    fuelLoad: 1.0,     // always ignites; guaranteed percolation
+    burnDuration: 4,
+  },
+  [PATCH_TYPES.WETLAND]: {
+    name: 'Wetland',
+    color: '#4169E1',
+    manningN: 0.15,
+    infiltration: 80,
+    erodibility: 0.1,
+    etRate: 8.0,
+    connectivityThreshold: 0.0,
+    fuelLoad: 0.05,    // strongly subcritical; acts as firebreak
+    burnDuration: 1,
+  },
+  [PATCH_TYPES.BARE]: {
+    name: 'Bare Soil',
+    color: '#8B7355',
+    manningN: 0.03,
+    infiltration: 5,
+    erodibility: 0.9,
+    etRate: 0.5,
+    connectivityThreshold: 0.2,
+    fuelLoad: 0.18,    // subcritical; fire does not carry through bare soil
+    burnDuration: 1,
+  },
+  [PATCH_TYPES.URBAN]: {
+    name: 'Urban',
+    color: '#4a4a5a',
+    manningN: 0.015,
+    infiltration: 2,
+    erodibility: 0.2,
+    etRate: 0.2,
+    connectivityThreshold: 0.1,
+    fuelLoad: 0.32,    // subcritical; fire stops in built-up areas
+    burnDuration: 2,
+  },
+  [PATCH_TYPES.CORRIDOR]: {
+    name: 'Corridor',
+    color: '#b8e04a',
+    manningN: 0.03,
+    infiltration: 15,
+    erodibility: 0.4,
+    etRate: 1.5,
+    connectivityThreshold: 0.3,
+    fuelLoad: 0.62,    // slightly supercritical; corridors can carry fire
+    burnDuration: 2,
+  },
+  [PATCH_TYPES.WATER]: {
+    name: 'River/Canal/Lake',
+    color: '#87CEEB',
+    manningN: 0.02,
+    infiltration: 0,
+    erodibility: 0,
+    etRate: 5.0,
+    connectivityThreshold: 0.0,
+    fuelLoad: 0.0,     // no fuel
+    burnDuration: 0,
+  },
+};
+
+/**
+ * Default matrix (dominant patch) for new landscapes.
+ */
+const DEFAULT_MATRIX = PATCH_TYPES.GRASS;
+
+
+/* ─── flow.js ─── */
+/**
+ * Manning-based overland flow solver for 2D grid.
+ * Uses kinematic wave approximation with proportional multi-direction routing (D8).
+ */
+
+/**
+ * Compute flow velocity from Manning's equation.
+ * v = (1/n) * R^(2/3) * S^(1/2)
+ * For shallow overland flow, R ≈ h (hydraulic radius ≈ depth)
+ * @param {number} h - water depth (m)
+ * @param {number} S - slope (m/m)
+ * @param {number} n - Manning's roughness
+ * @returns {number} velocity (m/s)
+ */
+function manningVelocity(h, S, n) {
+  if (h <= 0 || S <= 0) return 0;
+  const R = h;
+  return (1 / n) * Math.pow(R, 2 / 3) * Math.pow(S, 1 / 2);
+}
+
+/**
+ * Get elevation at cell (i, j). Supports simple slope or flat.
+ */
+function getElevation(i, j, cols, rows, slopeAngle = 270, slopeMagnitude = 0.01) {
+  const rad = (slopeAngle * Math.PI) / 180;
+  const di = Math.cos(rad);
+  const dj = Math.sin(rad);
+  return (rows - i) * di * slopeMagnitude + j * dj * slopeMagnitude;
+}
+
+/**
+ * Compute proportional flow weights to all downhill neighbors (D8 proportional routing).
+ * Distributes flow to all downhill cells weighted by slope gradient, not just the steepest.
+ * This allows corridors and wetlands to actually intercept and redirect flow.
+ * @returns {Array<{di, dj, ni, nj, gradient, weight}>}
+ */
+function flowWeights(i, j, elevations, cols, rows) {
+  const e = elevations[i * cols + j];
+  const neighbors = [];
+  let totalGradient = 0;
+
+  for (let di = -1; di <= 1; di++) {
+    for (let dj = -1; dj <= 1; dj++) {
+      if (di === 0 && dj === 0) continue;
+      const ni = i + di;
+      const nj = j + dj;
+      if (ni < 0 || ni >= rows || nj < 0 || nj >= cols) continue;
+      const ne = elevations[ni * cols + nj];
+      const drop = e - ne;
+      if (drop > 0) {
+        const dist = Math.sqrt(di * di + dj * dj);
+        const gradient = drop / dist;
+        neighbors.push({ di, dj, ni, nj, gradient, weight: 0 });
+        totalGradient += gradient;
+      }
+    }
+  }
+
+  if (totalGradient > 0) {
+    for (const n of neighbors) n.weight = n.gradient / totalGradient;
+  }
+  return neighbors;
+}
+
+/**
+ * Compute flow for one timestep using proportional multi-direction routing.
+ * @param {Object} state - { depths, patchGrid, elevations, cols, rows }
+ * @param {number} rainfall - mm/hr
+ * @param {number} dt - timestep (s)
+ * @param {Object} opts - { patchParams, patchKeys } from patches.js
+ * @param {Float32Array} [patchState] - sediment accumulation per cell; reduces infiltration when nonzero
+ * @returns {{ depths, fluxes, totalET, totalOutflow }}
+ */
+function stepFlow(state, rainfall, dt, opts, patchState) {
+  const { depths, patchGrid, elevations, cols, rows } = state;
+  const { patchParams, patchKeys } = typeof opts.patchKeys !== 'undefined'
+    ? opts
+    : { patchParams: opts, patchKeys: Object.keys(opts) };
+  const cellSize = 1;
+  const rainfallMs = (rainfall / 1000 / 3600) * dt;
+
+  const newDepths = new Float32Array(depths.length);
+  const fluxes = new Float32Array(depths.length * 2);
+  let totalET = 0;
+  let totalOutflow = 0;
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+      const h = depths[idx];
+      const patchIdx = patchGrid[idx];
+      const key = patchKeys[patchIdx] || patchKeys[0];
+      const params = patchParams[key] || patchParams[patchKeys[0]];
+
+      const weights = flowWeights(i, j, elevations, cols, rows);
+
+      // Effective slope: weighted average of downhill gradients
+      let effectiveSlope = 0;
+      for (const w of weights) effectiveSlope += w.weight * w.gradient;
+
+      // Sediment load progressively reduces infiltration capacity
+      const siltLoad = patchState ? patchState[idx] : 0;
+      const effectiveInfil = params.infiltration / (1 + siltLoad * 0.1);
+
+      // T1-A: Evapotranspiration — subtract from standing water each step
+      const etRateMs = (params.etRate ?? 0) / 1000 / 3600;
+      const evapotranspired = Math.min(h, etRateMs * dt);
+      totalET += evapotranspired;
+
+      // T1-B: Connectivity threshold — water must pond above threshold before it mobilizes
+      const threshold = params.connectivityThreshold ?? 0;
+      const thresholdM = threshold / 1000; // threshold in mm → m
+      const mobilizableH = Math.max(0, h - evapotranspired - thresholdM);
+
+      // T1-C: Patch edge resistance — blend Manning's n with neighbors at patch boundaries
+      let effectiveN = params.manningN;
+      if (weights.length > 0) {
+        let nSum = 0;
+        let nCount = 0;
+        for (const w of weights) {
+          const nPatchIdx = patchGrid[w.ni * cols + w.nj];
+          const nKey = patchKeys[nPatchIdx] || patchKeys[0];
+          const nParams = patchParams[nKey] || patchParams[patchKeys[0]];
+          if (nPatchIdx !== patchIdx) {
+            // At a patch boundary: blend current and neighbor roughness
+            // Geometric mean gives physically appropriate resistance at edges
+            nSum += Math.sqrt(params.manningN * nParams.manningN) * w.weight;
+            nCount += w.weight;
+          }
+        }
+        if (nCount > 0) {
+          // Weighted blend: (1 - edgeFraction)*own_n + edgeFraction*edge_blend
+          effectiveN = params.manningN * (1 - nCount) + nSum;
+        }
+      }
+
+      const v = manningVelocity(mobilizableH, Math.max(0.001, effectiveSlope), effectiveN);
+      const infiltrationRate = effectiveInfil / 1000 / 3600;
+      const infiltrated = Math.min(mobilizableH, infiltrationRate * dt);
+
+      const outflow = v * mobilizableH * dt / cellSize;
+      const actualOutflow = Math.min(Math.max(0, mobilizableH - infiltrated), outflow);
+
+      // Water that stays: original depth minus ET minus infiltration minus outflow, plus rain
+      newDepths[idx] += h - evapotranspired - infiltrated - actualOutflow + rainfallMs;
+
+      if (actualOutflow > 0) {
+        if (weights.length === 0) {
+          // Interior depressions pond; boundary cells drain off the domain.
+          const atBoundary = i === 0 || i === rows - 1 || j === 0 || j === cols - 1;
+          if (!atBoundary) newDepths[idx] += actualOutflow;
+          else totalOutflow += actualOutflow;
+        } else {
+          for (const w of weights) {
+            const nidx = w.ni * cols + w.nj;
+            newDepths[nidx] += actualOutflow * w.weight;
+            fluxes[idx * 2] += w.dj * v * w.weight;      // col (j) → vx (horizontal)
+            fluxes[idx * 2 + 1] += w.di * v * w.weight;  // row (i) → vy (vertical)
+          }
+        }
+      }
+    }
+  }
+
+  return { depths: newDepths, fluxes, totalET, totalOutflow };
+}
+
+
+/* ─── connectivity.js ─── */
+/**
+ * Connectivity metrics for land mosaic.
+ * Functional connectivity: flow-weighted connectivity based on actual water/sediment movement.
+ */
+
+/**
+ * Compute connectivity index and per-cell drainage contribution.
+ *
+ * Returns:
+ *   connectivity    — ratio of cells with significant flow to total active cells (scalar 0–1)
+ *   drainageContrib — Float32Array of normalized flux per cell; each value is that cell's
+ *                     share of total landscape flux. High values mark the drainage network.
+ *
+ * This replaces the old scalar-only return so callers can render a spatial heatmap
+ * showing which patches sit on the main flow paths, not just whether the landscape
+ * is "connected" in aggregate.
+ */
+function computeConnectivity(depths, fluxes, cols, rows) {
+  let flowingCells = 0;
+  let totalActive = 0;
+  let totalFlux = 0;
+  const drainageContrib = new Float32Array(cols * rows);
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+      const h = depths[idx];
+      const vx = fluxes[idx * 2];
+      const vy = fluxes[idx * 2 + 1];
+      const v = Math.sqrt(vx * vx + vy * vy);
+      const flux = v * Math.max(h, 0);
+
+      drainageContrib[idx] = flux;
+      totalFlux += flux;
+
+      if (h > 0.0001 || v > 0.0001) {
+        totalActive++;
+        if (v > 0.001) flowingCells++;
+      }
+    }
+  }
+
+  if (totalFlux > 0) {
+    for (let k = 0; k < drainageContrib.length; k++) {
+      drainageContrib[k] /= totalFlux;
+    }
+  }
+
+  return {
+    connectivity: totalActive === 0 ? 0 : flowingCells / totalActive,
+    drainageContrib,
+  };
+}
+
+
+/* ─── particles.js ─── */
+/**
+ * Particle-based sediment transport.
+ * Particles spawn in erodible cells when shear stress exceeds threshold,
+ * advect with flow, settle when velocity drops.
+ */
+
+
+
+const patchKeys = Object.keys(PATCH_PARAMS);
+
+/**
+ * Spawn particles in erodible cells based on flow and patch erodibility.
+ * @param {Float32Array} depths - water depth per cell
+ * @param {Float32Array} fluxes - vx, vy per cell
+ * @param {Uint8Array} patchGrid - patch index per cell
+ * @param {number} cols
+ * @param {number} rows
+ * @param {Array} particles - existing particles (mutated)
+ * @param {number} dt - timestep
+ * @param {number} [sedimentMultiplier=1] - scale factor for spawn rate
+ */
+function spawnParticles(depths, fluxes, patchGrid, cols, rows, particles, dt = 1, sedimentMultiplier = 1) {
+  const spawnRate = 0.02 * sedimentMultiplier;
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+      const patchIdx = patchGrid[idx];
+      const params = PATCH_PARAMS[patchKeys[patchIdx]] || PATCH_PARAMS.grass;
+      if (params.erodibility < 0.1) continue;
+
+      const h = depths[idx];
+      const vx = fluxes[idx * 2];
+      const vy = fluxes[idx * 2 + 1];
+      const v = Math.sqrt(vx * vx + vy * vy);
+
+      if (h > 0.002 && v > 0.01 && Math.random() < spawnRate * params.erodibility * dt) {
+        particles.push({
+          x: j + Math.random(),
+          y: i + Math.random(),
+          vx: 0,
+          vy: 0,
+          settled: false,
+          sourcePatch: patchIdx,
+          color: getSedimentColor(patchIdx),
+        });
+      }
+    }
+  }
+}
+
+function getSedimentColor(patchIdx) {
+  const colors = [
+    [139, 115, 85],   // grass - brown
+    [34, 139, 34],    // forest - dark green
+    [65, 105, 225],   // wetland - blue
+    [139, 90, 43],    // bare - sienna
+    [74, 74, 90],     // urban - charcoal gray
+    [196, 122, 90],   // corridor - muted warm reddish orange
+    [135, 206, 235],  // water - sky blue (no sediment spawns, fallback)
+  ];
+  const c = colors[Math.min(patchIdx, colors.length - 1)];
+  return c;
+}
+
+/**
+ * Advect particles with flow field, settle when velocity is low.
+ * When particles settle, they add to sedimentDepth (accumulation).
+ * @param {Array} particles
+ * @param {Float32Array} depths
+ * @param {Float32Array} fluxes
+ * @param {number} cols
+ * @param {number} rows
+ * @param {number} dt
+ * @param {Float32Array} [sedimentDepth] - optional, accumulates when particles settle
+ */
+function advectParticles(particles, depths, fluxes, cols, rows, dt = 1, sedimentDepth = null) {
+  const settleThreshold = 0.005;
+  const maxParticles = 2000;
+  const depositAmount = 0.5;
+
+  for (let k = particles.length - 1; k >= 0; k--) {
+    const p = particles[k];
+    if (p.settled) continue;
+
+    const i = Math.floor(p.y);
+    const j = Math.floor(p.x);
+    if (i < 0 || i >= rows || j < 0 || j >= cols) {
+      particles.splice(k, 1);
+      continue;
+    }
+
+    const idx = i * cols + j;
+    const vx = fluxes[idx * 2];
+    const vy = fluxes[idx * 2 + 1];
+    const v = Math.sqrt(vx * vx + vy * vy);
+
+    if (v < settleThreshold) {
+      p.settled = true;
+      if (sedimentDepth && i >= 0 && i < rows && j >= 0 && j < cols) {
+        sedimentDepth[idx] += depositAmount;
+      }
+      continue;
+    }
+
+    p.x += vx * dt * 0.5;
+    p.y += vy * dt * 0.5;
+
+    if (p.x < 0 || p.x >= cols || p.y < 0 || p.y >= rows) {
+      particles.splice(k, 1);
+    }
+  }
+
+  if (particles.length > maxParticles) {
+    particles.splice(0, particles.length - maxParticles);
+  }
+}
+
+
+/* ─── lbm.js ─── */
+/**
+ * D2Q9 Lattice Boltzmann passive scalar transport.
+ *
+ * Two coupled scalar fields:
+ *   rhoWater    — tracks where water accumulates and flows
+ *   rhoSediment — tracks where sediment concentrates
+ *
+ * The Manning solver provides the macroscopic velocity field each step.
+ * LBM collision (BGK) + streaming diffuses these fields smoothly across
+ * the grid, producing a continuous density-field view instead of particles.
+ */
+
+const Q = 9;
+
+// D2Q9 discrete velocities: cx = column direction, cy = row direction (down = positive)
+const CX  = [ 0,  1,  0, -1,  0,  1, -1, -1,  1];
+const CY  = [ 0,  0,  1,  0, -1,  1,  1, -1, -1];
+const W   = [4/9, 1/9, 1/9, 1/9, 1/9, 1/36, 1/36, 1/36, 1/36];
+const OPP = [  0,   3,   4,   1,   2,    7,    8,    5,    6];
+
+/** BGK equilibrium distribution for scalar density rho at velocity (ux, uy). */
+function feq(rho, ux, uy, q) {
+  const cu = CX[q] * ux + CY[q] * uy;
+  return W[q] * rho * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * (ux * ux + uy * uy));
+}
+
+/**
+ * Allocate LBM state with pre-allocated scratch buffers to avoid per-step GC.
+ */
+function createLBMState(cols, rows) {
+  const n = cols * rows;
+  return {
+    f:           new Float32Array(n * Q),  // water distribution functions
+    g:           new Float32Array(n * Q),  // sediment distribution functions
+    fTmp:        new Float32Array(n * Q),  // post-collision scratch
+    gTmp:        new Float32Array(n * Q),
+    rhoWater:    new Float32Array(n),      // macroscopic water density
+    rhoSediment: new Float32Array(n),      // macroscopic sediment density
+  };
+}
+
+/**
+ * One LBM timestep: collision + streaming for water and sediment fields.
+ *
+ * Source terms couple the LBM fields back to the Manning state each step:
+ *   rhoWater    relaxes toward depths[idx] * 60
+ *   rhoSediment relaxes toward sedimentDepth[idx] * 12
+ * This means the density fields track the physics but with spatial diffusion
+ * added by the LBM streaming, producing smooth continuous-field visuals.
+ *
+ * Open (outflow) boundary conditions: density streaming off the edge is
+ * absorbed rather than bounced back, preventing wall accumulation.
+ *
+ * @param {Object}       state         - from createLBMState()
+ * @param {Float32Array} fluxes        - [vx, vy] per cell (Manning output, after flux fix)
+ * @param {Float32Array} depths        - water depth per cell (m)
+ * @param {Float32Array} sedimentDepth - accumulated sediment per cell
+ * @param {number}       cols
+ * @param {number}       rows
+ */
+function stepLBM(state, fluxes, depths, sedimentDepth, cols, rows) {
+  const { f, g, fTmp, gTmp } = state;
+  const n = cols * rows;
+  const tau = 0.75; // relaxation time: >0.5 = stable; larger = more advective, less diffusive
+
+  // ── Collision ─────────────────────────────────────────────────────────────
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+
+      // Velocity from Manning solver — scale to LBM Mach number < 0.25
+      const vx = fluxes[idx * 2];
+      const vy = fluxes[idx * 2 + 1];
+      const speed = Math.sqrt(vx * vx + vy * vy);
+      const scale = speed > 2.5 ? 0.25 / speed : 0.1;
+      const ux = vx * scale;
+      const uy = vy * scale;
+
+      // Current macroscopic densities
+      let rW = 0, rS = 0;
+      for (let q = 0; q < Q; q++) {
+        rW += f[idx * Q + q];
+        rS += g[idx * Q + q];
+      }
+
+      // Source: relax toward Manning state so the LBM field tracks physics
+      const h  = Math.max(0, depths[idx]);
+      const sd = sedimentDepth ? Math.max(0, sedimentDepth[idx]) : 0;
+      rW = Math.max(0, rW + (h * 60 - rW) * 0.25);
+      rS = Math.max(0, rS + (sd * 12 - rS) * 0.15);
+
+      // BGK collision toward equilibrium
+      for (let q = 0; q < Q; q++) {
+        fTmp[idx * Q + q] = Math.max(0, f[idx * Q + q] + (feq(rW, ux, uy, q) - f[idx * Q + q]) / tau);
+        gTmp[idx * Q + q] = Math.max(0, g[idx * Q + q] + (feq(rS, ux, uy, q) - g[idx * Q + q]) / tau);
+      }
+    }
+  }
+
+  // ── Streaming ─────────────────────────────────────────────────────────────
+  f.fill(0);
+  g.fill(0);
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+      for (let q = 0; q < Q; q++) {
+        const ni = i + CY[q];
+        const nj = j + CX[q];
+        if (ni >= 0 && ni < rows && nj >= 0 && nj < cols) {
+          const nidx = ni * cols + nj;
+          f[nidx * Q + q] += fTmp[idx * Q + q];
+          g[nidx * Q + q] += gTmp[idx * Q + q];
+        }
+        // Open BC: distributions streaming off the edge are simply absorbed
+      }
+    }
+  }
+
+  // ── Macroscopic densities ─────────────────────────────────────────────────
+  for (let k = 0; k < n; k++) {
+    let rW = 0, rS = 0;
+    for (let q = 0; q < Q; q++) {
+      rW += f[k * Q + q];
+      rS += g[k * Q + q];
+    }
+    state.rhoWater[k]    = Math.max(0, rW);
+    state.rhoSediment[k] = Math.max(0, rS);
+  }
+}
+
+
+/* ─── fire.js ─── */
+/**
+ * fire.js — Phase-transition wildfire model (FireSweep style).
+ *
+ * Cell states: UNBURNED → BURNING → BURNED
+ *
+ * Spread mechanic (percolation):
+ *   Each fire tick, every BURNING cell attempts to ignite each of its 8
+ *   unburned neighbors exactly once. Spread probability P = fuelLoad_neighbor
+ *   multiplied by optional wind and slope factors. This makes fuelLoad
+ *   directly equivalent to the density parameter p in site-percolation theory.
+ *
+ *   Site-percolation threshold on a 2D square lattice:
+ *     4-neighbor: p_c ≈ 0.593
+ *     8-neighbor: p_c ≈ 0.407
+ *
+ *   Below p_c: fire burns out locally (subcritical).
+ *   Above p_c: fire percolates across the landscape (supercritical).
+ *   Near p_c:  fractal fire-front boundary, characteristic of phase transitions.
+ *
+ * Patch fuelLoad values are tuned so the interesting threshold falls between
+ * urban (~0.32, subcritical) and corridor (~0.62, supercritical). Grassland
+ * (0.70) and forest (1.0) are firmly supercritical; bare soil and wetland
+ * are subcritical.
+ *
+ * Wind adds directional bias without shifting the percolation threshold.
+ * Ember spotting creates long-range jumps (realistic firebrand behavior).
+ */
+
+const FIRE = { UNBURNED: 0, BURNING: 1, BURNED: 2 };
+
+// 8-directional neighbor offsets [drow, dcol]
+const DIRS   = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+const IS_DIAG = [true,  false, true,  false, false,true,  false,true ];
+
+function createFireState(cols, rows) {
+  return {
+    cell:   new Uint8Array(cols * rows),  // FIRE enum per cell
+    age:    new Uint8Array(cols * rows),  // fire-ticks spent burning
+    embers: [],                            // { x, y, tx, ty, age, life }
+  };
+}
+
+function resetFireState(fs) {
+  fs.cell.fill(0);
+  fs.age.fill(0);
+  fs.embers = [];
+}
+
+/** Set a single cell alight. Safe to call from mouse handlers. */
+function igniteAt(fs, row, col, cols, rows) {
+  if (row < 0 || row >= rows || col < 0 || col >= cols) return;
+  const idx = row * cols + col;
+  if (fs.cell[idx] === FIRE.UNBURNED) {
+    fs.cell[idx] = FIRE.BURNING;
+    fs.age[idx]  = 0;
+  }
+}
+
+/** Returns true if any cell is still burning. */
+function hasActiveFire(fs) {
+  for (let i = 0; i < fs.cell.length; i++) {
+    if (fs.cell[i] === FIRE.BURNING) return true;
+  }
+  return false;
+}
+
+/**
+ * Advance fire by one tick.
+ *
+ * Called from sketch.js on a slower clock (every FIRE_TICK_MS ms, independent
+ * of the water-flow speed multiplier) so fire spread is visually legible.
+ *
+ * windAngleDeg : compass direction the wind blows FROM (0=N, 90=E, 180=S, 270=W)
+ * windSpeed    : 0 – 5 (0 = calm, no directional bias)
+ */
+function stepFire(fs, patchGrid, patchKeys, patchParams,
+                         elevations, windAngleDeg, windSpeed, depths,
+                         cols, rows) {
+  // Wind vector: direction fire is pushed TOWARD (opposite of "from" convention)
+  const rad = (windAngleDeg * Math.PI) / 180;
+  const wx =  Math.sin(rad);   // east  component of push direction
+  const wy = -Math.cos(rad);   // south component (grid rows increase downward)
+
+  // Spread into a copy so all cells in this tick see the same initial state
+  const nextCell = new Uint8Array(fs.cell);
+  const nextAge  = new Uint8Array(fs.age);
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const idx = r * cols + c;
+      if (fs.cell[idx] !== FIRE.BURNING) continue;
+
+      nextAge[idx]++;
+
+      // How many ticks this patch type smolders before going dark
+      const params   = patchParams[patchKeys[patchGrid[idx]]] || {};
+      const burnLife = params.burnDuration ?? 3;
+
+      if (nextAge[idx] >= burnLife) {
+        nextCell[idx] = FIRE.BURNED;
+        // (don't continue — still try to spread on the final tick)
+      }
+
+      // ── Attempt spread to all 8 neighbors ──────────────────────────────────
+      for (let d = 0; d < 8; d++) {
+        const ni = r + DIRS[d][0];
+        const nj = c + DIRS[d][1];
+        if (ni < 0 || ni >= rows || nj < 0 || nj >= cols) continue;
+        const nidx = ni * cols + nj;
+        if (nextCell[nidx] !== FIRE.UNBURNED) continue;
+
+        const nParams = patchParams[patchKeys[patchGrid[nidx]]] || {};
+        const fuel    = nParams.fuelLoad ?? 0;
+        if (fuel <= 0) continue;
+        if (depths[nidx] > 0.012) continue; // standing water suppresses ignition
+
+        // ── Wind factor ───────────────────────────────────────────────────────
+        // Dot product of spread direction with wind push vector.
+        // Downwind neighbors get a boost; upwind get a penalty.
+        const scale  = IS_DIAG[d] ? 1.414 : 1.0;
+        const sdx    = DIRS[d][1] / scale;  // east  component of spread dir
+        const sdy    = DIRS[d][0] / scale;  // south component
+        const dot    = sdx * wx + sdy * wy; // −1 … +1
+        const windF  = Math.max(0.06, 1 + dot * windSpeed * 0.45);
+
+        // ── Slope factor ──────────────────────────────────────────────────────
+        // Fire climbs hills faster; slight penalty going downhill.
+        const dElev  = elevations[nidx] - elevations[idx];
+        const slopeF = Math.max(0.2, 1 + dElev * 14);
+
+        // ── Core percolation step ─────────────────────────────────────────────
+        // P = fuelLoad × windFactor × slopeFactor
+        // fuelLoad IS the density parameter p — this is the FireSweep model.
+        const P = Math.min(1.0, fuel * windF * slopeF);
+        if (Math.random() < P) {
+          nextCell[nidx] = FIRE.BURNING;
+          nextAge[nidx]  = 0;
+        }
+      }
+
+      // ── Ember spotting ────────────────────────────────────────────────────
+      // Firebrands carried by wind that can ignite distant unburned cells.
+      if (windSpeed > 1.0 && Math.random() < 0.006) {
+        const dist    = (3 + Math.random() * 8) * windSpeed * 0.38;
+        const scatter = (Math.random() - 0.5) * 3.2;
+        // Target drifts in wind direction with lateral scatter
+        fs.embers.push({
+          x: c + 0.5, y: r + 0.5,
+          tx: c + 0.5 + wx * dist - wy * scatter,
+          ty: r + 0.5 + wy * dist + wx * scatter,
+          age: 0, life: 7 + Math.floor(Math.random() * 5),
+        });
+      }
+    }
+  }
+
+  // ── Advance ember particles ───────────────────────────────────────────────
+  const alive = [];
+  for (const e of fs.embers) {
+    e.age++;
+    // Lerp toward target (exponential approach)
+    e.x += (e.tx - e.x) * 0.18;
+    e.y += (e.ty - e.y) * 0.18;
+
+    if (e.age >= e.life) {
+      // Landing — attempt ignition
+      const li = Math.floor(e.y), lj = Math.floor(e.x);
+      if (li >= 0 && li < rows && lj >= 0 && lj < cols) {
+        const lidx = li * cols + lj;
+        const lp   = patchParams[patchKeys[patchGrid[lidx]]] || {};
+        const fuel = lp.fuelLoad ?? 0;
+        if (nextCell[lidx] === FIRE.UNBURNED && fuel > 0 && depths[lidx] < 0.01) {
+          if (Math.random() < 0.4 * fuel) {
+            nextCell[lidx] = FIRE.BURNING;
+            nextAge[lidx]  = 0;
+          }
+        }
+      }
+      // ember is consumed — don't push to alive
+    } else {
+      alive.push(e);
+    }
+  }
+  fs.embers = alive;
+
+  fs.cell = nextCell;
+  fs.age  = nextAge;
+  return fs;
+}
+
+
+/* ─── dem.js ─── */
+/**
+ * DEM (Digital Elevation Model) parsing and resampling.
+ * Supports ASCII Grid, CSV, and JSON array formats.
+ */
+
+/**
+ * Parse ASCII Grid format (ESRI).
+ * Header: ncols, nrows, xllcorner, yllcorner, cellsize, NODATA_value
+ * @param {string} text
+ * @returns {{ elevations: number[], cols: number, rows: number } | null}
+ */
+function parseAscGrid(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const header = {};
+  let dataStart = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].split(/\s+/);
+    if (parts.length >= 2 && /^-?\d/.test(parts[1])) {
+      header[parts[0].toLowerCase()] = parseFloat(parts[1]);
+      dataStart = i + 1;
+    } else if (parts.length >= 2) {
+      header[parts[0].toLowerCase()] = parts[1];
+      dataStart = i + 1;
+    }
+  }
+  const cols = Math.floor(header.ncols || header.ncol || 0);
+  const rows = Math.floor(header.nrows || header.nrow || 0);
+  const nodata = header.nodata_value ?? header.nodata ?? -9999;
+
+  if (cols <= 0 || rows <= 0) return null;
+
+  const values = [];
+  for (let i = dataStart; i < lines.length; i++) {
+    const parts = lines[i].trim().split(/\s+/);
+    for (const p of parts) {
+      const v = parseFloat(p);
+      values.push(isNaN(v) || v === nodata ? NaN : v);
+    }
+  }
+
+  if (values.length !== cols * rows) return null;
+  const elevations = values.map(v => (isNaN(v) ? 0 : v));
+  return { elevations, cols, rows };
+}
+
+/**
+ * Parse CSV: one value per cell, row by row.
+ * @param {string} text
+ * @param {number} targetCols
+ * @param {number} targetRows
+ * @returns {number[] | null}
+ */
+function parseCsv(text, targetCols, targetRows) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l);
+  const values = [];
+  let srcCols = 0;
+  for (const line of lines) {
+    const parts = line.split(/[,\s]+/).filter(p => p);
+    if (parts.length > 0) {
+      if (srcCols === 0) srcCols = parts.length;
+      for (const p of parts) {
+        const v = parseFloat(p);
+        values.push(isNaN(v) ? 0 : v);
+      }
+    }
+  }
+  if (values.length === 0) return null;
+  const srcRows = Math.ceil(values.length / srcCols);
+  return resampleToGrid(values, srcCols, srcRows, targetCols, targetRows);
+}
+
+/**
+ * Parse JSON: array of rows [[v,v,...],[v,v,...]] or flat [v,v,v,...]
+ * @param {any} data
+ * @param {number} targetCols
+ * @param {number} targetRows
+ * @returns {number[] | null}
+ */
+function parseJsonElevations(data, targetCols, targetRows) {
+  let values = [];
+  if (Array.isArray(data)) {
+    if (Array.isArray(data[0])) {
+      for (const row of data) values.push(...row.map(v => Number(v) || 0));
+    } else {
+      values = data.map(v => Number(v) || 0);
+    }
+  }
+  if (values.length === 0) return null;
+  const srcCols = Array.isArray(data[0]) ? data[0].length : Math.ceil(Math.sqrt(values.length));
+  const srcRows = Math.ceil(values.length / srcCols);
+  return resampleToGrid(values, srcCols, srcRows, targetCols, targetRows);
+}
+
+/**
+ * Resample elevation grid to target dimensions using bilinear interpolation.
+ */
+function resampleToGrid(src, srcCols, srcRows, targetCols, targetRows) {
+  const out = new Float32Array(targetCols * targetRows);
+  const getSrc = (i, j) => {
+    const ii = Math.max(0, Math.min(i, srcRows - 1));
+    const jj = Math.max(0, Math.min(j, srcCols - 1));
+    return src[ii * srcCols + jj] ?? 0;
+  };
+
+  for (let i = 0; i < targetRows; i++) {
+    for (let j = 0; j < targetCols; j++) {
+      const si = (i / (targetRows - 1 || 1)) * (srcRows - 1);
+      const sj = (j / (targetCols - 1 || 1)) * (srcCols - 1);
+      const i0 = Math.floor(si);
+      const j0 = Math.floor(sj);
+      const fi = si - i0;
+      const fj = sj - j0;
+      const v00 = getSrc(i0, j0);
+      const v01 = getSrc(i0, j0 + 1);
+      const v10 = getSrc(i0 + 1, j0);
+      const v11 = getSrc(i0 + 1, j0 + 1);
+      const v = (1 - fi) * (1 - fj) * v00 + (1 - fi) * fj * v01 + fi * (1 - fj) * v10 + fi * fj * v11;
+      out[i * targetCols + j] = v;
+    }
+  }
+  return Array.from(out);
+}
+
+/**
+ * Load DEM from file. Detects format by extension/content.
+ * @param {File} file
+ * @param {number} targetCols
+ * @param {number} targetRows
+ * @returns {Promise<Float32Array | null>}
+ */
+async function loadDemFile(file, targetCols, targetRows) {
+  const text = await file.text();
+  let elevations = null;
+
+  if (file.name.endsWith('.json')) {
+    elevations = parseJsonElevations(JSON.parse(text), targetCols, targetRows);
+  } else if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
+    elevations = parseCsv(text, targetCols, targetRows);
+  } else if (file.name.endsWith('.asc') || file.name.endsWith('.grd') || text.trim().toLowerCase().startsWith('ncols')) {
+    const parsed = parseAscGrid(text);
+    if (parsed) {
+      elevations = resampleToGrid(
+        parsed.elevations,
+        parsed.cols,
+        parsed.rows,
+        targetCols,
+        targetRows
+      );
+    }
+  } else {
+    const parsed = parseAscGrid(text);
+    if (parsed) {
+      elevations = resampleToGrid(parsed.elevations, parsed.cols, parsed.rows, targetCols, targetRows);
+    } else {
+      elevations = parseCsv(text, targetCols, targetRows);
+    }
+  }
+
+  if (!elevations) return null;
+  return new Float32Array(elevations);
+}
+
+
+/* ─── nlcd-mapper.js ─── */
+/**
+ * nlcd-mapper.js
+ * Maps USGS National Land Cover Database (NLCD 2021) classes to mosaic-flow patch types.
+ */
+
+// NLCD class definitions: official RGB colors for WMS color-sampling, internal patch mapping.
+// Colors are the canonical NLCD legend values used by the MRLC WMS renderer.
+const NLCD_CLASSES = {
+  11: { name: 'Open Water',                     patchKey: 'water',    color: [70, 107, 159],  hex: '#466B9F' },
+  12: { name: 'Perennial Ice/Snow',             patchKey: 'water',    color: [209, 222, 248], hex: '#D1DEF8' },
+  21: { name: 'Developed, Open Space',          patchKey: 'urban',    color: [221, 201, 201], hex: '#DDC9C9' },
+  22: { name: 'Developed, Low Intensity',       patchKey: 'urban',    color: [217, 146, 130], hex: '#D99282' },
+  23: { name: 'Developed, Medium Intensity',    patchKey: 'urban',    color: [235,   0,   0], hex: '#EB0000' },
+  24: { name: 'Developed, High Intensity',      patchKey: 'urban',    color: [171,   0,   0], hex: '#AB0000' },
+  31: { name: 'Barren Land',                    patchKey: 'bare',     color: [179, 172, 159], hex: '#B3AC9F' },
+  41: { name: 'Deciduous Forest',               patchKey: 'forest',   color: [104, 171,  95], hex: '#68AB5F' },
+  42: { name: 'Evergreen Forest',               patchKey: 'forest',   color: [ 28,  95,  44], hex: '#1C5F2C' },
+  43: { name: 'Mixed Forest',                   patchKey: 'forest',   color: [181, 197, 143], hex: '#B5C58F' },
+  51: { name: 'Dwarf Scrub',                    patchKey: 'grass',    color: [175, 150,  60], hex: '#AF963C' },
+  52: { name: 'Shrub/Scrub',                    patchKey: 'corridor', color: [204, 186, 124], hex: '#CCBA7C' },
+  71: { name: 'Grassland/Herbaceous',           patchKey: 'grass',    color: [226, 226, 193], hex: '#E2E2C1' },
+  72: { name: 'Sedge/Herbaceous',               patchKey: 'grass',    color: [169, 194, 120], hex: '#A9C278' },
+  73: { name: 'Lichens',                        patchKey: 'bare',     color: [186, 186, 186], hex: '#BABABA' },
+  74: { name: 'Moss',                           patchKey: 'wetland',  color: [115, 186, 218], hex: '#73BAD8' },
+  81: { name: 'Pasture/Hay',                    patchKey: 'grass',    color: [219, 216,  61], hex: '#DBD83D' },
+  82: { name: 'Cultivated Crops',               patchKey: 'bare',     color: [170, 112,  40], hex: '#AA7028' },
+  90: { name: 'Woody Wetlands',                 patchKey: 'wetland',  color: [186, 216, 234], hex: '#BAD8EA' },
+  95: { name: 'Emergent Herbaceous Wetlands',   patchKey: 'wetland',  color: [112, 163, 186], hex: '#70A3BA' },
+};
+
+// Must match the key order in patches.js PATCH_PARAMS exactly.
+const PATCH_KEYS = ['grass', 'forest', 'wetland', 'bare', 'urban', 'corridor', 'water'];
+
+/**
+ * Convert an NLCD integer class value to the internal patch index (0–6).
+ */
+function nlcdToPatchIndex(nlcdValue) {
+  const entry = NLCD_CLASSES[nlcdValue];
+  if (!entry) return 0; // fallback: grass
+  const idx = PATCH_KEYS.indexOf(entry.patchKey);
+  return idx >= 0 ? idx : 0;
+}
+
+/**
+ * Find the nearest NLCD class by Euclidean RGB distance.
+ * Used to decode WMS color-sampled pixels back into class values.
+ */
+function colorToNlcdClass(r, g, b) {
+  let bestClass = 71; // Grassland default
+  let bestDist = Infinity;
+  for (const [cls, { color }] of Object.entries(NLCD_CLASSES)) {
+    const d = (r - color[0]) ** 2 + (g - color[1]) ** 2 + (b - color[2]) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      bestClass = Number(cls);
+    }
+  }
+  // Only trust match if color distance is within reasonable range (~80 units)
+  return bestDist < 6400 ? bestClass : 71;
+}
+
+/**
+ * Summarize land cover composition of an NLCD grid.
+ * Returns array sorted by descending coverage, with name, hex, patchKey, and fraction.
+ */
+function computeComposition(nlcdGrid) {
+  const counts = {};
+  let total = 0;
+  for (const val of nlcdGrid) {
+    if (val === 0) continue;
+    counts[val] = (counts[val] || 0) + 1;
+    total++;
+  }
+  if (total === 0) return [];
+  return Object.entries(counts)
+    .map(([cls, count]) => {
+      const c = Number(cls);
+      const entry = NLCD_CLASSES[c] || { name: `Class ${c}`, hex: '#888', patchKey: 'grass' };
+      return { nlcdClass: c, name: entry.name, hex: entry.hex, patchKey: entry.patchKey, pct: count / total };
+    })
+    .sort((a, b) => b.pct - a.pct);
+}
+
+/**
+ * Generate a synthetic NLCD-classified grid for testing / when live fetch is unavailable.
+ * Uses seeded LCG noise to produce blob-based land cover patterns with a water channel.
+ */
+function generateMockNLCDGrid(cols, rows, seed = 42) {
+  const grid = new Uint8Array(cols * rows);
+
+  // Seeded LCG pseudo-random
+  let s = (seed >>> 0) || 1;
+  const rng = () => { s = Math.imul(s, 1664525) + 1013904223; return (s >>> 0) / 4294967296; };
+
+  // Class distribution weighted toward forested/agricultural typical US landscape
+  const classes =  [41,  42,  52,  71,  81,  82,  21,  11,  90,  31];
+  const weights =  [20,  15,  10,  15,  10,  10,   8,   5,   7,   4];
+  const cumW = weights.reduce((acc, w, i) => { acc.push((acc[i - 1] || 0) + w); return acc; }, []);
+  const totalW = cumW[cumW.length - 1];
+  const pickClass = () => { const r = rng() * totalW; return classes[cumW.findIndex(w => w >= r)]; };
+
+  const numBlobs = 22;
+  const blobs = Array.from({ length: numBlobs }, () => ({
+    cx: rng() * cols, cy: rng() * rows,
+    rx: 4 + rng() * 14, ry: 3 + rng() * 10,
+    cls: pickClass(),
+  }));
+
+  // Add a sinuous water channel
+  const chanCol = cols * (0.3 + rng() * 0.4);
+  const chanAmp = 3 + rng() * 4;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      let cls = 71; // grassland default
+      let bestD = 1; // blobs replace default only if d < 1 (inside blob)
+      for (const b of blobs) {
+        const d = Math.sqrt(((col - b.cx) / b.rx) ** 2 + ((row - b.cy) / b.ry) ** 2);
+        if (d < 1 && d < bestD) { bestD = d; cls = b.cls; }
+      }
+      const chanX = chanCol + chanAmp * Math.sin((row / rows) * Math.PI * 3.5);
+      const distChan = Math.abs(col - chanX);
+      if (distChan < 1.5) cls = 11;       // open water
+      else if (distChan < 3.5) cls = 90;  // woody wetlands buffer
+      grid[row * cols + col] = cls;
+    }
+  }
+  return grid;
+}
+
+
+/* ─── parcel-analysis.js ─── */
+/**
+ * parcel-analysis.js
+ * Site Analysis module: geocode a location, draw a parcel on a satellite map,
+ * fetch real NLCD 2021 land cover data, and feed it into the mosaic-flow simulation.
+ *
+ * Depends on: Leaflet 1.9 + Leaflet.draw (loaded via CDN in index.html)
+ * Requires: nlcd-mapper.js
+ */
+
+
+
+const COLS = 64;
+const ROWS = 64;
+
+// ── Module state ──────────────────────────────────────────────────────────────
+let _map = null;
+let _mapReady = false;       // true after first-time map init
+let _drawnItems = null;
+let _drawControl = null;
+let _polygon = null;         // L.Layer (polygon or rectangle)
+let _polygonGeoJson = null;
+let _bounds = null;          // L.LatLngBounds
+let _nlcdGrid = null;        // Uint8Array[COLS*ROWS] of NLCD class values
+let _patchGrid = null;       // Uint8Array[COLS*ROWS] of internal patch indices
+let _composition = null;     // Array<{nlcdClass, name, hex, patchKey, pct}>
+let _lcOverlay = null;       // L.ImageOverlay — land cover grid on map
+let _simOverlay = null;      // L.ImageOverlay — simulation result on map
+let _simCanvas = null;       // offscreen 64×64 canvas for sim overlay rendering
+let _simCtx = null;
+let _simAnimId = null;
+let _onGridReady = null;
+let _onRunSim = null;
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+function initParcelAnalysis(containerId, { onGridReady, onRunSim }) {
+  console.log('[PA] initParcelAnalysis called, container:', containerId);
+  _onGridReady = onGridReady;
+  _onRunSim = onRunSim;
+
+  const el = document.getElementById(containerId);
+  if (!el) { console.error('[PA] container not found:', containerId); return; }
+  console.log('[PA] container found, size:', el.offsetWidth, 'x', el.offsetHeight);
+
+  // Build the HTML skeleton and sidebar controls immediately.
+  // The Leaflet map is initialized lazily in onTabActivated() because Leaflet
+  // requires the container to be visible (non-zero size) at init time.
+  el.innerHTML = _buildHTML();
+  console.log('[PA] HTML injected, #pa-map exists:', !!document.getElementById('pa-map'));
+  _injectStyles();
+
+  // Offscreen canvas for sim overlay (doesn't need to be visible)
+  _simCanvas = document.createElement('canvas');
+  _simCanvas.width = COLS;
+  _simCanvas.height = ROWS;
+  _simCtx = _simCanvas.getContext('2d');
+
+  _wireEvents();
+  _setStep(0);
+}
+
+/**
+ * Call when this tab becomes visible.
+ * Initializes the Leaflet map on the first call (container now has real dimensions),
+ * then invalidates size on subsequent calls.
+ */
+function onTabActivated() {
+  console.log('[PA] onTabActivated, _mapReady:', _mapReady);
+  const mapEl = document.getElementById('pa-map');
+  console.log('[PA] #pa-map size at activation:', mapEl?.offsetWidth, 'x', mapEl?.offsetHeight);
+  if (!_mapReady) {
+    _initMap();
+  } else {
+    setTimeout(() => _map && _map.invalidateSize(), 50);
+  }
+}
+
+/** Initialize Leaflet — must be called only when the container is visible. */
+function _initMap() {
+  console.log('[PA] _initMap called');
+  _mapReady = true;
+
+  const mapEl = document.getElementById('pa-map');
+  console.log('[PA] #pa-map offsetWidth/Height:', mapEl?.offsetWidth, mapEl?.offsetHeight);
+
+  // Esri World Imagery satellite base — free, no API key required
+  _map = L.map('pa-map', { zoomControl: true }).setView([39.5, -98.35], 4);
+  console.log('[PA] L.map created:', _map);
+
+  L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: 'Tiles &copy; Esri &mdash; Esri, Maxar, GeoEye, USGS', maxZoom: 19 }
+  ).addTo(_map);
+
+  // Leaflet.draw setup
+  _drawnItems = new L.FeatureGroup().addTo(_map);
+  _drawControl = new L.Control.Draw({
+    draw: {
+      polygon: {
+        allowIntersection: false,
+        showArea: true,
+        shapeOptions: { color: '#b8e04a', weight: 2, fillOpacity: 0.06 },
+      },
+      rectangle: {
+        shapeOptions: { color: '#b8e04a', weight: 2, fillOpacity: 0.06 },
+      },
+      polyline: false, circle: false, circlemarker: false, marker: false,
+    },
+    edit: { featureGroup: _drawnItems, remove: true },
+  });
+  _map.addControl(_drawControl);
+
+  _map.on(L.Draw.Event.CREATED, _onShapeCreated);
+  _map.on(L.Draw.Event.EDITED,  _onShapeEdited);
+  _map.on(L.Draw.Event.DELETED, () => _clearDrawing(false));
+}
+
+/** Stop the sim overlay animation loop (call when leaving site-analysis tab). */
+function stopSimOverlay() {
+  if (_simAnimId) { cancelAnimationFrame(_simAnimId); _simAnimId = null; }
+}
+
+// ── HTML template ─────────────────────────────────────────────────────────────
+
+function _buildHTML() {
+  return `
+<div id="pa-layout">
+  <aside id="pa-sidebar">
+    <div id="pa-header"><span class="pa-logo">◈</span> Site Analysis</div>
+
+    <div class="pa-step" id="pa-step-0">
+      <div class="pa-step-hd"><span class="pa-num">1</span><span class="pa-title">Search Location</span></div>
+      <div class="pa-step-body">
+        <div id="pa-search-row">
+          <input id="pa-search-input" type="text" placeholder="Address or place name…" autocomplete="off"/>
+          <button id="pa-search-btn">Go</button>
+        </div>
+        <div id="pa-search-results"></div>
+      </div>
+    </div>
+
+    <div class="pa-step pa-locked" id="pa-step-1">
+      <div class="pa-step-hd"><span class="pa-num">2</span><span class="pa-title">Draw Parcel</span></div>
+      <div class="pa-step-body">
+        <p class="pa-hint">Use the polygon or rectangle tool on the map toolbar. Double-click a polygon to close it.</p>
+        <button id="pa-clear-btn" class="pa-secondary" style="display:none">Clear Shape</button>
+      </div>
+    </div>
+
+    <div class="pa-step pa-locked" id="pa-step-2">
+      <div class="pa-step-hd"><span class="pa-num">3</span><span class="pa-title">Confirm Parcel</span></div>
+      <div class="pa-step-body">
+        <div id="pa-parcel-info"></div>
+        <div class="pa-row">
+          <button id="pa-load-btn">Load Land Cover</button>
+          <button id="pa-redraw-btn" class="pa-secondary">Redraw</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pa-step pa-locked" id="pa-step-3">
+      <div class="pa-step-hd"><span class="pa-num">4</span><span class="pa-title">Land Cover</span></div>
+      <div class="pa-step-body">
+        <div id="pa-lc-status"></div>
+        <div id="pa-lc-comp"></div>
+        <label class="pa-check-row">
+          <input type="checkbox" id="pa-show-lc" checked> Show land cover overlay
+        </label>
+      </div>
+    </div>
+
+    <div class="pa-step pa-locked" id="pa-step-4">
+      <div class="pa-step-hd"><span class="pa-num">5</span><span class="pa-title">Simulate</span></div>
+      <div class="pa-step-body">
+        <p class="pa-hint">The simulation runs in the Mosaic Design view with your parcel's land cover loaded.</p>
+        <div class="pa-row">
+          <button id="pa-run-btn">Run Simulation →</button>
+          <button id="pa-export-btn" class="pa-secondary">Export</button>
+        </div>
+        <label class="pa-check-row" id="pa-overlay-row" style="display:none">
+          <input type="checkbox" id="pa-show-sim-overlay" checked> Live simulation overlay
+        </label>
+      </div>
+    </div>
+  </aside>
+
+  <div id="pa-map-wrap">
+    <div id="pa-map"></div>
+  </div>
+</div>`;
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+
+function _injectStyles() {
+  if (document.getElementById('pa-styles')) return;
+  const s = document.createElement('style');
+  s.id = 'pa-styles';
+  s.textContent = `
+    #pa-layout {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      background: #0f0f12; color: #e0e0e0;
+      font-family: system-ui, -apple-system, sans-serif; font-size: 13px;
+    }
+    #pa-sidebar {
+      width: 270px; min-width: 270px; height: 100%; overflow-y: auto;
+      background: rgba(18,18,26,0.99);
+      border-right: 1px solid rgba(255,255,255,0.08);
+      display: flex; flex-direction: column;
+    }
+    #pa-header {
+      padding: 13px 16px 11px; font-size: 14px; font-weight: 600;
+      color: #b8e04a; border-bottom: 1px solid rgba(255,255,255,0.07);
+      display: flex; align-items: center; gap: 7px; letter-spacing: 0.01em;
+    }
+    .pa-logo { font-size: 17px; }
+    .pa-step { border-bottom: 1px solid rgba(255,255,255,0.06); transition: opacity 0.2s; }
+    .pa-locked { opacity: 0.35; pointer-events: none; }
+    .pa-step-hd {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 16px 7px; cursor: default;
+    }
+    .pa-num {
+      width: 21px; height: 21px; border-radius: 50%;
+      background: rgba(184,224,74,0.12); border: 1px solid #b8e04a;
+      color: #b8e04a; font-size: 10px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .pa-title { font-weight: 600; font-size: 12.5px; color: #e0e0e0; }
+    .pa-step-body { padding: 0 16px 12px; }
+    .pa-hint { color: #888; font-size: 11.5px; margin-bottom: 8px; line-height: 1.55; }
+    #pa-search-row { display: flex; gap: 6px; }
+    #pa-search-input {
+      flex: 1; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.14); border-radius: 5px;
+      padding: 6px 8px; color: #e0e0e0; font-size: 12px; outline: none;
+    }
+    #pa-search-input:focus { border-color: #b8e04a; }
+    #pa-search-results { margin-top: 5px; max-height: 150px; overflow-y: auto; }
+    .pa-result {
+      padding: 5px 8px; border-radius: 4px; cursor: pointer;
+      font-size: 11.5px; color: #ccc; line-height: 1.4;
+    }
+    .pa-result:hover { background: rgba(255,255,255,0.08); color: #fff; }
+    #pa-parcel-info { font-size: 11.5px; color: #aaa; margin-bottom: 8px; line-height: 1.5; }
+    #pa-lc-status { font-size: 11.5px; color: #aaa; margin-bottom: 6px; min-height: 18px; }
+    .pa-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+    .pa-comp-item { display: flex; align-items: center; gap: 5px; padding: 2px 0; font-size: 11px; }
+    .pa-swatch { width: 11px; height: 11px; border-radius: 2px; flex-shrink: 0; }
+    .pa-comp-name { flex: 1; color: #bbb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pa-bar-wrap { width: 52px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; flex-shrink: 0; }
+    .pa-bar { height: 100%; border-radius: 2px; }
+    .pa-pct { width: 28px; text-align: right; color: #777; flex-shrink: 0; }
+    .pa-check-row {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 11.5px; color: #aaa; cursor: pointer; margin-top: 7px;
+    }
+    button {
+      background: rgba(184,224,74,0.1); border: 1px solid rgba(184,224,74,0.38);
+      color: #b8e04a; border-radius: 5px; padding: 5px 11px;
+      font-size: 12px; cursor: pointer; transition: background 0.15s; white-space: nowrap;
+    }
+    button:hover { background: rgba(184,224,74,0.2); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .pa-secondary {
+      background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.18); color: #aaa;
+    }
+    .pa-secondary:hover { background: rgba(255,255,255,0.09); }
+    #pa-map-wrap { flex: 1; position: relative; overflow: hidden; }
+    #pa-map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+    .pa-spin {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid rgba(184,224,74,0.3); border-top-color: #b8e04a;
+      border-radius: 50%; animation: pa-spin 0.6s linear infinite;
+      vertical-align: middle; margin-right: 5px;
+    }
+    @keyframes pa-spin { to { transform: rotate(360deg); } }
+    .leaflet-draw-toolbar a,
+    .leaflet-bar a { background-color: #1a1a26 !important; color: #b8e04a !important; border-color: rgba(255,255,255,0.12) !important; }
+    .leaflet-draw-toolbar a:hover,
+    .leaflet-bar a:hover { background-color: #252534 !important; }
+    .leaflet-control-zoom a { color: #ccc !important; }
+  `;
+  document.head.appendChild(s);
+}
+
+// ── Workflow step management ──────────────────────────────────────────────────
+
+function _setStep(step) {
+  for (let i = 0; i <= 4; i++) {
+    const el = document.getElementById(`pa-step-${i}`);
+    if (!el) continue;
+    el.classList.toggle('pa-locked', i > step);
+  }
+}
+
+// ── Event wiring ──────────────────────────────────────────────────────────────
+
+function _wireEvents() {
+  const $ = id => document.getElementById(id);
+
+  // Search
+  $('pa-search-btn')?.addEventListener('click', _doSearch);
+  $('pa-search-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') _doSearch(); });
+
+  // Drawing controls
+  $('pa-clear-btn')?.addEventListener('click', () => _clearDrawing(true));
+  $('pa-redraw-btn')?.addEventListener('click', () => _clearDrawing(true));
+
+  // Confirm
+  $('pa-load-btn')?.addEventListener('click', _loadLandCover);
+
+  // LC overlay toggle
+  $('pa-show-lc')?.addEventListener('change', e => {
+    if (!_lcOverlay) return;
+    e.target.checked ? _lcOverlay.addTo(_map) : _lcOverlay.remove();
+  });
+
+  // Simulate / export
+  $('pa-run-btn')?.addEventListener('click', _runSimulation);
+  $('pa-export-btn')?.addEventListener('click', _doExport);
+
+  // Sim overlay toggle
+  $('pa-show-sim-overlay')?.addEventListener('change', e => {
+    e.target.checked ? _startSimOverlay() : stopSimOverlay();
+  });
+}
+
+// ── Geocode search (Nominatim — free, no key) ─────────────────────────────────
+
+async function _doSearch() {
+  const q = document.getElementById('pa-search-input')?.value?.trim();
+  if (!q) return;
+  const resultsEl = document.getElementById('pa-search-results');
+  resultsEl.innerHTML = '<span class="pa-hint"><span class="pa-spin"></span>Searching…</span>';
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(q)}`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'en-US,en' } });
+    const data = await res.json();
+
+    if (!data.length) {
+      resultsEl.innerHTML = '<p class="pa-hint">No results found.</p>';
+      return;
+    }
+    resultsEl.innerHTML = '';
+    for (const item of data) {
+      const div = document.createElement('div');
+      div.className = 'pa-result';
+      div.textContent = item.display_name;
+      div.addEventListener('click', () => {
+        const [s, n, w, e] = item.boundingbox.map(Number);
+        _map.fitBounds([[s, w], [n, e]], { maxZoom: 16 });
+        resultsEl.innerHTML = '';
+        _setStep(1);
+      });
+      resultsEl.appendChild(div);
+    }
+  } catch (err) {
+    resultsEl.innerHTML = '<p class="pa-hint">Search failed — try again.</p>';
+    console.warn('[PA] Nominatim error:', err);
+  }
+}
+
+// ── Drawing events ────────────────────────────────────────────────────────────
+
+function _onShapeCreated(e) {
+  _drawnItems.clearLayers();
+  _polygon = e.layer;
+  _drawnItems.addLayer(_polygon);
+  _polygonGeoJson = _polygon.toGeoJSON();
+  _bounds = _polygon.getBounds();
+  _updateParcelInfo();
+  document.getElementById('pa-clear-btn').style.display = '';
+  _setStep(2);
+}
+
+function _onShapeEdited() {
+  const layers = _drawnItems.getLayers();
+  if (layers.length > 0) {
+    _polygon = layers[0];
+    _polygonGeoJson = _polygon.toGeoJSON();
+    _bounds = _polygon.getBounds();
+    _updateParcelInfo();
+    _setStep(2);
+  }
+}
+
+function _clearDrawing(resetToStep1 = true) {
+  _polygon = null;
+  _polygonGeoJson = null;
+  _bounds = null;
+  _nlcdGrid = null;
+  _patchGrid = null;
+  _composition = null;
+  if (_lcOverlay) { if (_map) _lcOverlay.remove(); _lcOverlay = null; }
+  if (_simOverlay) { if (_map) _simOverlay.remove(); _simOverlay = null; }
+  if (_drawnItems) _drawnItems.clearLayers();
+  stopSimOverlay();
+  const el = document.getElementById('pa-clear-btn');
+  if (el) el.style.display = 'none';
+  const pi = document.getElementById('pa-parcel-info'); if (pi) pi.innerHTML = '';
+  const ls = document.getElementById('pa-lc-status');   if (ls) ls.innerHTML = '';
+  const lc = document.getElementById('pa-lc-comp');     if (lc) lc.innerHTML = '';
+  if (resetToStep1) _setStep(1);
+}
+
+function _updateParcelInfo() {
+  const infoEl = document.getElementById('pa-parcel-info');
+  if (!infoEl || !_bounds) return;
+  const sw = _bounds.getSouthWest();
+  const ne = _bounds.getNorthEast();
+  const km2 = _approxAreaKm2(_bounds);
+  infoEl.innerHTML = `
+    <div>${sw.lat.toFixed(4)}°N, ${sw.lng.toFixed(4)}°E  →  ${ne.lat.toFixed(4)}°N, ${ne.lng.toFixed(4)}°E</div>
+    <div style="color:#b8e04a;margin-top:3px">≈ ${km2.toFixed(2)} km² · ${(km2 * 100).toFixed(0)} ha</div>
+  `;
+}
+
+// ── NLCD land cover fetch ─────────────────────────────────────────────────────
+
+async function _loadLandCover() {
+  if (!_polygon || !_bounds) return;
+  _setStep(3);
+
+  const statusEl = document.getElementById('pa-lc-status');
+  statusEl.innerHTML = '<span class="pa-spin"></span>Fetching NLCD 2021 data from MRLC…';
+
+  try {
+    _nlcdGrid = await _fetchNLCDGrid(_bounds, COLS, ROWS);
+    statusEl.innerHTML = '✓ NLCD 2021 data loaded';
+  } catch (err) {
+    console.warn('[PA] NLCD fetch failed, using synthetic fallback:', err);
+    const seedLat = Math.floor(_bounds.getCenter().lat * 1000);
+    _nlcdGrid = generateMockNLCDGrid(COLS, ROWS, seedLat);
+    statusEl.innerHTML = '⚠ Synthetic land cover (NLCD unavailable from this origin)';
+  }
+
+  // NLCD class values → internal patch indices
+  _patchGrid = new Uint8Array(COLS * ROWS);
+  for (let i = 0; i < _nlcdGrid.length; i++) {
+    _patchGrid[i] = nlcdToPatchIndex(_nlcdGrid[i]);
+  }
+
+  // Composition summary
+  _composition = computeComposition(_nlcdGrid);
+  _renderComposition(_composition);
+
+  // Draw translucent land cover grid on map
+  _renderLCOverlay();
+
+  // Notify main simulation that a grid is available
+  if (_onGridReady) _onGridReady(_patchGrid);
+
+  _setStep(4);
+  const overlayRow = document.getElementById('pa-overlay-row');
+  if (overlayRow) overlayRow.style.display = '';
+}
+
+/**
+ * Fetch NLCD via MRLC WMS (CORS-enabled US government server), draw to canvas,
+ * sample pixel colors, and reverse-map to NLCD class values.
+ */
+async function _fetchNLCDGrid(bounds, cols, rows) {
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  const [west, south, east, north] = [sw.lng, sw.lat, ne.lng, ne.lat];
+
+  // USGS MRLC GeoServer WMS — NLCD 2021 CONUS (has Access-Control-Allow-Origin: *)
+  const wmsUrl = [
+    'https://www.mrlc.gov/geoserver/mrlc_display/NLCD_2021_Land_Cover_L48/ows',
+    '?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap',
+    '&LAYERS=NLCD_2021_Land_Cover_L48',
+    `&BBOX=${west},${south},${east},${north}`,
+    '&SRS=EPSG:4326',
+    `&WIDTH=${cols}&HEIGHT=${rows}`,
+    '&FORMAT=image/png&TRANSPARENT=true',
+  ].join('');
+
+  const img = await _loadCORSImage(wmsUrl);
+
+  // Sample the rendered image into a grid of NLCD class values
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = cols; offCanvas.height = rows;
+  const ctx = offCanvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, cols, rows);
+
+  const { data } = ctx.getImageData(0, 0, cols, rows);
+  const grid = new Uint8Array(cols * rows);
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const px = (i * cols + j) * 4;
+      const [r, g, b, a] = [data[px], data[px + 1], data[px + 2], data[px + 3]];
+      // Transparent or near-white pixels = no-data → grassland
+      grid[i * cols + j] = (a < 20 || (r > 240 && g > 240 && b > 240))
+        ? 71
+        : colorToNlcdClass(r, g, b);
+    }
+  }
+  return grid;
+}
+
+function _loadCORSImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const timer = setTimeout(() => reject(new Error('Image load timeout')), 12000);
+    img.onload = () => { clearTimeout(timer); resolve(img); };
+    img.onerror = (e) => { clearTimeout(timer); reject(e); };
+    img.src = url;
+  });
+}
+
+// ── Land cover overlay on map ─────────────────────────────────────────────────
+
+function _renderLCOverlay() {
+  if (!_map) return;
+  if (_lcOverlay) { _lcOverlay.remove(); _lcOverlay = null; }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = COLS; canvas.height = ROWS;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(COLS, ROWS);
+  const { data } = imgData;
+
+  for (let i = 0; i < ROWS; i++) {
+    for (let j = 0; j < COLS; j++) {
+      const cls = _nlcdGrid[i * COLS + j];
+      const entry = NLCD_CLASSES[cls];
+      const [r, g, b] = entry ? entry.color : [180, 180, 180];
+      const px = (i * COLS + j) * 4;
+      data[px] = r; data[px + 1] = g; data[px + 2] = b; data[px + 3] = 185;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  const sw = _bounds.getSouthWest();
+  const ne = _bounds.getNorthEast();
+  _lcOverlay = L.imageOverlay(canvas.toDataURL(), [[sw.lat, sw.lng], [ne.lat, ne.lng]], {
+    opacity: 1, interactive: false,
+  });
+
+  if (document.getElementById('pa-show-lc')?.checked !== false) {
+    _lcOverlay.addTo(_map);
+  }
+}
+
+// ── Simulation overlay (live) ─────────────────────────────────────────────────
+
+function _startSimOverlay() {
+  if (_simAnimId) cancelAnimationFrame(_simAnimId);
+  if (!_map || !_bounds || !window.renderSimToCanvas) return;
+
+  const sw = _bounds.getSouthWest();
+  const ne = _bounds.getNorthEast();
+
+  const tick = () => {
+    if (!window.renderSimToCanvas) return;
+    window.renderSimToCanvas(_simCanvas);
+    const url = _simCanvas.toDataURL();
+
+    if (!_simOverlay) {
+      _simOverlay = L.imageOverlay(url, [[sw.lat, sw.lng], [ne.lat, ne.lng]], {
+        opacity: 0.78, interactive: false,
+      });
+      _simOverlay.addTo(_map);
+    } else {
+      _simOverlay.setUrl(url);
+    }
+    _simAnimId = requestAnimationFrame(tick);
+  };
+
+  _simAnimId = requestAnimationFrame(tick);
+}
+
+// ── Composition panel ─────────────────────────────────────────────────────────
+
+function _renderComposition(composition) {
+  const el = document.getElementById('pa-lc-comp');
+  if (!el) return;
+  const maxPct = composition[0]?.pct ?? 1;
+  el.innerHTML = composition.slice(0, 10).map(item => `
+    <div class="pa-comp-item" title="${item.name}: ${(item.pct * 100).toFixed(1)}%">
+      <div class="pa-swatch" style="background:${item.hex}"></div>
+      <span class="pa-comp-name">${item.name.replace('Developed, ', 'Dev. ')}</span>
+      <div class="pa-bar-wrap"><div class="pa-bar" style="width:${(item.pct / maxPct) * 100}%;background:${item.hex}"></div></div>
+      <span class="pa-pct">${(item.pct * 100).toFixed(0)}%</span>
+    </div>
+  `).join('');
+}
+
+// ── Run simulation ────────────────────────────────────────────────────────────
+
+function _runSimulation() {
+  if (!_patchGrid) return;
+
+  // Push grid into the simulation engine
+  if (window.loadParcelGrid) window.loadParcelGrid(_patchGrid);
+
+  // Start live overlay if checked
+  if (document.getElementById('pa-show-sim-overlay')?.checked) {
+    _startSimOverlay();
+  }
+
+  // Switch to Mosaic Design tab and start simulation
+  if (_onRunSim) _onRunSim();
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+
+function _doExport() {
+  if (!_polygonGeoJson || !_patchGrid) return;
+
+  // 1. Parcel boundary GeoJSON
+  _download(
+    new Blob([JSON.stringify(_polygonGeoJson, null, 2)], { type: 'application/json' }),
+    'parcel-boundary.geojson'
+  );
+
+  // 2. Land cover grid CSV
+  if (_nlcdGrid) {
+    const rows = ['row,col,nlcd_class,nlcd_name,patch_type'];
+    for (let i = 0; i < ROWS; i++) {
+      for (let j = 0; j < COLS; j++) {
+        const cls = _nlcdGrid[i * COLS + j];
+        const entry = NLCD_CLASSES[cls] || { name: 'Unknown', patchKey: 'grass' };
+        rows.push(`${i},${j},${cls},"${entry.name}",${entry.patchKey}`);
+      }
+    }
+    setTimeout(() => _download(
+      new Blob([rows.join('\n')], { type: 'text/csv' }),
+      'land-cover-grid.csv'
+    ), 200);
+  }
+
+  // 3. Composition summary CSV
+  if (_composition) {
+    const lines = ['nlcd_class,name,patch_type,pct'];
+    for (const c of _composition) {
+      lines.push(`${c.nlcdClass},"${c.name}",${c.patchKey},${(c.pct * 100).toFixed(2)}`);
+    }
+    setTimeout(() => _download(
+      new Blob([lines.join('\n')], { type: 'text/csv' }),
+      'land-cover-composition.csv'
+    ), 400);
+  }
+}
+
+function _download(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+
+function _approxAreaKm2(bounds) {
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  const midLat = (sw.lat + ne.lat) / 2;
+  const dLat = ne.lat - sw.lat;
+  const dLon = ne.lng - sw.lng;
+  const kmLat = 111.32;
+  const kmLon = 111.32 * Math.cos(midLat * Math.PI / 180);
+  return Math.abs(dLat * kmLat * dLon * kmLon);
+}
+
+
+/* ─── ui.js ─── */
+/**
+ * UI controls: patch brush, sliders, metrics panel.
+ */
+
+
+
+function getPatchBehavior(key, p) {
+  const behaviors = {
+    [PATCH_TYPES.GRASS]: 'Moderate roughness; holds some water; moderate sediment source.',
+    [PATCH_TYPES.FOREST]: 'High roughness, slow flow; high infiltration; traps sediment.',
+    [PATCH_TYPES.WETLAND]: 'Moderate flow; very high infiltration (holds water); low erosion.',
+    [PATCH_TYPES.BARE]: 'Low roughness, fast flow; minimal infiltration; high sediment source.',
+    [PATCH_TYPES.URBAN]: 'Very low roughness, fast runoff; nearly no infiltration; some sediment.',
+    [PATCH_TYPES.CORRIDOR]: 'Channel-like; fast flow, moderate infiltration; conveys water and sediment.',
+    [PATCH_TYPES.WATER]: 'Water body; very low roughness, conveys flow; no infiltration or erosion.',
+  };
+  return behaviors[key] || '—';
+}
+
+function createUI(onUpdate) {
+  const controls = {
+    activePatch: PATCH_TYPES.GRASS,
+    rainfall: 50,
+    slopeAngle: 270,
+    slopeMagnitude: 0.01,
+    running: false,
+    elevationMode: 'dem',
+    demElevations: null,
+    showElevationLines: true,
+    showDrainageHeatmap: false,
+    useLBM: false,
+    viewMode: 'design',
+    sedimentMultiplier: 1,
+    menuExpanded: true,
+    brushSize: 3,
+    speedMultiplier: 1,
+    simMode: 'water',        // 'water' | 'fire'
+    windAngle: 225,          // compass degrees 0=N, 90=E
+    windSpeed: 2.5,          // 0–5
+    activeTool: 'paint',     // 'paint' | 'ignite' | 'water-source'
+    waterSourceRate: 0.04,   // meters of water added per step per source cell
+  };
+
+  const mosaicContainer = document.getElementById('mosaic-container');
+  if (!mosaicContainer) return { controls: {}, updateMetrics: () => {} };
+
+  const container = document.createElement('div');
+  container.id = 'mosaic-controls';
+  container.style.cssText = `
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(30, 30, 40, 0.98);
+    padding: 0;
+    border-radius: 8px;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    color: #e0e0e0;
+    z-index: 100;
+    max-width: 280px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    overflow: hidden;
+    pointer-events: auto;
+  `;
+
+  const headerBar = document.createElement('div');
+  headerBar.style.cssText = `
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: rgba(40, 40, 50, 0.98);
+    cursor: pointer;
+    user-select: none;
+  `;
+  headerBar.innerHTML = '<span>Controls</span>';
+  const arrowBtn = document.createElement('button');
+  arrowBtn.id = 'mosaic-arrow-btn';
+  arrowBtn.innerHTML = '&#9664;';
+  arrowBtn.title = 'Collapse menu';
+  arrowBtn.style.cssText = `
+    background: transparent;
+    border: none;
+    color: #e0e0e0;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 4px 8px;
+    transition: transform 0.2s ease;
+  `;
+  headerBar.appendChild(arrowBtn);
+
+  const menuContent = document.createElement('div');
+  menuContent.id = 'mosaic-menu-content';
+  menuContent.style.cssText = 'padding: 12px 16px; padding-top: 8px;';
+
+  const toggleMenu = () => {
+    controls.menuExpanded = !controls.menuExpanded;
+    menuContent.style.display = controls.menuExpanded ? 'block' : 'none';
+    arrowBtn.innerHTML = controls.menuExpanded ? '&#9664;' : '&#9654;';
+    arrowBtn.title = controls.menuExpanded ? 'Collapse menu' : 'Expand menu';
+  };
+  headerBar.addEventListener('click', (e) => {
+    if (e.target !== arrowBtn && !arrowBtn.contains(e.target)) toggleMenu();
+  });
+  arrowBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMenu();
+  });
+
+  mosaicContainer.appendChild(container);
+  container.appendChild(headerBar);
+  container.appendChild(menuContent);
+
+  const patchSection = document.createElement('div');
+  patchSection.innerHTML = '<strong>Patch Brush</strong>';
+  patchSection.style.marginBottom = '8px';
+
+  const brushLabel = document.createElement('label');
+  brushLabel.innerHTML = `Size: <span id="brush-size-val">${controls.brushSize}</span>`;
+  brushLabel.style.display = 'block';
+  brushLabel.style.marginBottom = '4px';
+  const brushSlider = document.createElement('input');
+  brushSlider.type = 'range';
+  brushSlider.min = 1;
+  brushSlider.max = 10;
+  brushSlider.value = controls.brushSize;
+  brushSlider.style.width = '100%';
+  brushSlider.addEventListener('input', () => {
+    controls.brushSize = Number(brushSlider.value);
+    document.getElementById('brush-size-val').textContent = controls.brushSize;
+    onUpdate?.();
+  });
+  patchSection.appendChild(brushLabel);
+  patchSection.appendChild(brushSlider);
+
+  const patchButtons = Object.entries(PATCH_PARAMS).map(([key, params]) => {
+    const btn = document.createElement('button');
+    btn.textContent = params.name;
+    btn.style.cssText = `
+      padding: 6px 10px;
+      margin: 2px;
+      border: 2px solid ${params.color};
+      background: ${controls.activePatch === key ? params.color + '40' : 'transparent'};
+      color: ${params.color};
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    `;
+    btn.addEventListener('click', () => {
+      controls.activePatch = key;
+      patchButtons.forEach(b => {
+        const k = Object.keys(PATCH_PARAMS).indexOf(b.dataset.key) >= 0 ? b.dataset.key : null;
+        if (k) {
+          const p = PATCH_PARAMS[k];
+          b.style.background = controls.activePatch === k ? p.color + '40' : 'transparent';
+        }
+      });
+      btn.style.background = params.color + '40';
+      onUpdate?.();
+    });
+    btn.dataset.key = key;
+    return btn;
+  });
+
+  patchButtons.forEach(btn => patchSection.appendChild(btn));
+
+  const randomBtn = document.createElement('button');
+  randomBtn.textContent = 'Randomize';
+  randomBtn.style.cssText = `
+    margin-top: 8px;
+    padding: 6px 12px;
+    background: #4a4a6a;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    width: 100%;
+  `;
+  randomBtn.title = 'Generate random patches with varied sizes';
+  randomBtn.addEventListener('click', () => onUpdate?.('randomize'));
+  patchSection.appendChild(randomBtn);
+
+  menuContent.appendChild(patchSection);
+
+  // ── Simulation Mode toggle ──────────────────────────────────────────────────
+  const simModeSection = document.createElement('div');
+  simModeSection.style.cssText = 'margin-top: 12px; margin-bottom: 4px;';
+  simModeSection.innerHTML = '<strong>Simulation Mode</strong>';
+
+  const simModeDiv = document.createElement('div');
+  simModeDiv.style.cssText = 'display: flex; gap: 6px; margin-top: 6px;';
+
+  const waterModeBtn = document.createElement('button');
+  waterModeBtn.textContent = 'Water / Sediment';
+  waterModeBtn.style.cssText = `
+    flex: 1; padding: 6px 8px; border: 1px solid #4a9eff;
+    background: #4a9eff30; color: #4a9eff;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+
+  const fireModeBtn = document.createElement('button');
+  fireModeBtn.textContent = 'Fire';
+  fireModeBtn.style.cssText = `
+    flex: 1; padding: 6px 8px; border: 1px solid #444;
+    background: transparent; color: #888;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+
+  const refreshSimModeBtns = () => {
+    const isWater = controls.simMode === 'water';
+    waterModeBtn.style.background = isWater ? '#4a9eff30' : 'transparent';
+    waterModeBtn.style.color = isWater ? '#4a9eff' : '#888';
+    waterModeBtn.style.borderColor = isWater ? '#4a9eff' : '#444';
+    fireModeBtn.style.background = !isWater ? '#ff6a2030' : 'transparent';
+    fireModeBtn.style.color = !isWater ? '#ff8c42' : '#888';
+    fireModeBtn.style.borderColor = !isWater ? '#ff6a20' : '#444';
+  };
+
+  waterModeBtn.addEventListener('click', () => {
+    controls.simMode = 'water';
+    controls.activeTool = 'paint';
+    refreshSimModeBtns();
+    if (typeof fireSectionDiv !== 'undefined') fireSectionDiv.style.display = 'none';
+    if (typeof waterSourceSectionDiv !== 'undefined') waterSourceSectionDiv.style.display = 'block';
+    onUpdate?.();
+  });
+  fireModeBtn.addEventListener('click', () => {
+    controls.simMode = 'fire';
+    controls.activeTool = 'paint';
+    refreshSimModeBtns();
+    if (typeof fireSectionDiv !== 'undefined') fireSectionDiv.style.display = 'block';
+    if (typeof waterSourceSectionDiv !== 'undefined') waterSourceSectionDiv.style.display = 'none';
+    onUpdate?.();
+  });
+
+  simModeDiv.appendChild(waterModeBtn);
+  simModeDiv.appendChild(fireModeBtn);
+  simModeSection.appendChild(simModeDiv);
+  menuContent.appendChild(simModeSection);
+
+  const rainLabel = document.createElement('label');
+  rainLabel.innerHTML = `Rainfall: <span id="rain-val">${controls.rainfall}</span> mm/hr`;
+  rainLabel.style.display = 'block';
+  rainLabel.style.marginTop = '12px';
+
+  const rainSlider = document.createElement('input');
+  rainSlider.type = 'range';
+  rainSlider.min = 0;
+  rainSlider.max = 150;
+  rainSlider.value = controls.rainfall;
+  rainSlider.style.width = '100%';
+  rainSlider.addEventListener('input', () => {
+    controls.rainfall = Number(rainSlider.value);
+    document.getElementById('rain-val').textContent = controls.rainfall;
+    onUpdate?.();
+  });
+
+  menuContent.appendChild(rainLabel);
+  menuContent.appendChild(rainSlider);
+
+  // ── Water Sources section ───────────────────────────────────────────────────
+  var waterSourceSectionDiv = document.createElement('div');
+  waterSourceSectionDiv.style.cssText = 'margin-top: 12px;';
+  waterSourceSectionDiv.innerHTML = '<strong>Water Sources</strong>';
+
+  const waterSourceToolBtn = document.createElement('button');
+  waterSourceToolBtn.textContent = 'Point Source';
+  waterSourceToolBtn.style.cssText = `
+    display: block; width: 100%; margin-top: 6px; padding: 6px 10px;
+    border: 1px solid #4a9eff; background: transparent; color: #4a9eff;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  const refreshWaterSourceBtn = () => {
+    const active = controls.activeTool === 'water-source';
+    waterSourceToolBtn.style.background = active ? '#4a9eff40' : 'transparent';
+    waterSourceToolBtn.style.fontWeight = active ? 'bold' : 'normal';
+  };
+  waterSourceToolBtn.addEventListener('click', () => {
+    controls.activeTool = controls.activeTool === 'water-source' ? 'paint' : 'water-source';
+    refreshWaterSourceBtn();
+    if (typeof igniteToolBtn !== 'undefined') refreshIgniteBtn();
+  });
+  waterSourceSectionDiv.appendChild(waterSourceToolBtn);
+
+  const floodHint = document.createElement('div');
+  floodHint.textContent = 'Shift+drag on canvas to flood area';
+  floodHint.style.cssText = 'font-size: 10px; color: #888; margin-top: 4px;';
+  waterSourceSectionDiv.appendChild(floodHint);
+
+  const wsRateLabel = document.createElement('label');
+  wsRateLabel.innerHTML = `Source rate: <span id="ws-rate-val">${controls.waterSourceRate}</span> m/step`;
+  wsRateLabel.style.cssText = 'display: block; margin-top: 6px; font-size: 12px;';
+  const wsRateSlider = document.createElement('input');
+  wsRateSlider.type = 'range';
+  wsRateSlider.min = 0.01;
+  wsRateSlider.max = 0.2;
+  wsRateSlider.step = 0.01;
+  wsRateSlider.value = controls.waterSourceRate;
+  wsRateSlider.style.width = '100%';
+  wsRateSlider.addEventListener('input', () => {
+    controls.waterSourceRate = Number(wsRateSlider.value);
+    document.getElementById('ws-rate-val').textContent = controls.waterSourceRate.toFixed(2);
+    onUpdate?.();
+  });
+  waterSourceSectionDiv.appendChild(wsRateLabel);
+  waterSourceSectionDiv.appendChild(wsRateSlider);
+
+  const clearSourcesBtn = document.createElement('button');
+  clearSourcesBtn.textContent = 'Clear Sources';
+  clearSourcesBtn.style.cssText = `
+    margin-top: 6px; padding: 5px 10px; background: #555;
+    color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  clearSourcesBtn.addEventListener('click', () => onUpdate?.('clear-sources'));
+  waterSourceSectionDiv.appendChild(clearSourcesBtn);
+  menuContent.appendChild(waterSourceSectionDiv);
+
+  // ── Fire Controls section ───────────────────────────────────────────────────
+  var fireSectionDiv = document.createElement('div');
+  fireSectionDiv.style.cssText = 'margin-top: 12px; display: none;';
+  fireSectionDiv.innerHTML = '<strong>Fire Controls</strong>';
+
+  var igniteToolBtn = document.createElement('button');
+  igniteToolBtn.textContent = 'Ignite Tool';
+  igniteToolBtn.style.cssText = `
+    display: block; width: 100%; margin-top: 6px; padding: 6px 10px;
+    border: 1px solid #ff6a20; background: transparent; color: #ff8c42;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  const refreshIgniteBtn = () => {
+    const active = controls.activeTool === 'ignite';
+    igniteToolBtn.style.background = active ? '#ff6a2040' : 'transparent';
+    igniteToolBtn.style.fontWeight = active ? 'bold' : 'normal';
+  };
+  igniteToolBtn.addEventListener('click', () => {
+    controls.activeTool = controls.activeTool === 'ignite' ? 'paint' : 'ignite';
+    refreshIgniteBtn();
+    refreshWaterSourceBtn();
+  });
+  fireSectionDiv.appendChild(igniteToolBtn);
+
+  const windAngleLabelEl = document.createElement('label');
+  windAngleLabelEl.innerHTML = `Wind direction: <span id="wind-angle-val">${controls.windAngle}</span>&deg;`;
+  windAngleLabelEl.style.cssText = 'display: block; margin-top: 8px; font-size: 12px;';
+  const windAngleSlider = document.createElement('input');
+  windAngleSlider.type = 'range';
+  windAngleSlider.min = 0;
+  windAngleSlider.max = 360;
+  windAngleSlider.step = 5;
+  windAngleSlider.value = controls.windAngle;
+  windAngleSlider.style.width = '100%';
+  windAngleSlider.addEventListener('input', () => {
+    controls.windAngle = Number(windAngleSlider.value);
+    document.getElementById('wind-angle-val').textContent = controls.windAngle;
+    onUpdate?.();
+  });
+  fireSectionDiv.appendChild(windAngleLabelEl);
+  fireSectionDiv.appendChild(windAngleSlider);
+
+  const windSpeedLabelEl = document.createElement('label');
+  windSpeedLabelEl.innerHTML = `Wind speed: <span id="wind-speed-val">${controls.windSpeed}</span>`;
+  windSpeedLabelEl.style.cssText = 'display: block; margin-top: 6px; font-size: 12px;';
+  const windSpeedSlider = document.createElement('input');
+  windSpeedSlider.type = 'range';
+  windSpeedSlider.min = 0;
+  windSpeedSlider.max = 5;
+  windSpeedSlider.step = 0.1;
+  windSpeedSlider.value = controls.windSpeed;
+  windSpeedSlider.style.width = '100%';
+  windSpeedSlider.addEventListener('input', () => {
+    controls.windSpeed = Number(windSpeedSlider.value);
+    document.getElementById('wind-speed-val').textContent = controls.windSpeed.toFixed(1);
+    onUpdate?.();
+  });
+  fireSectionDiv.appendChild(windSpeedLabelEl);
+  fireSectionDiv.appendChild(windSpeedSlider);
+
+  const clearFireBtn = document.createElement('button');
+  clearFireBtn.textContent = 'Clear Fire';
+  clearFireBtn.style.cssText = `
+    margin-top: 6px; padding: 5px 10px; background: #5a3030;
+    color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;
+  `;
+  clearFireBtn.addEventListener('click', () => onUpdate?.('clear-fire'));
+  fireSectionDiv.appendChild(clearFireBtn);
+  menuContent.appendChild(fireSectionDiv);
+
+  const topoSection = document.createElement('div');
+  topoSection.style.marginTop = '12px';
+  topoSection.innerHTML = '<strong>Topography</strong>';
+  menuContent.appendChild(topoSection);
+
+  const topoDemDiv = document.createElement('div');
+  topoDemDiv.id = 'topo-dem-div';
+  topoDemDiv.style.marginTop = '8px';
+
+  const demInput = document.createElement('input');
+  demInput.type = 'file';
+  demInput.accept = '.asc,.grd,.csv,.txt,.json';
+  demInput.style.display = 'none';
+  demInput.title = 'ASCII Grid (.asc), CSV, or JSON elevation data. Resampled to 64×64.';
+
+  const demBtn = document.createElement('button');
+  demBtn.textContent = 'Load DEM';
+  demBtn.style.cssText = `
+    padding: 6px 12px;
+    background: #4a6a8a;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  `;
+  demBtn.addEventListener('click', () => demInput.click());
+
+  const sampleDems = {
+    'Simple Slope': (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          elevs[i * n + j] = (n - j) * 0.01;
+        }
+      }
+      return elevs;
+    },
+    Valley: (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const x = (j - n / 2) / (n / 2);
+          const y = (i - n / 2) / (n / 2);
+          elevs[i * n + j] = 100 - 30 * (x * x + y * y * 0.5) + 20 * Math.sin(j * 0.2) * Math.cos(i * 0.15);
+        }
+      }
+      return elevs;
+    },
+    Ridge: (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const x = (j - n / 2) / (n / 2);
+          elevs[i * n + j] = 80 - 40 * (x * x) + 15 * Math.sin(i * 0.15);
+        }
+      }
+      return elevs;
+    },
+    Channel: (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const distFromCenter = Math.abs(j - n / 2);
+          const channelDepth = Math.exp(-distFromCenter * distFromCenter / 100) * 25;
+          elevs[i * n + j] = 100 - channelDepth - (n - i) * 0.3 + 8 * Math.sin(j * 0.1);
+        }
+      }
+      return elevs;
+    },
+    Rolling: (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          elevs[i * n + j] = 80 + 25 * Math.sin(i * 0.12) * Math.cos(j * 0.1) +
+            18 * Math.sin((i + j) * 0.08) - (n - i) * 0.15;
+        }
+      }
+      return elevs;
+    },
+    Dome: (n) => {
+      const elevs = new Float32Array(n * n);
+      const cx = n / 2;
+      const cy = n / 2;
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const r = Math.sqrt((i - cy) ** 2 + (j - cx) ** 2) / (n / 2);
+          elevs[i * n + j] = Math.max(0, 100 - 60 * r * r) + 5 * Math.sin(j * 0.2);
+        }
+      }
+      return elevs;
+    },
+    Gully: (n) => {
+      const elevs = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const y = (i - n / 2) / (n / 2);
+          const x = (j - n / 2) / (n / 2);
+          const gully = 30 * Math.exp(-y * y * 4) * (1 - Math.abs(x) * 0.5);
+          elevs[i * n + j] = 100 - gully - i * 0.2 + 5 * Math.sin(j * 0.15);
+        }
+      }
+      return elevs;
+    },
+  };
+
+  // Set the initial DEM to simple slope
+  controls.demElevations = sampleDems['Simple Slope'](64);
+
+  const sampleDemDiv = document.createElement('div');
+  sampleDemDiv.style.marginTop = '6px';
+  sampleDemDiv.style.display = 'flex';
+  sampleDemDiv.style.flexWrap = 'wrap';
+  sampleDemDiv.style.gap = '4px';
+  Object.keys(sampleDems).forEach((name) => {
+    const btn = document.createElement('button');
+    btn.textContent = name;
+    btn.style.cssText = `
+      padding: 4px 8px;
+      background: #5a7a6a;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+    `;
+    btn.title = `Sample ${name} DEM`;
+    btn.addEventListener('click', () => {
+      controls.demElevations = sampleDems[name](64);
+      onUpdate?.();
+    });
+    sampleDemDiv.appendChild(btn);
+  });
+
+  demInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const targetCols = 64;
+    const targetRows = 64;
+const elevations = await loadDemFile(file, targetCols, targetRows);
+    if (elevations) {
+      controls.demElevations = elevations;
+      onUpdate?.();
+    } else {
+      alert('Could not parse DEM file. Try ASCII Grid (.asc), CSV, or JSON.');
+    }
+    demInput.value = '';
+  });
+
+  const demBtnRow = document.createElement('div');
+  demBtnRow.appendChild(demBtn);
+  topoDemDiv.appendChild(demBtnRow);
+  topoDemDiv.appendChild(sampleDemDiv);
+  topoDemDiv.appendChild(demInput);
+  menuContent.appendChild(topoDemDiv);
+
+  const elevationLinesLabel = document.createElement('label');
+  elevationLinesLabel.style.display = 'flex';
+  elevationLinesLabel.style.alignItems = 'center';
+  elevationLinesLabel.style.marginTop = '12px';
+  elevationLinesLabel.style.gap = '8px';
+  elevationLinesLabel.style.cursor = 'pointer';
+  const elevationLinesCheck = document.createElement('input');
+  elevationLinesCheck.type = 'checkbox';
+  elevationLinesCheck.checked = controls.showElevationLines;
+  elevationLinesCheck.addEventListener('change', () => {
+    controls.showElevationLines = elevationLinesCheck.checked;
+    onUpdate?.();
+  });
+  elevationLinesLabel.appendChild(elevationLinesCheck);
+  elevationLinesLabel.appendChild(document.createTextNode('Show elevation contours'));
+  menuContent.appendChild(elevationLinesLabel);
+
+  // Fix 4: drainage heatmap toggle
+  const drainageHeatmapLabel = document.createElement('label');
+  drainageHeatmapLabel.style.display = 'flex';
+  drainageHeatmapLabel.style.alignItems = 'center';
+  drainageHeatmapLabel.style.marginTop = '6px';
+  drainageHeatmapLabel.style.gap = '8px';
+  drainageHeatmapLabel.style.cursor = 'pointer';
+  const drainageHeatmapCheck = document.createElement('input');
+  drainageHeatmapCheck.type = 'checkbox';
+  drainageHeatmapCheck.checked = controls.showDrainageHeatmap;
+  drainageHeatmapCheck.addEventListener('change', () => {
+    controls.showDrainageHeatmap = drainageHeatmapCheck.checked;
+  });
+  drainageHeatmapLabel.appendChild(drainageHeatmapCheck);
+  drainageHeatmapLabel.appendChild(document.createTextNode('Show drainage network'));
+  menuContent.appendChild(drainageHeatmapLabel);
+
+  // LBM density field toggle
+  const lbmLabel = document.createElement('label');
+  lbmLabel.style.display = 'flex';
+  lbmLabel.style.alignItems = 'center';
+  lbmLabel.style.marginTop = '6px';
+  lbmLabel.style.gap = '8px';
+  lbmLabel.style.cursor = 'pointer';
+  const lbmCheck = document.createElement('input');
+  lbmCheck.type = 'checkbox';
+  lbmCheck.checked = controls.useLBM;
+  lbmCheck.addEventListener('change', () => {
+    controls.useLBM = lbmCheck.checked;
+  });
+  lbmLabel.appendChild(lbmCheck);
+  lbmLabel.appendChild(document.createTextNode('LBM density field'));
+  menuContent.appendChild(lbmLabel);
+
+  const sedimentLabel = document.createElement('label');
+  sedimentLabel.innerHTML = `Sediment rate: <span id="sediment-val">${controls.sedimentMultiplier}</span>×`;
+  sedimentLabel.style.display = 'block';
+  sedimentLabel.style.marginTop = '12px';
+  const sedimentSlider = document.createElement('input');
+  sedimentSlider.type = 'range';
+  sedimentSlider.min = 0.5;
+  sedimentSlider.max = 5;
+  sedimentSlider.step = 0.25;
+  sedimentSlider.value = controls.sedimentMultiplier;
+  sedimentSlider.style.width = '100%';
+  sedimentSlider.addEventListener('input', () => {
+    controls.sedimentMultiplier = Number(sedimentSlider.value);
+    document.getElementById('sediment-val').textContent = controls.sedimentMultiplier;
+    onUpdate?.();
+  });
+  menuContent.appendChild(sedimentLabel);
+  menuContent.appendChild(sedimentSlider);
+
+  const speedLabel = document.createElement('label');
+  speedLabel.innerHTML = `Speed: <span id="speed-val">${controls.speedMultiplier}</span>×`;
+  speedLabel.style.display = 'block';
+  speedLabel.style.marginTop = '12px';
+  const speedSlider = document.createElement('input');
+  speedSlider.type = 'range';
+  speedSlider.min = 1;
+  speedSlider.max = 8;
+  speedSlider.value = controls.speedMultiplier;
+  speedSlider.style.width = '100%';
+  speedSlider.addEventListener('input', () => {
+    controls.speedMultiplier = Number(speedSlider.value);
+    document.getElementById('speed-val').textContent = controls.speedMultiplier;
+    onUpdate?.();
+  });
+  menuContent.appendChild(speedLabel);
+  menuContent.appendChild(speedSlider);
+
+  const runBtn = document.createElement('button');
+  runBtn.textContent = 'Run';
+  runBtn.style.cssText = `
+    margin-top: 12px;
+    padding: 8px 16px;
+    background: #4a7c59;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  `;
+  runBtn.addEventListener('click', () => {
+    controls.running = !controls.running;
+    runBtn.textContent = controls.running ? 'Pause' : 'Run';
+    runBtn.style.background = controls.running ? '#c75a3a' : '#4a7c59';
+    onUpdate?.();
+  });
+  menuContent.appendChild(runBtn);
+
+  const resetBtn = document.createElement('button');
+  resetBtn.textContent = 'Reset Water';
+  resetBtn.style.cssText = `
+    margin-left: 8px;
+    padding: 8px 16px;
+    background: #555;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  `;
+  resetBtn.addEventListener('click', () => onUpdate?.('reset'));
+  menuContent.appendChild(resetBtn);
+
+  const resetAllBtn = document.createElement('button');
+  resetAllBtn.textContent = 'Reset All';
+  resetAllBtn.title = 'Clear patches, water, and sediment back to defaults';
+  resetAllBtn.style.cssText = `
+    display: block;
+    margin-top: 6px;
+    padding: 8px 16px;
+    background: #6b3030;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    width: 100%;
+  `;
+  resetAllBtn.addEventListener('click', () => onUpdate?.('resetAll'));
+  menuContent.appendChild(resetAllBtn);
+
+  // View mode cycle buttons: Design / Flow / Sediment
+  const viewModeDiv = document.createElement('div');
+  viewModeDiv.style.cssText = 'display: flex; gap: 4px; margin-top: 8px;';
+  const viewModes = [
+    { id: 'design', label: 'Design', title: 'Full patch colors with water overlay' },
+    { id: 'flow',   label: 'Flow',   title: 'Desaturated patches, prominent streamlines' },
+    { id: 'sediment', label: 'Sediment', title: 'Amplified sediment deposition view' },
+    { id: 'fire', label: 'Fire', title: 'Fire spread states and ember particles' },
+  ];
+  const viewBtns = viewModes.map(({ id, label, title }) => {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.title = title;
+    const isActive = () => controls.viewMode === id;
+    const refresh = () => {
+      btn.style.background = isActive() ? '#4a5a7d' : 'transparent';
+      btn.style.color = isActive() ? '#fff' : '#888';
+      btn.style.borderColor = isActive() ? '#6a7aad' : '#444';
+    };
+    btn.style.cssText = `
+      flex: 1;
+      padding: 5px 4px;
+      border: 1px solid #444;
+      background: transparent;
+      color: #888;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: background 0.15s;
+    `;
+    btn.addEventListener('click', () => {
+      controls.viewMode = id;
+      viewBtns.forEach(b => b._refresh());
+    });
+    btn._refresh = refresh;
+    refresh();
+    return btn;
+  });
+  viewBtns.forEach(btn => viewModeDiv.appendChild(btn));
+  menuContent.appendChild(viewModeDiv);
+
+  const restoreBtn = document.createElement('button');
+  restoreBtn.textContent = 'Restore';
+  restoreBtn.style.cssText = `
+    display: block;
+    margin-top: 8px;
+    padding: 8px 16px;
+    background: #2d5a3d;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    width: 100%;
+  `;
+  restoreBtn.title = 'Replace ~30% of patches with wetland/forest';
+  restoreBtn.addEventListener('click', () => onUpdate?.('restore'));
+  menuContent.appendChild(restoreBtn);
+
+
+  const exportBtn = document.createElement('button');
+  exportBtn.textContent = 'Export';
+  exportBtn.style.cssText = `
+    margin-top: 8px;
+    padding: 6px 12px;
+    background: #3d5a7d;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    margin-right: 4px;
+  `;
+  exportBtn.title = 'Export patch configuration as JSON';
+  exportBtn.addEventListener('click', () => onUpdate?.('export'));
+  menuContent.appendChild(exportBtn);
+
+  const importBtn = document.createElement('button');
+  importBtn.textContent = 'Import';
+  importBtn.style.cssText = `
+    padding: 6px 12px;
+    background: #3d5a7d;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  `;
+  importBtn.title = 'Import patch configuration from JSON';
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.json';
+  fileInput.style.display = 'none';
+  fileInput.addEventListener('change', (e) => {
+    const f = e.target.files?.[0];
+    if (f) {
+      const r = new FileReader();
+      r.onload = () => {
+        try {
+          const data = JSON.parse(r.result);
+          onUpdate?.('import', data);
+        } catch (err) {
+          alert('Invalid JSON file');
+        }
+      };
+      r.readAsText(f);
+    }
+    fileInput.value = '';
+  });
+  importBtn.addEventListener('click', () => fileInput.click());
+  menuContent.appendChild(importBtn);
+  menuContent.appendChild(fileInput);
+
+  const metricsDiv = document.createElement('div');
+  metricsDiv.id = 'mosaic-metrics';
+  metricsDiv.style.cssText = 'margin-top: 12px;';
+
+  const metricsText = document.createElement('div');
+  metricsText.id = 'mosaic-metrics-text';
+  metricsText.style.cssText = 'font-size: 11px; color: #aaa; line-height: 1.6;';
+  metricsText.innerHTML = 'Conn: — | Particles: —';
+  metricsDiv.appendChild(metricsText);
+
+  menuContent.appendChild(metricsDiv);
+
+  // ── Right-side time-series chart panel ──────────────────────────────────
+  const CHART_W = 220;
+  const CHART_H = 400;
+  const PANEL_H = CHART_H / 4;
+
+  const chartCanvas = document.createElement('canvas');
+  chartCanvas.width = CHART_W;
+  chartCanvas.height = CHART_H;
+  chartCanvas.style.cssText = `
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(12, 12, 16, 0.95);
+    border: 1px solid #2a2a3a;
+    border-radius: 6px;
+    z-index: 100;
+    pointer-events: none;
+  `;
+  mosaicContainer.appendChild(chartCanvas);
+
+  const infoBtn = document.createElement('button');
+  infoBtn.textContent = 'ℹ Info';
+  infoBtn.title = 'Model documentation';
+  infoBtn.style.cssText = `
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    padding: 8px 14px;
+    background: rgba(50, 50, 65, 0.9);
+    border: 1px solid #555;
+    border-radius: 6px;
+    color: #bbb;
+    font-size: 13px;
+    cursor: pointer;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  `;
+  mosaicContainer.appendChild(infoBtn);
+
+  const infoModal = document.createElement('div');
+  infoModal.id = 'mosaic-info-modal';
+  infoModal.style.cssText = `
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 10000;
+    justify-content: center;
+    align-items: center;
+    padding: 24px;
+    overflow-y: auto;
+  `;
+  const infoPanel = document.createElement('div');
+  infoPanel.style.cssText = `
+    background: #1e1e26;
+    color: #e0e0e0;
+    max-width: 640px;
+    max-height: 85vh;
+    overflow-y: auto;
+    padding: 24px;
+    border-radius: 10px;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  `;
+
+  const patchTable = Object.entries(PATCH_PARAMS).map(([key, p]) =>
+    `<tr>
+      <td style="color:${p.color};font-weight:bold">${p.name}</td>
+      <td>${p.manningN}</td>
+      <td>${p.infiltration}</td>
+      <td>${p.erodibility}</td>
+      <td style="font-size:11px;color:#aaa">${getPatchBehavior(key, p)}</td>
+    </tr>`
+  ).join('');
+
+  infoPanel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="margin:0;font-size:18px">Land Mosaic Flow Model</h2>
+      <button id="info-modal-close" style="background:#555;border:none;color:#fff;padding:6px 12px;border-radius:4px;cursor:pointer">Close</button>
+    </div>
+    <h3 style="margin-top:20px;font-size:14px">Model overview</h3>
+    <p>This model combines Richard T.T. Forman's patch-matrix-corridor framework with overland flow physics. Rainfall falls uniformly; water flows downhill via steepest descent. Each patch type has distinct hydraulic properties that govern flow velocity, infiltration, and sediment transport.</p>
+    <h3 style="margin-top:20px;font-size:14px">Equations</h3>
+    <p><strong>Manning's equation</strong> (flow velocity):<br>
+    <code style="background:#2a2a32;padding:2px 6px;border-radius:4px">v = (1/n) × R<sup>2/3</sup> × S<sup>1/2</sup></code><br>
+    where <em>n</em> = roughness, <em>R</em> ≈ depth <em>h</em>, <em>S</em> = slope. Lower <em>n</em> → faster flow.</p>
+    <p style="margin-top:10px"><strong>Continuity</strong>:<br>
+    <code style="background:#2a2a32;padding:2px 6px;border-radius:4px">∂h/∂t = P − I − ∇·q</code><br>
+    Change in depth = rainfall − infiltration − outflow.</p>
+    <p style="margin-top:10px"><strong>Sediment</strong>: Particles spawn in erodible patches when depth and flow velocity exceed thresholds. They advect with flow and settle when velocity drops below ~0.005 m/s.</p>
+    <h3 style="margin-top:20px;font-size:14px">Patch parameters</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="text-align:left;border-bottom:1px solid #444">
+          <th>Patch</th>
+          <th>n</th>
+          <th>Infilt (mm/hr)</th>
+          <th>Erod.</th>
+          <th>Behavior</th>
+        </tr>
+      </thead>
+      <tbody>${patchTable}</tbody>
+    </table>
+
+    <h3 style="margin-top:28px;font-size:14px;border-top:1px solid #333;padding-top:20px">Agent system</h3>
+    <p style="color:#888;font-size:12px;margin-bottom:14px">This model is developed with a set of specialized Claude agents. Each agent has a focused role and persistent memory across sessions. Invoke them from the Claude Code CLI inside this project directory.</p>
+
+    <div style="display:grid;gap:10px">
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#7ab3ff;font-weight:bold;font-size:12px">orchestrator</span>
+          <span style="color:#555;font-size:10px">entry point</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Routes any question to the right specialist agents, collects their outputs, and returns a synthesized response. Start here for broad or multi-domain questions — e.g. "my flow outputs feel wrong, what should I fix?"</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#ff7a7a;font-weight:bold;font-size:12px">model-diagnostician</span>
+          <span style="color:#555;font-size:10px">diagnosis</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Audits the model code and returns exactly: one genuine strength, three specific failure modes (naming files, functions, data structures), and the hardest question the model cannot currently answer. Run this first before any dev sprint or crit.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#ff7a7a;font-weight:bold;font-size:12px">representation-critic</span>
+          <span style="color:#555;font-size:10px">diagnosis</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Evaluates whether the visualization actually communicates the dynamics it models. Asks: can a viewer see how changing a patch changes a corridor? Returns three specific representational changes ranked by legibility impact. Run before every studio review.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#b8e04a;font-weight:bold;font-size:12px">theory-scout</span>
+          <span style="color:#555;font-size:10px">theory</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Finds the 2–3 most relevant theoretical frameworks for a specific model question (e.g. "how should patch permeability affect corridor width?") and translates them into computational terms. Flags where the literature is contested or silent. Feed output to flow-physics-translator.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#b8e04a;font-weight:bold;font-size:12px">flow-physics-translator</span>
+          <span style="color:#555;font-size:10px">theory → code</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Translates ecological concepts (corridor connectivity, resistance surfaces, percolation thresholds) into data structures and algorithms. Returns a recommended approach with rationale, a minimal code sketch, and key parameters to calibrate. Flags computational bottlenecks before you hit them.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#b8e04a;font-weight:bold;font-size:12px">flow-specialist</span>
+          <span style="color:#555;font-size:10px">hydrology</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Deep technical grounding in how water moves through heterogeneous landscapes — surface runoff, infiltration, subsurface lateral flow, patch-edge effects. Use when flow logic feels too simple or when outputs don't match physical intuition. Keeps advice implementation-ready.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#ffa84a;font-weight:bold;font-size:12px">scenario-logic-generator</span>
+          <span style="color:#555;font-size:10px">testing</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Generates 5–10 graduated what-if test scenarios ordered by complexity (single-patch edits → cascading multi-patch disturbances). Each scenario specifies the input change, expected output, and what a broken model response looks like. Use to build a validation suite before any major revision.</p>
+      </div>
+
+      <div style="background:#16161e;border:1px solid #2a2a3a;border-radius:6px;padding:12px">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+          <span style="color:#7ab3ff;font-weight:bold;font-size:12px">design-fix</span>
+          <span style="color:#555;font-size:10px">roadmap</span>
+        </div>
+        <p style="margin:0;font-size:11px;color:#aaa">Synthesizes outputs from all other agents into a prioritized development roadmap: immediate fixes (this week), medium-term restructuring, longer-term extensions. Each item includes root cause, minimum change, expected improvement, and a success criterion. Run before any dev sprint or crit prep.</p>
+      </div>
+
+    </div>
+  `;
+
+  infoModal.appendChild(infoPanel);
+  document.body.appendChild(infoModal);
+
+  infoBtn.addEventListener('click', () => {
+    infoModal.style.display = 'flex';
+  });
+  infoPanel.querySelector('#info-modal-close').addEventListener('click', () => {
+    infoModal.style.display = 'none';
+  });
+  infoModal.addEventListener('click', (e) => {
+    if (e.target === infoModal) infoModal.style.display = 'none';
+  });
+
+  // Chart panel config
+  const PANELS = [
+    { key: 'runoffRatio',  label: 'RUNOFF',  unit: '0–1',      color: '#4a9eff', fmt: v => v.toFixed(2) },
+    { key: 'meanStorage',  label: 'STORAGE', unit: 'mm depth', color: '#3dd6a3', fmt: v => (v * 1000).toFixed(2) },
+    { key: 'etFraction',   label: 'ET',      unit: '0–1',      color: '#7dd87d', fmt: v => v.toFixed(2) },
+    { key: 'concentration',label: 'CONCEN.', unit: '0–1',      color: '#f0b429', fmt: v => v.toFixed(2) },
+  ];
+
+  function drawChartPanel(chartHistory, interventionMarkers, running) {
+    const ctx = chartCanvas.getContext('2d');
+    ctx.clearRect(0, 0, CHART_W, CHART_H);
+    ctx.fillStyle = 'rgba(12, 12, 16, 0.95)';
+    ctx.fillRect(0, 0, CHART_W, CHART_H);
+
+    if (!running) {
+      ctx.fillStyle = '#444';
+      ctx.font = '11px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('PAUSED', CHART_W / 2, CHART_H / 2);
+      ctx.textAlign = 'left';
+    }
+
+    const n = chartHistory.length;
+    const PAD = 4;
+
+    PANELS.forEach((panel, pi) => {
+      const py = pi * PANEL_H;
+
+      // Panel divider
+      if (pi > 0) {
+        ctx.strokeStyle = '#2a2a3a';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, py);
+        ctx.lineTo(CHART_W, py);
+        ctx.stroke();
+      }
+
+      // Mid-level faint rule
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, py + PANEL_H * 0.5);
+      ctx.lineTo(CHART_W, py + PANEL_H * 0.5);
+      ctx.stroke();
+
+      if (n < 2) {
+        // Labels only
+        ctx.fillStyle = panel.color;
+        ctx.font = 'bold 9px system-ui';
+        ctx.fillText(panel.label, PAD, py + 12);
+        return;
+      }
+
+      // Auto-scale y to visible window
+      let maxVal = 1e-9;
+      for (const d of chartHistory) { if (d[panel.key] > maxVal) maxVal = d[panel.key]; }
+      maxVal *= 1.12; // 12% headroom
+
+      const chartTop = py + PAD + 16;
+      const chartBot = py + PANEL_H - PAD;
+      const chartH = chartBot - chartTop;
+      const chartLeft = PAD;
+      const chartRight = CHART_W - PAD;
+      const chartW = chartRight - chartLeft;
+
+      // Intervention tick lines (across full panel height)
+      if (interventionMarkers?.length > 0) {
+        for (const m of interventionMarkers) {
+          const x = chartLeft + (1 - m.framesAgo / 300) * chartW;
+          if (x < chartLeft) continue;
+          ctx.strokeStyle = 'rgba(255, 210, 80, 0.3)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 3]);
+          ctx.beginPath();
+          ctx.moveTo(x, py);
+          ctx.lineTo(x, py + PANEL_H);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // Label only on top panel
+          if (pi === 0) {
+            ctx.fillStyle = 'rgba(255, 210, 80, 0.75)';
+            ctx.font = '7px system-ui';
+            ctx.fillText(m.patchKey.slice(0, 3), x + 2, py + 10);
+          }
+        }
+      }
+
+      // Area fill under curve
+      ctx.beginPath();
+      ctx.fillStyle = panel.color.replace(')', ', 0.12)').replace('rgb', 'rgba').replace('#', '');
+      // Use a simpler approach for hex color fill
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = panel.color;
+      ctx.moveTo(chartLeft, chartBot);
+      for (let k = 0; k < n; k++) {
+        const x = chartLeft + (k / (n - 1)) * chartW;
+        const v = chartHistory[k][panel.key];
+        const y = chartBot - Math.min(1, v / maxVal) * chartH;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(chartRight, chartBot);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Line
+      ctx.beginPath();
+      ctx.strokeStyle = panel.color;
+      ctx.lineWidth = 1.5;
+      for (let k = 0; k < n; k++) {
+        const x = chartLeft + (k / (n - 1)) * chartW;
+        const v = chartHistory[k][panel.key];
+        const y = chartBot - Math.min(1, v / maxVal) * chartH;
+        k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Panel label (top-left)
+      ctx.fillStyle = panel.color;
+      ctx.font = 'bold 9px system-ui';
+      ctx.fillText(panel.label, PAD, py + 12);
+
+      // Current value (top-right)
+      const cur = chartHistory[n - 1][panel.key];
+      const valStr = panel.fmt(cur);
+      ctx.font = '9px system-ui';
+      const tw = ctx.measureText(valStr).width;
+      ctx.fillText(valStr, CHART_W - PAD - tw, py + 12);
+    });
+
+    // Bottom legend
+    ctx.fillStyle = '#444';
+    ctx.font = '7px system-ui';
+    ctx.fillText('runoff · storage(mm) · ET · concentration', PAD, CHART_H - 3);
+  }
+
+  return {
+    controls,
+    updateMetrics: ({ chartHistory, interventionMarkers, connectivity, sedimentCount }) => {
+      // Left panel metrics text
+      const last = chartHistory?.length > 0 ? chartHistory[chartHistory.length - 1] : null;
+      metricsText.innerHTML = last
+        ? `Runoff: ${last.runoffRatio.toFixed(2)} | ET: ${last.etFraction.toFixed(2)} | Conn: ${(connectivity ?? 0).toFixed(2)} | Sed: ${sedimentCount ?? 0}`
+        : `Conn: ${(connectivity ?? 0).toFixed(2)} | Particles: ${sedimentCount ?? 0}`;
+
+      // Right chart panel
+      drawChartPanel(chartHistory ?? [], interventionMarkers ?? [], true);
+    },
+  };
+}
+
+
+/* ─── sketch.js ─── */
+/**
+ * Main sketch: land mosaic grid, physics loop, visualization.
+ */
+
+
+
+
+
+
+
+
+
+const COLS = 64;
+const ROWS = 64;
+
+let patchGrid;
+let depths;
+let elevations;
+let fluxes;
+let sedimentDepth;
+let particles = [];
+let sedimentCount = 0;
+let connectivity = 0;
+let drainageContrib = null;
+let contributingArea = null;   // Uint8Array mask for right-click upstream highlight
+let interventionMarkers = [];  // { framesAgo, patchKey } logged when user paints while running
+let lbmState = null;
+let fireState = null;
+let waterSources = []; // Array<{i, j}> — persistent point sources
+let floodRect = null;  // {r0,c0,r1,c1} during shift-drag preview; null otherwise
+let fireTickAccum = 0; // accumulator for fire's independent tick rate
+// chartHistory: ring buffer of { runoffRatio, meanStorage, etFraction, concentration }
+let chartHistory = [];
+let cellPx = 8;
+let canvasW = 0;
+let canvasH = 0;
+
+const patchKeys = Object.keys(PATCH_PARAMS);
+
+/** Parse a 6-digit hex color string to [r, g, b]. */
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [
+    parseInt(h.slice(0, 2), 16),
+    parseInt(h.slice(2, 4), 16),
+    parseInt(h.slice(4, 6), 16),
+  ];
+}
+
+/** Lerp a color toward its luminance (desaturate). factor=1 full color, 0=grayscale. */
+function desaturate(r, g, b, factor) {
+  const lum = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+  return [
+    Math.round(lum + (r - lum) * factor),
+    Math.round(lum + (g - lum) * factor),
+    Math.round(lum + (b - lum) * factor),
+  ];
+}
+
+/**
+ * BFS upstream from (targetI, targetJ) through the elevation field.
+ * Returns Uint8Array mask where 1 = cell drains to target.
+ */
+function computeContributingArea(targetI, targetJ) {
+  const mask = new Uint8Array(COLS * ROWS);
+  const queue = [[targetI, targetJ]];
+  mask[targetI * COLS + targetJ] = 1;
+
+  while (queue.length > 0) {
+    const [ci, cj] = queue.shift();
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        if (di === 0 && dj === 0) continue;
+        const ni = ci + di;
+        const nj = cj + dj;
+        if (ni < 0 || ni >= ROWS || nj < 0 || nj >= COLS) continue;
+        if (mask[ni * COLS + nj]) continue;
+        // Does (ni, nj) route any flow into (ci, cj)?
+        const weights = flowWeights(ni, nj, elevations, COLS, ROWS);
+        if (weights.some(w => w.ni === ci && w.nj === cj)) {
+          mask[ni * COLS + nj] = 1;
+          queue.push([ni, nj]);
+        }
+      }
+    }
+  }
+  return mask;
+}
+
+function initGrid() {
+  patchGrid = new Uint8Array(COLS * ROWS);
+  depths = new Float32Array(COLS * ROWS);
+  fluxes = new Float32Array(COLS * ROWS * 2);
+  sedimentDepth = new Float32Array(COLS * ROWS);
+
+  const typeIndex = Object.keys(PATCH_PARAMS).indexOf(DEFAULT_MATRIX);
+  for (let i = 0; i < ROWS; i++) {
+    for (let j = 0; j < COLS; j++) {
+      patchGrid[i * COLS + j] = typeIndex;
+    }
+  }
+
+  updateElevations();
+}
+
+function resizeCanvas(p) {
+  const w = (p && typeof p.windowWidth === 'number' && p.windowWidth > 0) ? p.windowWidth : window.innerWidth;
+  const h = (p && typeof p.windowHeight === 'number' && p.windowHeight > 0) ? p.windowHeight : window.innerHeight;
+  cellPx = Math.max(4, Math.floor(Math.min(w, h) / COLS));
+  canvasW = COLS * cellPx;
+  canvasH = ROWS * cellPx;
+}
+
+function updateElevations() {
+  const ctrl = window.mosaicControls;
+  if (ctrl?.elevationMode === 'dem' && ctrl?.demElevations?.length === COLS * ROWS) {
+    elevations = new Float32Array(ctrl.demElevations);
+  } else {
+    elevations = new Float32Array(COLS * ROWS);
+    for (let i = 0; i < ROWS; i++) {
+      for (let j = 0; j < COLS; j++) {
+        elevations[i * COLS + j] = getElevation(
+          i, j, COLS, ROWS,
+          ctrl?.slopeAngle ?? 270,
+          ctrl?.slopeMagnitude ?? 0.01
+        );
+      }
+    }
+  }
+  contributingArea = null; // terrain changed, clear stale upstream mask
+}
+
+const sketch = (p) => {
+  p.setup = () => {
+    resizeCanvas(p);
+    const canvas = p.createCanvas(canvasW, canvasH);
+    canvas.parent('mosaic-container');
+    // Prevent browser context menu so right-click can be used for contributing area
+    canvas.elt.addEventListener('contextmenu', e => e.preventDefault());
+
+    p.windowResized = () => {
+      resizeCanvas(p);
+      p.resizeCanvas(canvasW, canvasH);
+    };
+
+    initGrid();
+    fireState = createFireState(COLS, ROWS);
+
+    const { controls, updateMetrics } = createUI((msg, data) => {
+      if (msg === 'reset') {
+        depths.fill(0);
+        sedimentDepth.fill(0);
+        particles.length = 0;
+        sedimentCount = 0;
+        chartHistory = [];
+        drainageContrib = null;
+        interventionMarkers = [];
+        lbmState = null;
+        if (fireState) resetFireState(fireState);
+        waterSources = [];
+      } else if (msg === 'resetAll') {
+        window.location.reload();
+      } else if (msg === 'restore') {
+        const wetlandIdx = patchKeys.indexOf('wetland');
+        const forestIdx = patchKeys.indexOf('forest');
+        for (let i = 0; i < ROWS * COLS; i++) {
+          if (Math.random() < 0.15) patchGrid[i] = wetlandIdx;
+          else if (Math.random() < 0.15) patchGrid[i] = forestIdx;
+        }
+      } else if (msg === 'randomize') {
+        const numTypes = patchKeys.length;
+        const matrixIdx = patchKeys.indexOf('grass');
+        for (let i = 0; i < ROWS * COLS; i++) {
+          patchGrid[i] = matrixIdx;
+        }
+        const numBlobs = 15 + Math.floor(Math.random() * 35);
+        for (let b = 0; b < numBlobs; b++) {
+          const cx = Math.floor(Math.random() * COLS);
+          const cy = Math.floor(Math.random() * ROWS);
+          const typeIdx = Math.floor(Math.random() * numTypes);
+          const radius = 2 + Math.floor(Math.random() * 10);
+          const rr = radius * radius;
+          for (let i = Math.max(0, cy - radius); i <= Math.min(ROWS - 1, cy + radius); i++) {
+            for (let j = Math.max(0, cx - radius); j <= Math.min(COLS - 1, cx + radius); j++) {
+              const di = i - cy, dj = j - cx;
+              if (di * di + dj * dj <= rr) {
+                patchGrid[i * COLS + j] = typeIdx;
+              }
+            }
+          }
+        }
+      } else if (msg === 'export') {
+        const ctrl = window.mosaicControls;
+        const payload = {
+          version: 1,
+          cols: COLS,
+          rows: ROWS,
+          patchGrid: Array.from(patchGrid),
+          elevations: ctrl?.demElevations ? Array.from(ctrl.demElevations) : undefined,
+          exportedAt: new Date().toISOString(),
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `mosaic-scenario-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } else if (msg === 'clear-fire') {
+        if (fireState) resetFireState(fireState);
+        fireTickAccum = 0;
+      } else if (msg === 'clear-sources') {
+        waterSources = [];
+      } else if (msg === 'import' && data) {
+        const grid = data.patchGrid;
+        if (Array.isArray(grid) && grid.length === COLS * ROWS) {
+          for (let i = 0; i < grid.length; i++) {
+            const v = Math.floor(grid[i]);
+            patchGrid[i] = Math.max(0, Math.min(v, patchKeys.length - 1));
+          }
+        }
+        const ctrl = window.mosaicControls;
+        if (ctrl) {
+          ctrl.elevationMode = 'dem';
+          if (Array.isArray(data.elevations) && data.elevations.length === COLS * ROWS) {
+            ctrl.demElevations = new Float32Array(data.elevations);
+          } else {
+            ctrl.demElevations = null;
+          }
+        }
+        if (Array.isArray(grid) && grid.length !== COLS * ROWS) {
+          console.warn('Import: invalid grid dimensions');
+        }
+        updateElevations();
+      } else {
+        updateElevations();
+      }
+    });
+
+    window.mosaicControls = controls;
+    updateElevations(); // apply initial DEM from controls
+
+    const runLoop = () => {
+      if (controls.running) {
+        const mult = Math.max(1, controls.speedMultiplier ?? 1);
+        let stepET = 0;
+        let stepTotalOutflow = 0;
+        for (let s = 0; s < mult; s++) {
+          const result = stepFlow(
+            { depths, patchGrid, elevations, cols: COLS, rows: ROWS },
+            controls.rainfall,
+            1,
+            { patchParams: PATCH_PARAMS, patchKeys },
+            sedimentDepth
+          );
+          depths = result.depths;
+          fluxes = result.fluxes;
+          stepET += result.totalET ?? 0;
+          stepTotalOutflow += result.totalOutflow ?? 0;
+
+          const connResult = computeConnectivity(depths, fluxes, COLS, ROWS);
+          connectivity = connResult.connectivity;
+          drainageContrib = connResult.drainageContrib;
+
+          spawnParticles(depths, fluxes, patchGrid, COLS, ROWS, particles, 1, controls.sedimentMultiplier ?? 1);
+          advectParticles(particles, depths, fluxes, COLS, ROWS, 1, sedimentDepth);
+        }
+
+        // LBM density field step (runs after Manning to consume final fluxes/depths)
+        if (controls.useLBM) {
+          if (!lbmState) lbmState = createLBMState(COLS, ROWS);
+          stepLBM(lbmState, fluxes, depths, sedimentDepth, COLS, ROWS);
+        }
+
+        // ── Compute 4 chart metrics ─────────────────────────────────────────
+        const rainfallVol = (controls.rainfall / 1000 / 3600) * mult * COLS * ROWS;
+
+        // 1. Runoff ratio: boundary outflow / rainfall input
+        const runoffRatio = rainfallVol > 0.0001 ? Math.min(1, stepTotalOutflow / rainfallVol) : 0;
+
+        // 2. Mean water storage (mean depth across all cells, m)
+        let depthSum = 0;
+        for (let k = 0; k < depths.length; k++) depthSum += depths[k];
+        const meanStorage = depthSum / (COLS * ROWS);
+
+        // 3. ET fraction: ET lost / rainfall input
+        const etFraction = rainfallVol > 0.0001 ? Math.min(1, stepET / rainfallVol) : 0;
+
+        // 4. Flow concentration: fraction of cells carrying 80% of flux
+        let concentration = 0;
+        if (drainageContrib) {
+          const dc = Array.from(drainageContrib).sort((a, b) => b - a);
+          let cum = 0, count = 0;
+          for (let k = 0; k < dc.length; k++) {
+            cum += dc[k]; count++;
+            if (cum >= 0.8) break;
+          }
+          concentration = 1 - count / (COLS * ROWS);
+        }
+
+        chartHistory.push({ runoffRatio, meanStorage, etFraction, concentration });
+        if (chartHistory.length > 300) chartHistory.shift();
+
+        // Fire simulation — ticks on its own slower clock so the CA
+        // front is visually legible regardless of the water-flow speed.
+        // One fire tick every ~150 ms (every 1.5 run-loop calls on average).
+        if (controls.simMode === 'fire' && fireState) {
+          fireTickAccum += 1;
+          if (fireTickAccum >= 1.5) {
+            fireTickAccum -= 1.5;
+            stepFire(
+              fireState, patchGrid, patchKeys, PATCH_PARAMS,
+              elevations,
+              controls.windAngle ?? 225,
+              controls.windSpeed ?? 2.5,
+              depths, COLS, ROWS
+            );
+          }
+        }
+
+        // Persistent water sources — inject water each step
+        for (const src of waterSources) {
+          const rate = controls.waterSourceRate ?? 0.04;
+          depths[src.i * COLS + src.j] += rate;
+        }
+
+        // Age out intervention markers
+        for (const m of interventionMarkers) m.framesAgo++;
+        interventionMarkers = interventionMarkers.filter(m => m.framesAgo <= 300);
+
+        sedimentCount = particles.length;
+
+        updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
+      }
+    };
+
+    setInterval(runLoop, 100);
+  };
+
+  p.draw = () => {
+    p.background(18, 18, 24);
+    const viewMode = window.mosaicControls?.viewMode ?? 'design';
+
+    // ── Layer 1: Patches + water overlay ────────────────────────────────────
+    for (let i = 0; i < ROWS; i++) {
+      for (let j = 0; j < COLS; j++) {
+        const idx = i * COLS + j;
+        const patchIdx = patchGrid[idx];
+        const params = PATCH_PARAMS[patchKeys[patchIdx]] || PATCH_PARAMS.grass;
+        const [pr, pg, pb] = hexToRgb(params.color);
+
+        if (viewMode === 'design') {
+          p.fill(pr, pg, pb);
+        } else if (viewMode === 'flow') {
+          // Heavily desaturate so streamlines dominate
+          const [dr, dg, db] = desaturate(pr, pg, pb, 0.25);
+          p.fill(dr, dg, db, 180);
+        } else {
+          // sediment mode: patches fade back
+          const [dr, dg, db] = desaturate(pr, pg, pb, 0.5);
+          p.fill(dr, dg, db, 120);
+        }
+        p.noStroke();
+        p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+
+        // Water: visible in design mode (tinted), faint in flow mode, hidden in sediment mode
+        const h = depths[idx];
+        if (h > 0.0005 && viewMode !== 'sediment') {
+          const alpha = Math.min(255, 120 + Math.log1p(h * 3000) * 42);
+          if (viewMode === 'design') {
+            const wr = Math.round(80 * 0.7 + pr * 0.3);
+            const wg = Math.round(130 * 0.7 + pg * 0.3);
+            const wb = Math.round(200 * 0.7 + pb * 0.3);
+            p.fill(wr, wg, wb, alpha);
+          } else {
+            p.fill(80, 130, 200, Math.round(alpha * 0.35));
+          }
+          p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+        }
+      }
+    }
+
+    // ── Layer 2: Sediment deposits ───────────────────────────────────────────
+    if (viewMode !== 'flow') {
+      p.noStroke();
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          const sd = sedimentDepth[i * COLS + j];
+          if (sd > 0) {
+            const alpha = viewMode === 'sediment'
+              ? Math.min(240, Math.log1p(sd) * 55)
+              : Math.min(220, Math.log1p(sd) * 47);
+            p.fill(139, 90, 43, alpha);
+            p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+          }
+        }
+      }
+    }
+
+    // ── Layer 3: Drainage heatmap ────────────────────────────────────────────
+    if (window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
+      let maxDC = 0;
+      for (let k = 0; k < drainageContrib.length; k++) {
+        if (drainageContrib[k] > maxDC) maxDC = drainageContrib[k];
+      }
+      if (maxDC > 0) {
+        p.noStroke();
+        for (let i = 0; i < ROWS; i++) {
+          for (let j = 0; j < COLS; j++) {
+            const idx = i * COLS + j;
+            const t = drainageContrib[idx] / maxDC;
+            if (t > 0.02) {
+              const alpha = Math.min(190, t * 220);
+              p.fill(255, Math.round(200 * (1 - t)), 0, alpha);
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+        }
+      }
+    }
+
+    // ── Layer 4: Streamlines (replaces per-cell arrows) ──────────────────────
+    if (viewMode !== 'sediment') {
+      drawStreamlines(p, viewMode);
+    }
+
+    // ── Layer 5: Contributing area highlight ─────────────────────────────────
+    if (contributingArea) {
+      p.noStroke();
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          if (contributingArea[i * COLS + j]) {
+            p.fill(255, 230, 50, 65);
+            p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+          }
+        }
+      }
+      // Highlight the clicked cell itself
+      // (the target is the brightest cell — it will be included in the mask)
+    }
+
+    // ── Layer 6: Particles or LBM density field ──────────────────────────────
+    if (window.mosaicControls?.useLBM && lbmState) {
+      // LBM mode: render smooth density fields for water and sediment
+      let maxW = 0, maxS = 0;
+      for (let k = 0; k < lbmState.rhoWater.length; k++) {
+        if (lbmState.rhoWater[k] > maxW) maxW = lbmState.rhoWater[k];
+        if (lbmState.rhoSediment[k] > maxS) maxS = lbmState.rhoSediment[k];
+      }
+      p.noStroke();
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          const idx = i * COLS + j;
+          if (maxW > 0) {
+            const tw = lbmState.rhoWater[idx] / maxW;
+            if (tw > 0.02) {
+              p.fill(60, 140, 230, Math.min(200, Math.round(tw * 210)));
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+          if (maxS > 0) {
+            const ts = lbmState.rhoSediment[idx] / maxS;
+            if (ts > 0.02) {
+              p.fill(160, 90, 30, Math.min(200, Math.round(ts * 210)));
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+        }
+      }
+    } else if (viewMode !== 'flow') {
+      // Particle mode (default)
+      for (const pt of particles) {
+        if (pt.settled) continue;
+        p.fill(pt.color[0], pt.color[1], pt.color[2], 255);
+        p.noStroke();
+        p.ellipse(pt.x * cellPx + cellPx / 2, pt.y * cellPx + cellPx / 2, 2, 2);
+      }
+    }
+
+    // ── Layer 8: Fire visualization ──────────────────────────────────────────
+    if (window.mosaicControls?.simMode === 'fire' && fireState) {
+      p.noStroke();
+      const fc = p.frameCount;
+      for (let i = 0; i < ROWS; i++) {
+        for (let j = 0; j < COLS; j++) {
+          const idx = i * COLS + j;
+          const state = fireState.cell[idx];
+          if (state === FIRE.BURNED) {
+            p.fill(38, 26, 20, 210);
+            p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+          } else if (state === FIRE.BURNING) {
+            const intens = fireState.intensity[idx];
+            const flicker = 0.6 + 0.4 * Math.sin(fc * 0.22 + idx * 0.051);
+            const brightness = intens * flicker;
+            // Outer orange layer
+            p.fill(245, Math.floor(60 + brightness * 80), 5, Math.floor(150 + brightness * 85));
+            p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            // Inner bright core
+            const cx = (j + 0.5) * cellPx;
+            const cy = (i + 0.5) * cellPx;
+            const r = cellPx * 0.45 * brightness;
+            p.fill(255, Math.floor(200 + brightness * 55), 40, Math.floor(brightness * 190));
+            p.ellipse(cx, cy, r * 2, r * 2);
+          }
+        }
+      }
+
+      // Embers
+      p.noStroke();
+      for (const e of fireState.embers) {
+        const alpha = Math.floor((1 - e.progress) * 230);
+        p.fill(255, 140 + Math.floor(Math.random() * 50), 0, alpha);
+        p.ellipse(e.x * cellPx, e.y * cellPx, 3.5, 3.5);
+      }
+    }
+
+    // ── Layer 9: Water source markers ────────────────────────────────────────
+    if (waterSources.length > 0) {
+      const pulse = 0.5 + 0.5 * Math.sin(p.frameCount * 0.14);
+      for (const src of waterSources) {
+        const cx = (src.j + 0.5) * cellPx;
+        const cy = (src.i + 0.5) * cellPx;
+        p.fill(100, 180, 255, Math.floor(160 + pulse * 80));
+        p.noStroke();
+        p.ellipse(cx, cy, cellPx * 0.7, cellPx * 0.7);
+        p.noFill();
+        p.stroke(100, 180, 255, Math.floor(80 + pulse * 120));
+        p.strokeWeight(1.5);
+        p.ellipse(cx, cy, cellPx * (1.4 + pulse * 0.6), cellPx * (1.4 + pulse * 0.6));
+      }
+      p.noStroke();
+    }
+
+    // ── Layer 10: Flood-area preview (shift+drag) ─────────────────────────────
+    if (floodRect) {
+      const { r0, c0, r1, c1 } = floodRect;
+      const x0 = Math.min(c0, c1) * cellPx;
+      const y0 = Math.min(r0, r1) * cellPx;
+      const w  = (Math.abs(c1 - c0) + 1) * cellPx;
+      const h  = (Math.abs(r1 - r0) + 1) * cellPx;
+      p.fill(80, 160, 255, 55);
+      p.stroke(100, 200, 255, 200);
+      p.strokeWeight(1.5);
+      p.rect(x0, y0, w, h);
+      p.noStroke();
+    }
+
+    // ── Layer 7: Elevation contours ──────────────────────────────────────────
+    if (window.mosaicControls?.showElevationLines && elevations) {
+      drawElevationContours(p);
+    }
+
+    // ── Brush cursor ─────────────────────────────────────────────────────────
+    const brushRadius = (window.mosaicControls?.brushSize ?? 3) * cellPx;
+    if (p.mouseX >= 0 && p.mouseX < canvasW && p.mouseY >= 0 && p.mouseY < canvasH) {
+      p.noFill();
+      p.stroke(255, 255, 255, 120);
+      p.strokeWeight(1);
+      p.ellipse(p.mouseX, p.mouseY, brushRadius * 2, brushRadius * 2);
+    }
+
+    // ── Help text ─────────────────────────────────────────────────────────────
+    p.fill(140, 140, 140);
+    p.textSize(Math.max(9, cellPx * 0.55));
+    p.textAlign(p.LEFT, p.BOTTOM);
+    p.noStroke();
+    const toolHints = {
+      paint: 'Left: paint \u00B7 Right: upstream \u00B7 Shift+drag: flood area',
+      ignite: 'Click to ignite · Right: upstream',
+      'water-source': 'Click to toggle water source · Right: upstream',
+    };
+    const hint = toolHints[window.mosaicControls?.activeTool ?? 'paint'] ?? '';
+    p.text(hint, 8, canvasH - 8);
+  };
+
+  // ── Streamlines: seed-and-trace through flux field ────────────────────────
+  function drawStreamlines(p, viewMode) {
+    if (!fluxes) return;
+
+    // Seeds: grid every 12 cells — gives ~25 starting points
+    const seeds = [];
+    for (let i = 6; i < ROWS; i += 12) {
+      for (let j = 6; j < COLS; j += 12) {
+        seeds.push([i + 0.5, j + 0.5]);
+      }
+    }
+
+    const isFlow = viewMode === 'flow';
+    // Animated dash parameters: phase shifts each frame so dashes appear to move downstream
+    const dashLen = 8;
+    const gapLen = 6;
+    const period = dashLen + gapLen;
+    const frameOffset = Math.floor(p.frameCount * 0.3) % period;
+
+    p.noFill();
+
+    for (const [sy, sx] of seeds) {
+      let x = sx;
+      let y = sy;
+      const maxSteps = 350;
+      const stepSize = 0.4;
+
+      // Collect segments with per-point discharge for width encoding
+      const pts = [{ x, y, discharge: 0 }];
+
+      for (let step = 0; step < maxSteps; step++) {
+        const j = Math.floor(x);
+        const i = Math.floor(y);
+        if (i < 0 || i >= ROWS || j < 0 || j >= COLS) break;
+
+        const idx = i * COLS + j;
+        const vx = fluxes[idx * 2];
+        const vy = fluxes[idx * 2 + 1];
+        const v = Math.sqrt(vx * vx + vy * vy);
+        if (v < 0.0006) break;
+
+        const h = depths ? depths[idx] : 0;
+        pts[pts.length - 1].discharge = v * h;
+
+        x += (vx / v) * stepSize;
+        y += (vy / v) * stepSize;
+        pts.push({ x, y, discharge: 0 });
+      }
+
+      if (pts.length < 2) continue;
+
+      // Draw each segment as an animated dash — phase advances each frame so
+      // dashes appear to travel downstream, making direction immediately readable
+      for (let k = 1; k < pts.length; k++) {
+        const prev = pts[k - 1];
+        const curr = pts[k];
+        const d = prev.discharge;
+        // Log scale so thin=diffuse sheet, thick=concentrated channel
+        const w = Math.min(7, 0.5 + Math.log1p(d * 25000) * 1.8);
+        const alpha = isFlow ? Math.min(220, 80 + w * 20) : Math.min(90, 30 + w * 10);
+
+        const phase = (k + frameOffset) % period;
+        if (phase < dashLen) {
+          p.stroke(100, 180, 255, alpha);
+          p.strokeWeight(w);
+          p.line(prev.x * cellPx, prev.y * cellPx, curr.x * cellPx, curr.y * cellPx);
+        }
+      }
+
+      // Chevron arrowheads every 50 steps and at the streamline end
+      const arrowInterval = 50;
+      const arrowPositions = [];
+      for (let k = arrowInterval; k < pts.length - 1; k += arrowInterval) arrowPositions.push(k);
+      if (pts.length >= 3) arrowPositions.push(pts.length - 1);
+
+      for (const k of arrowPositions) {
+        if (k < 2) continue;
+        const tip = pts[k];
+        const ref = pts[k - 2]; // 2 steps back for a stable direction vector
+        const d = pts[k - 1].discharge;
+        const w = Math.min(5, 0.8 + Math.log1p(d * 25000) * 1.2);
+        const alpha = isFlow ? 200 : 90;
+
+        const dx = tip.x - ref.x;
+        const dy = tip.y - ref.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = dx / len;
+        const ny = dy / len;
+        const px2 = -ny; // perpendicular
+        const py2 = nx;
+
+        const aLen = Math.max(5, w * 3);   // arrowhead length in px
+        const aWid = Math.max(3, w * 1.5); // arrowhead half-width in px
+
+        const tipX = tip.x * cellPx;
+        const tipY = tip.y * cellPx;
+        const bx = tipX - nx * aLen;
+        const by = tipY - ny * aLen;
+
+        p.stroke(160, 210, 255, alpha);
+        p.strokeWeight(Math.max(0.8, w * 0.55));
+        p.line(bx + px2 * aWid, by + py2 * aWid, tipX, tipY);
+        p.line(bx - px2 * aWid, by - py2 * aWid, tipX, tipY);
+      }
+    }
+  }
+
+  function drawElevationContours(p) {
+    if (!elevations) return;
+    let minE = Infinity, maxE = -Infinity;
+    for (let k = 0; k < elevations.length; k++) {
+      const v = elevations[k];
+      if (v < minE) minE = v;
+      if (v > maxE) maxE = v;
+    }
+    const range = maxE - minE || 1;
+    const numContours = 10;
+    p.stroke(255, 255, 200, 100);
+    p.strokeWeight(1);
+    p.noFill();
+    for (let c = 1; c < numContours; c++) {
+      const level = minE + (range * c) / numContours;
+      for (let i = 0; i < ROWS - 1; i++) {
+        for (let j = 0; j < COLS - 1; j++) {
+          const e00 = elevations[i * COLS + j];
+          const e10 = elevations[(i + 1) * COLS + j];
+          const e01 = elevations[i * COLS + (j + 1)];
+          const e11 = elevations[(i + 1) * COLS + (j + 1)];
+          const pts = [];
+          if (e00 !== e10 && (e00 - level) * (e10 - level) <= 0) {
+            const t = (level - e00) / (e10 - e00);
+            pts.push([j * cellPx + cellPx / 2, (i + t) * cellPx]);
+          }
+          if (e00 !== e01 && (e00 - level) * (e01 - level) <= 0) {
+            const t = (level - e00) / (e01 - e00);
+            pts.push([(j + t) * cellPx, i * cellPx + cellPx / 2]);
+          }
+          if (e01 !== e11 && (e01 - level) * (e11 - level) <= 0) {
+            const t = (level - e01) / (e11 - e01);
+            pts.push([(j + 1) * cellPx, (i + t) * cellPx]);
+          }
+          if (e10 !== e11 && (e10 - level) * (e11 - level) <= 0) {
+            const t = (level - e10) / (e11 - e10);
+            pts.push([(j + t) * cellPx, (i + 1) * cellPx]);
+          }
+          if (pts.length >= 2) {
+            p.line(pts[0][0], pts[0][1], pts[1][0], pts[1][1]);
+          }
+        }
+      }
+    }
+  }
+
+  p.mousePressed = () => {
+    if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
+    if (p.mouseButton === p.RIGHT) {
+      // Right-click: toggle contributing area for clicked cell
+      const j = Math.floor(p.mouseX / cellPx);
+      const i = Math.floor(p.mouseY / cellPx);
+      if (contributingArea) {
+        contributingArea = null;
+      } else {
+        contributingArea = computeContributingArea(i, j);
+      }
+      return false;
+    }
+    const activeTool = window.mosaicControls?.activeTool ?? 'paint';
+    const j = Math.floor(p.mouseX / cellPx);
+    const i = Math.floor(p.mouseY / cellPx);
+    if (activeTool === 'ignite') {
+      if (fireState) igniteAt(fireState, i, j, COLS, ROWS);
+    } else if (activeTool === 'water-source') {
+      const existing = waterSources.findIndex(s => s.i === i && s.j === j);
+      if (existing >= 0) {
+        waterSources.splice(existing, 1);
+      } else {
+        waterSources.push({ i, j });
+      }
+    } else if (activeTool === 'paint' && p.keyIsDown(p.SHIFT)) {
+      floodRect = { r0: i, c0: j, r1: i, c1: j };
+    } else {
+      paintAt(p.mouseX, p.mouseY);
+    }
+  };
+
+  p.mouseDragged = () => {
+    if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
+    if (p.mouseButton === p.RIGHT) return; // don't paint on right-drag
+    const activeTool = window.mosaicControls?.activeTool ?? 'paint';
+    const j = Math.floor(p.mouseX / cellPx);
+    const i = Math.floor(p.mouseY / cellPx);
+    if (activeTool === 'ignite') {
+      if (fireState) igniteAt(fireState, i, j, COLS, ROWS);
+    } else if (floodRect) {
+      floodRect.r1 = i;
+      floodRect.c1 = j;
+    } else {
+      paintAt(p.mouseX, p.mouseY);
+    }
+  };
+
+  p.mouseReleased = () => {
+    if (floodRect) {
+      const rMin = Math.min(floodRect.r0, floodRect.r1);
+      const rMax = Math.max(floodRect.r0, floodRect.r1);
+      const cMin = Math.min(floodRect.c0, floodRect.c1);
+      const cMax = Math.max(floodRect.c0, floodRect.c1);
+      for (let ri = rMin; ri <= rMax; ri++) {
+        for (let ci = cMin; ci <= cMax; ci++) {
+          if (ri >= 0 && ri < ROWS && ci >= 0 && ci < COLS) {
+            depths[ri * COLS + ci] += 0.5;
+          }
+        }
+      }
+      floodRect = null;
+    }
+  };
+};
+
+function paintAt(x, y) {
+  const j = Math.floor(x / cellPx);
+  const i = Math.floor(y / cellPx);
+  const radius = window.mosaicControls?.brushSize ?? 3;
+  const ctrl = window.mosaicControls;
+
+  if (i >= 0 && i < ROWS && j >= 0 && j < COLS) {
+    const key = ctrl?.activePatch ?? PATCH_TYPES.GRASS;
+    const idx = Object.keys(PATCH_PARAMS).indexOf(key);
+    if (idx >= 0) {
+      for (let di = -radius; di <= radius; di++) {
+        for (let dj = -radius; dj <= radius; dj++) {
+          const ni = i + di;
+          const nj = j + dj;
+          if (ni >= 0 && ni < ROWS && nj >= 0 && nj < COLS) {
+            if (Math.sqrt(di * di + dj * dj) <= radius) {
+              patchGrid[ni * COLS + nj] = idx;
+            }
+          }
+        }
+      }
+
+      // Record intervention marker when simulation is running.
+      // Debounce: only one marker per 3-frame window per patch type.
+      if (ctrl?.running) {
+        const recentSame = interventionMarkers.some(m => m.framesAgo < 3 && m.patchKey === key);
+        if (!recentSame) {
+          interventionMarkers.push({ framesAgo: 0, patchKey: key });
+        }
+      }
+    }
+  }
+}
+
+// ── Parcel Analysis integration ───────────────────────────────────────────────
+
+/**
+ * Load a real-world patch grid from the Site Analysis module.
+ * Replaces patchGrid in-place and resets water/sediment state.
+ * Called by parcel-analysis.js via window.loadParcelGrid.
+ */
+window.loadParcelGrid = function (grid) {
+  if (!(grid instanceof Uint8Array) || grid.length !== COLS * ROWS) return;
+  patchGrid.set(grid);
+  depths.fill(0);
+  sedimentDepth.fill(0);
+  particles.length = 0;
+  chartHistory = [];
+  drainageContrib = null;
+  contributingArea = null;
+  interventionMarkers = [];
+  lbmState = null;
+  sedimentCount = 0;
+  updateElevations();
+};
+
+/**
+ * Render the current simulation state onto an external canvas.
+ * Used by parcel-analysis.js to create a live Leaflet image overlay.
+ * The canvas is small (64×64) and stretched by Leaflet to fit the parcel bbox.
+ */
+window.renderSimToCanvas = function (canvas) {
+  if (!patchGrid || !depths) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  const cw = W / COLS;
+  const ch = H / ROWS;
+  ctx.clearRect(0, 0, W, H);
+
+  for (let i = 0; i < ROWS; i++) {
+    for (let j = 0; j < COLS; j++) {
+      const idx = i * COLS + j;
+      const params = PATCH_PARAMS[patchKeys[patchGrid[idx]]] || PATCH_PARAMS.grass;
+
+      ctx.globalAlpha = 0.78;
+      ctx.fillStyle = params.color;
+      ctx.fillRect(j * cw, i * ch, cw + 0.5, ch + 0.5);
+
+      const h = depths[idx];
+      if (h > 0.0005) {
+        ctx.globalAlpha = Math.min(0.88, 0.38 + Math.log1p(h * 3000) * 0.17);
+        ctx.fillStyle = '#4e7ec4';
+        ctx.fillRect(j * cw, i * ch, cw + 0.5, ch + 0.5);
+      }
+
+      const sd = sedimentDepth[idx];
+      if (sd > 0.2) {
+        ctx.globalAlpha = Math.min(0.7, Math.log1p(sd) * 0.22);
+        ctx.fillStyle = '#8b5a2b';
+        ctx.fillRect(j * cw, i * ch, cw + 0.5, ch + 0.5);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+};
+
+new p5(sketch);
+
+  </script>
+  <script>
+    const mosaicEl  = document.getElementById('mosaic-container');
+    const siteEl    = document.getElementById('site-analysis-container');
+    const tabBtns   = document.querySelectorAll('.tab-btn');
+
+    tabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        tabBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        if (btn.dataset.tab === 'mosaic') {
+          mosaicEl.style.display = 'flex';
+          siteEl.style.display = 'none';
+          stopSimOverlay();
+        } else {
+          mosaicEl.style.display = 'none';
+          siteEl.style.display = 'block';
+          onTabActivated();
+        }
+      });
+    });
+
+    initParcelAnalysis('site-analysis-container', {
+      onGridReady: (patchGrid) => {
+        if (window.loadParcelGrid) window.loadParcelGrid(patchGrid);
+      },
+      onRunSim: () => {
+        document.querySelector('[data-tab="mosaic"]').click();
+        requestAnimationFrame(() => {
+          if (window.mosaicControls) window.mosaicControls.running = true;
+        });
+      },
+    });
+  </script>
+</body>
+</html>

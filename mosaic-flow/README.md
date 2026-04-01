@@ -2,9 +2,9 @@
 
 An interactive browser-based model that combines Richard T.T. Forman's patch-matrix-corridor framework with Manning's equation, overland flow physics, and particle-based sediment tracking.
 
-## Running
+## Running (development)
 
-A local HTTP server is required (CORS blocks file://):
+Use the modular entry (`index.html`). A local HTTP server is required (CORS blocks `file://` for ES modules):
 
 ```bash
 cd mosaic-flow && python3 -m http.server 8000
@@ -12,9 +12,21 @@ cd mosaic-flow && python3 -m http.server 8000
 
 Then open `http://localhost:8000`.
 
+## Standalone bundle (single HTML file)
+
+To regenerate `standalone.html` after editing source modules:
+
+```bash
+cd mosaic-flow && node build-standalone.js
+```
+
+Open `standalone.html` in a browser (or download it from GitHub). External scripts (p5.js, Leaflet, Leaflet.draw) still load from CDNs; Site Analysis features that call geocoding or WMS need network access.
+
 ## Features
 
-- **Patch brush**: Paint forest, wetland, urban, grassland, bare soil, or corridor patches
+- **Site Analysis tab**: Geocode a location, draw a parcel on satellite imagery, load NLCD 2021 land cover (or a synthetic fallback), export data, and optionally mirror the simulation on the map
+- **Fire mode**: Spread simulation with per-patch fuel parameters (see UI)
+- **Patch brush**: Paint forest, wetland, urban, grassland, bare soil, corridor, or open water patches
 - **Physics**: Manning's equation for overland flow, infiltration by patch type, steepest-descent routing
 - **Sediment particles**: Colored particles spawn in erodible patches, advect with flow, settle when velocity drops
 - **Topography**: Choose **Simple slope** (user-defined direction and steepness) or **DEM file** (upload ASCII Grid, CSV, or JSON elevation data; resampled to 64×64)
@@ -36,4 +48,5 @@ Then open `http://localhost:8000`.
 ## Stack
 
 - p5.js for rendering
-- Vanilla ES modules (no build step)
+- Vanilla ES modules (no build step for development; optional `build-standalone.js` for a single-file bundle)
+- Leaflet + Leaflet.draw for Site Analysis

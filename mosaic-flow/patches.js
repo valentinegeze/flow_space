@@ -15,9 +15,17 @@ export const PATCH_TYPES = {
 
 /**
  * Physical parameters per patch type.
- * manningN: roughness (higher = slower flow)
+ * manningN:    roughness (higher = slower flow)
  * infiltration: mm/hr max infiltration rate
  * erodibility: 0-1, relative sediment contribution when eroded
+ *
+ * Fire parameters:
+ * fuelLoad:    0-1; directly equivalent to density p in site-percolation theory.
+ *              8-neighbor percolation threshold ≈ 0.41.
+ *              Below threshold: fire burns out locally (subcritical).
+ *              Above threshold: fire sweeps the landscape (supercritical).
+ * burnDuration: how many fire-ticks a cell stays BURNING before going BURNED.
+ *              Each fire-tick ≈ 150 ms at default speed.
  */
 export const PATCH_PARAMS = {
   [PATCH_TYPES.GRASS]: {
@@ -26,10 +34,10 @@ export const PATCH_PARAMS = {
     manningN: 0.1,
     infiltration: 25,
     erodibility: 0.3,
-    // T1-A: mm/hr lost to evapotranspiration (only from standing water)
     etRate: 2.5,
-    // T1-B: mm depth that must pond before water mobilizes (detention storage)
     connectivityThreshold: 0.5,
+    fuelLoad: 0.70,    // supercritical — fire spreads through grassland
+    burnDuration: 2,
   },
   [PATCH_TYPES.FOREST]: {
     name: 'Forest',
@@ -37,8 +45,10 @@ export const PATCH_PARAMS = {
     manningN: 0.3,
     infiltration: 50,
     erodibility: 0.05,
-    etRate: 6.0,      // high ET: canopy transpiration + interception
-    connectivityThreshold: 1.5, // leaf litter + root channels hold water longer
+    etRate: 6.0,
+    connectivityThreshold: 1.5,
+    fuelLoad: 1.0,     // always ignites; guaranteed percolation
+    burnDuration: 4,
   },
   [PATCH_TYPES.WETLAND]: {
     name: 'Wetland',
@@ -46,8 +56,10 @@ export const PATCH_PARAMS = {
     manningN: 0.15,
     infiltration: 80,
     erodibility: 0.1,
-    etRate: 8.0,      // highest ET: open water + macrophyte transpiration
-    connectivityThreshold: 0.0, // water body — no ponding threshold, flows freely
+    etRate: 8.0,
+    connectivityThreshold: 0.0,
+    fuelLoad: 0.05,    // strongly subcritical; acts as firebreak
+    burnDuration: 1,
   },
   [PATCH_TYPES.BARE]: {
     name: 'Bare Soil',
@@ -55,8 +67,10 @@ export const PATCH_PARAMS = {
     manningN: 0.03,
     infiltration: 5,
     erodibility: 0.9,
-    etRate: 0.5,      // minimal ET: no vegetation
-    connectivityThreshold: 0.2, // slight surface roughness
+    etRate: 0.5,
+    connectivityThreshold: 0.2,
+    fuelLoad: 0.18,    // subcritical; fire does not carry through bare soil
+    burnDuration: 1,
   },
   [PATCH_TYPES.URBAN]: {
     name: 'Urban',
@@ -64,8 +78,10 @@ export const PATCH_PARAMS = {
     manningN: 0.015,
     infiltration: 2,
     erodibility: 0.2,
-    etRate: 0.2,      // near-zero ET: impervious surface
-    connectivityThreshold: 0.1, // smooth pavement — ponds almost nothing
+    etRate: 0.2,
+    connectivityThreshold: 0.1,
+    fuelLoad: 0.32,    // subcritical; fire stops in built-up areas
+    burnDuration: 2,
   },
   [PATCH_TYPES.CORRIDOR]: {
     name: 'Corridor',
@@ -75,6 +91,8 @@ export const PATCH_PARAMS = {
     erodibility: 0.4,
     etRate: 1.5,
     connectivityThreshold: 0.3,
+    fuelLoad: 0.62,    // slightly supercritical; corridors can carry fire
+    burnDuration: 2,
   },
   [PATCH_TYPES.WATER]: {
     name: 'River/Canal/Lake',
@@ -82,8 +100,10 @@ export const PATCH_PARAMS = {
     manningN: 0.02,
     infiltration: 0,
     erodibility: 0,
-    etRate: 5.0,      // open water ET
+    etRate: 5.0,
     connectivityThreshold: 0.0,
+    fuelLoad: 0.0,     // no fuel
+    burnDuration: 0,
   },
 };
 
