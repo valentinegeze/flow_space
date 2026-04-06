@@ -20,8 +20,11 @@ const BUNDLE_ORDER = [
   'fire.js',
   'dem.js',
   'nlcd-mapper.js',
+  'state.js',
   'parcel-analysis.js',
+  'phi-panel.js',
   'ui.js',
+  'tabs.js',
   'sketch.js',
 ];
 
@@ -68,40 +71,10 @@ function buildStandaloneHtml() {
   const tailMatch = html.match(/<script type="module" src="\.\/sketch\.js"><\/script>[\s\S]*/);
   if (!tailMatch) throw new Error('index.html: expected sketch.js module script');
 
+  // The bundled initTabs() from tabs.js handles tab switching + parcel init
   const tabScript = `
   <script>
-    const mosaicEl  = document.getElementById('mosaic-container');
-    const siteEl    = document.getElementById('site-analysis-container');
-    const tabBtns   = document.querySelectorAll('.tab-btn');
-
-    tabBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        tabBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-
-        if (btn.dataset.tab === 'mosaic') {
-          mosaicEl.style.display = 'flex';
-          siteEl.style.display = 'none';
-          stopSimOverlay();
-        } else {
-          mosaicEl.style.display = 'none';
-          siteEl.style.display = 'block';
-          onTabActivated();
-        }
-      });
-    });
-
-    initParcelAnalysis('site-analysis-container', {
-      onGridReady: (patchGrid) => {
-        if (window.loadParcelGrid) window.loadParcelGrid(patchGrid);
-      },
-      onRunSim: () => {
-        document.querySelector('[data-tab="mosaic"]').click();
-        requestAnimationFrame(() => {
-          if (window.mosaicControls) window.mosaicControls.running = true;
-        });
-      },
-    });
+    initTabs({ enableFireSweep: false });
   </script>`;
 
   const bundle = buildBundle();

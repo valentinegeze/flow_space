@@ -9,6 +9,8 @@ import { computeConnectivity } from './connectivity.js';
 import { spawnParticles, advectParticles } from './particles.js';
 import { createLBMState, stepLBM } from './lbm.js';
 import { createFireState, resetFireState, igniteAt, stepFire, FIRE } from './fire.js';
+import { simState } from './state.js';
+import { createPhiPanel, setPhiGrid, getClusterOverlay } from './phi-panel.js';
 
 const COLS = 64;
 const ROWS = 64;
@@ -34,6 +36,11 @@ let chartHistory = [];
 let cellPx = 8;
 let canvasW = 0;
 let canvasH = 0;
+
+// ── Network zoom state ───────────────────────────────────────────────────────
+let networkZoom = null; // null = mosaic view; { centerR, centerC } = network view
+const NETWORK_RADIUS = 6; // 12×12 neighborhood (radius 6 from center)
+let networkMinEdgeWeight = 0.05;
 
 const patchKeys = Object.keys(PATCH_PARAMS);
 
@@ -112,7 +119,7 @@ function resizeCanvas(p) {
 }
 
 function updateElevations() {
-  const ctrl = window.mosaicControls;
+  const ctrl = simState.controls;
   if (ctrl?.elevationMode === 'dem' && ctrl?.demElevations?.length === COLS * ROWS) {
     elevations = new Float32Array(ctrl.demElevations);
   } else {
@@ -190,7 +197,7 @@ const sketch = (p) => {
           }
         }
       } else if (msg === 'export') {
-        const ctrl = window.mosaicControls;
+        const ctrl = simState.controls;
         const payload = {
           version: 1,
           cols: COLS,
@@ -236,7 +243,7 @@ const sketch = (p) => {
             patchGrid[i] = Math.max(0, Math.min(v, patchKeys.length - 1));
           }
         }
-        const ctrl = window.mosaicControls;
+        const ctrl = simState.controls;
         if (ctrl) {
           ctrl.elevationMode = 'dem';
           if (Array.isArray(data.elevations) && data.elevations.length === COLS * ROWS) {
@@ -252,10 +259,18 @@ const sketch = (p) => {
       } else {
         updateElevations();
       }
+      // Refresh phi panel whenever landscape or elevation changes
+      setPhiGrid(patchGrid, COLS, ROWS);
     });
 
+    simState.controls = controls;
+    // Keep window.mosaicControls as a backward-compat alias for standalone builds
     window.mosaicControls = controls;
     updateElevations(); // apply initial DEM from controls
+
+    // Phi panel
+    createPhiPanel(document.getElementById('mosaic-container'));
+    setPhiGrid(patchGrid, COLS, ROWS);
 
     const runLoop = () => {
       if (!controls.running) return;
@@ -354,8 +369,15 @@ const sketch = (p) => {
 
   p.draw = () => {
     p.background(18, 18, 24);
-    const viewMode = window.mosaicControls?.viewMode ?? 'design';
-    const fireSim = window.mosaicControls?.simMode === 'fire';
+
+    // ── Network zoom mode ──────────────────────────────────────────────────
+    if (networkZoom) {
+      drawNetworkView(p);
+      return;
+    }
+
+    const viewMode = simState.controls?.viewMode ?? 'design';
+    const fireSim = simState.controls?.simMode === 'fire';
 
     // ── Layer 1: Patches + water overlay ────────────────────────────────────
     for (let i = 0; i < ROWS; i++) {
@@ -416,6 +438,28 @@ const sketch = (p) => {
       }
     }
 
+    // ── Layer 1b: Phi cluster overlay (giant cluster = coral, others = muted) ──
+    {
+      const overlay = getClusterOverlay();
+      if (overlay.clusterMap && viewMode === 'design') {
+        p.noStroke();
+        for (let i = 0; i < ROWS; i++) {
+          for (let j = 0; j < COLS; j++) {
+            const cid = overlay.clusterMap[i * COLS + j];
+            if (cid === 0) {
+              // Giant cluster: saturated coral tint
+              p.fill(232, 89, 60, 55); // #E8593C at ~22% alpha
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            } else if (cid > 0) {
+              // Smaller clusters: muted gray
+              p.fill(180, 180, 200, 30);
+              p.rect(j * cellPx, i * cellPx, cellPx + 1, cellPx + 1);
+            }
+          }
+        }
+      }
+    }
+
     // ── Layer 2: Sediment deposits ───────────────────────────────────────────
     if (!fireSim && viewMode !== 'flow') {
       p.noStroke();
@@ -434,7 +478,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 3: Drainage heatmap ────────────────────────────────────────────
-    if (!fireSim && window.mosaicControls?.showDrainageHeatmap && drainageContrib) {
+    if (!fireSim && simState.controls?.showDrainageHeatmap && drainageContrib) {
       let maxDC = 0;
       for (let k = 0; k < drainageContrib.length; k++) {
         if (drainageContrib[k] > maxDC) maxDC = drainageContrib[k];
@@ -476,7 +520,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 6: Particles or LBM density field ──────────────────────────────
-    if (!fireSim && window.mosaicControls?.useLBM && lbmState) {
+    if (!fireSim && simState.controls?.useLBM && lbmState) {
       // LBM mode: render smooth density fields for water and sediment
       let maxW = 0, maxS = 0;
       for (let k = 0; k < lbmState.rhoWater.length; k++) {
@@ -514,7 +558,7 @@ const sketch = (p) => {
     }
 
     // ── Layer 8: Fire visualization ──────────────────────────────────────────
-    if (window.mosaicControls?.simMode === 'fire' && fireState) {
+    if (simState.controls?.simMode === 'fire' && fireState) {
       p.noStroke();
       const fc = p.frameCount;
       for (let i = 0; i < ROWS; i++) {
@@ -586,12 +630,12 @@ const sketch = (p) => {
     }
 
     // ── Layer 7: Elevation contours ──────────────────────────────────────────
-    if (window.mosaicControls?.showElevationLines && elevations) {
+    if (simState.controls?.showElevationLines && elevations) {
       drawElevationContours(p);
     }
 
     // ── Brush cursor ─────────────────────────────────────────────────────────
-    const brushRadius = (window.mosaicControls?.brushSize ?? 3) * cellPx;
+    const brushRadius = (simState.controls?.brushSize ?? 3) * cellPx;
     if (p.mouseX >= 0 && p.mouseX < canvasW && p.mouseY >= 0 && p.mouseY < canvasH) {
       p.noFill();
       p.stroke(255, 255, 255, 120);
@@ -601,8 +645,8 @@ const sketch = (p) => {
 
     // ── Wind compass (fire mode only) ────────────────────────────────────────
     if (fireSim) {
-      const wAngle = window.mosaicControls?.windAngle ?? 225;
-      const wSpeed = window.mosaicControls?.windSpeed ?? 2.5;
+      const wAngle = simState.controls?.windAngle ?? 225;
+      const wSpeed = simState.controls?.windSpeed ?? 2.5;
       const cx = canvasW - 36, cy = canvasH - 36, cr = 22;
       // Background circle
       p.noStroke();
@@ -648,7 +692,7 @@ const sketch = (p) => {
       ignite: 'Click/drag to ignite \u00B7 Run to spread \u00B7 Paint: edit land cover',
       'water-source': 'Click to toggle water source \u00B7 Right: upstream',
     };
-    const hint = toolHints[window.mosaicControls?.activeTool ?? 'paint'] ?? '';
+    const hint = toolHints[simState.controls?.activeTool ?? 'paint'] ?? '';
     p.text(hint, 8, canvasH - 8);
   };
 
@@ -805,8 +849,34 @@ const sketch = (p) => {
     }
   }
 
+  p.doubleClicked = () => {
+    if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
+    if (networkZoom) return; // already in network mode
+    const j = Math.floor(p.mouseX / cellPx);
+    const i = Math.floor(p.mouseY / cellPx);
+    if (i >= 0 && i < ROWS && j >= 0 && j < COLS) {
+      networkZoom = { centerR: i, centerC: j };
+    }
+  };
+
+  p.keyPressed = () => {
+    if (!networkZoom) return;
+    if (p.key === 'Escape' || p.key === 'Backspace') {
+      networkZoom = null;
+    } else if (p.keyCode === p.LEFT_ARROW) {
+      networkMinEdgeWeight = Math.max(0, networkMinEdgeWeight - 0.02);
+    } else if (p.keyCode === p.RIGHT_ARROW) {
+      networkMinEdgeWeight = Math.min(1, networkMinEdgeWeight + 0.02);
+    }
+  };
+
   p.mousePressed = () => {
     if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
+    // "Back to mosaic" button in network mode
+    if (networkZoom && p.mouseX < 128 && p.mouseY < 34) {
+      networkZoom = null;
+      return;
+    }
     if (p.mouseButton === p.RIGHT) {
       // Right-click: toggle contributing area for clicked cell
       const j = Math.floor(p.mouseX / cellPx);
@@ -818,7 +888,7 @@ const sketch = (p) => {
       }
       return false;
     }
-    const activeTool = window.mosaicControls?.activeTool ?? 'paint';
+    const activeTool = simState.controls?.activeTool ?? 'paint';
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (activeTool === 'ignite') {
@@ -833,7 +903,7 @@ const sketch = (p) => {
     } else if (
       activeTool === 'paint' &&
       p.keyIsDown(p.SHIFT) &&
-      window.mosaicControls?.simMode !== 'fire'
+      simState.controls?.simMode !== 'fire'
     ) {
       floodRect = { r0: i, c0: j, r1: i, c1: j };
     } else {
@@ -844,7 +914,7 @@ const sketch = (p) => {
   p.mouseDragged = () => {
     if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
     if (p.mouseButton === p.RIGHT) return; // don't paint on right-drag
-    const activeTool = window.mosaicControls?.activeTool ?? 'paint';
+    const activeTool = simState.controls?.activeTool ?? 'paint';
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (activeTool === 'ignite') {
@@ -858,7 +928,7 @@ const sketch = (p) => {
   };
 
   p.mouseReleased = () => {
-    if (floodRect && window.mosaicControls?.simMode !== 'fire') {
+    if (floodRect && simState.controls?.simMode !== 'fire') {
       const rMin = Math.min(floodRect.r0, floodRect.r1);
       const rMax = Math.max(floodRect.r0, floodRect.r1);
       const cMin = Math.min(floodRect.c0, floodRect.c1);
@@ -878,8 +948,8 @@ const sketch = (p) => {
 function paintAt(x, y) {
   const j = Math.floor(x / cellPx);
   const i = Math.floor(y / cellPx);
-  const radius = window.mosaicControls?.brushSize ?? 3;
-  const ctrl = window.mosaicControls;
+  const radius = simState.controls?.brushSize ?? 3;
+  const ctrl = simState.controls;
 
   if (i >= 0 && i < ROWS && j >= 0 && j < COLS) {
     const key = ctrl?.activePatch ?? PATCH_TYPES.GRASS;
@@ -897,6 +967,9 @@ function paintAt(x, y) {
         }
       }
 
+      // Refresh phi panel when landscape changes
+      setPhiGrid(patchGrid, COLS, ROWS);
+
       // Record intervention marker when simulation is running.
       // Debounce: only one marker per 3-frame window per patch type.
       if (ctrl?.running) {
@@ -911,12 +984,7 @@ function paintAt(x, y) {
 
 // ── Parcel Analysis integration ───────────────────────────────────────────────
 
-/**
- * Load a real-world patch grid from the Site Analysis module.
- * Replaces patchGrid in-place and resets water/sediment state.
- * Called by parcel-analysis.js via window.loadParcelGrid.
- */
-window.loadParcelGrid = function (grid) {
+function _loadParcelGrid(grid) {
   if (!(grid instanceof Uint8Array) || grid.length !== COLS * ROWS) return;
   patchGrid.set(grid);
   depths.fill(0);
@@ -929,14 +997,10 @@ window.loadParcelGrid = function (grid) {
   lbmState = null;
   sedimentCount = 0;
   updateElevations();
-};
+  setPhiGrid(patchGrid, COLS, ROWS);
+}
 
-/**
- * Render the current simulation state onto an external canvas.
- * Used by parcel-analysis.js to create a live Leaflet image overlay.
- * The canvas is small (64×64) and stretched by Leaflet to fit the parcel bbox.
- */
-window.renderSimToCanvas = function (canvas) {
+function _renderSimToCanvas(canvas) {
   if (!patchGrid || !depths) return;
   const ctx = canvas.getContext('2d');
   const W = canvas.width;
@@ -970,6 +1034,179 @@ window.renderSimToCanvas = function (canvas) {
     }
   }
   ctx.globalAlpha = 1;
+}
+
+// Publish to simState (importable) AND window (backward compat for standalone)
+simState.loadParcelGrid = _loadParcelGrid;
+simState.renderSimToCanvas = _renderSimToCanvas;
+window.loadParcelGrid = _loadParcelGrid;
+window.renderSimToCanvas = _renderSimToCanvas;
+
+// ── Network zoom view ────────────────────────────────────────────────────────
+
+const DIRS8 = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+const NODE_COLORS = {
+  burning:  '#F0997B',
+  atRisk:   '#FAC775',
+  safe:     '#C0DD97',
+  barrier:  '#D3D1C7',
 };
+
+/**
+ * Compute P(i→j) using the same formula as fire.js (read-only, no mutation).
+ */
+function edgeSpreadProb(r1, c1, r2, c2) {
+  const idx1 = r1 * COLS + c1, idx2 = r2 * COLS + c2;
+  const params1 = PATCH_PARAMS[patchKeys[patchGrid[idx1]]] || PATCH_PARAMS.grass;
+  const params2 = PATCH_PARAMS[patchKeys[patchGrid[idx2]]] || PATCH_PARAMS.grass;
+  const fuel = params2.fuelLoad ?? 0;
+  if (fuel <= 0) return 0;
+  const crownOut = params1.crownSpreadOut ?? 1;
+
+  // Wind
+  const wAngle = simState.controls?.windAngle ?? 225;
+  const wSpeed = simState.controls?.windSpeed ?? 2.5;
+  const rad = (wAngle * Math.PI) / 180;
+  const wx = Math.sin(rad), wy = -Math.cos(rad);
+  const dr = r2 - r1, dc = c2 - c1;
+  const dist = Math.sqrt(dr * dr + dc * dc) || 1;
+  const dot = (dc / dist) * wx + (dr / dist) * wy;
+  const windF = Math.max(0.06, 1 + dot * wSpeed * 0.45);
+
+  // Slope
+  const dElev = elevations[idx2] - elevations[idx1];
+  const slopeF = Math.max(0.2, 1 + dElev * 14);
+
+  // Continuity (simplified: count fuel neighbors of target)
+  let fuelNeighbors = 0;
+  for (const [ddr, ddc] of DIRS8) {
+    const nr = r2 + ddr, nc = c2 + ddc;
+    if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+    const nk = patchKeys[patchGrid[nr * COLS + nc]];
+    if (nk === 'forest' || nk === 'grass' || nk === 'corridor') fuelNeighbors++;
+  }
+  const continuity = Math.min(2.08, 1 + 0.11 * fuelNeighbors);
+
+  return Math.min(1, fuel * continuity * windF * slopeF * crownOut);
+}
+
+function drawNetworkView(p) {
+  const { centerR, centerC } = networkZoom;
+  const rMin = Math.max(0, centerR - NETWORK_RADIUS);
+  const rMax = Math.min(ROWS - 1, centerR + NETWORK_RADIUS);
+  const cMin = Math.max(0, centerC - NETWORK_RADIUS);
+  const cMax = Math.min(COLS - 1, centerC + NETWORK_RADIUS);
+  const nCols = cMax - cMin + 1;
+  const nRows = rMax - rMin + 1;
+
+  // Layout: distribute nodes evenly across canvas
+  const padX = 40, padY = 40;
+  const spacingX = (canvasW - 2 * padX) / Math.max(1, nCols - 1);
+  const spacingY = (canvasH - 2 * padY) / Math.max(1, nRows - 1);
+
+  // Build node positions and classify state
+  const nodes = []; // [{r, c, x, y, state, fuel}]
+  const nodeIdx = new Map(); // "r,c" → index
+  for (let r = rMin; r <= rMax; r++) {
+    for (let c = cMin; c <= cMax; c++) {
+      const idx = r * COLS + c;
+      const key = patchKeys[patchGrid[idx]];
+      const params = PATCH_PARAMS[key];
+      const fuel = params.fuelLoad ?? 0;
+      const isFlammable = fuel > 0;
+
+      let nodeState = 'barrier';
+      if (isFlammable) {
+        if (fireState && fireState.cell[idx] === FIRE.BURNING) {
+          nodeState = 'burning';
+        } else if (fireState && fireState.cell[idx] === FIRE.BURNED) {
+          nodeState = 'barrier';
+        } else {
+          // Check if adjacent to burning
+          let adjBurn = false;
+          if (fireState) {
+            for (const [dr, dc] of DIRS8) {
+              const nr = r + dr, nc = c + dc;
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                if (fireState.cell[nr * COLS + nc] === FIRE.BURNING) { adjBurn = true; break; }
+              }
+            }
+          }
+          nodeState = adjBurn ? 'atRisk' : 'safe';
+        }
+      }
+
+      const x = padX + (c - cMin) * spacingX;
+      const y = padY + (r - rMin) * spacingY;
+      nodeIdx.set(`${r},${c}`, nodes.length);
+      nodes.push({ r, c, x, y, state: nodeState, fuel });
+    }
+  }
+
+  // Draw edges (between adjacent flammable pairs)
+  for (let ni = 0; ni < nodes.length; ni++) {
+    const a = nodes[ni];
+    if (a.fuel <= 0) continue;
+    for (const [dr, dc] of DIRS8) {
+      const nr = a.r + dr, nc = a.c + dc;
+      const nj = nodeIdx.get(`${nr},${nc}`);
+      if (nj === undefined || nj <= ni) continue;
+      const b = nodes[nj];
+      if (b.fuel <= 0) continue;
+
+      const prob = edgeSpreadProb(a.r, a.c, b.r, b.c);
+      if (prob < networkMinEdgeWeight) continue;
+
+      const alpha = Math.min(200, 40 + prob * 180);
+      const weight = 0.5 + prob * 4;
+      p.stroke(180, 200, 230, alpha);
+      p.strokeWeight(weight);
+      p.line(a.x, a.y, b.x, b.y);
+    }
+  }
+
+  // Draw nodes
+  p.noStroke();
+  for (const n of nodes) {
+    const radius = Math.max(4, 4 + n.fuel * 20);
+    p.fill(NODE_COLORS[n.state] || NODE_COLORS.barrier);
+    p.ellipse(n.x, n.y, radius * 2, radius * 2);
+
+    // Thin border
+    p.noFill();
+    p.stroke(0, 0, 0, 60);
+    p.strokeWeight(0.5);
+    p.ellipse(n.x, n.y, radius * 2, radius * 2);
+    p.noStroke();
+  }
+
+  // "Back to mosaic" button area (top-left)
+  p.fill(40, 40, 55, 200);
+  p.noStroke();
+  p.rect(8, 8, 120, 26, 5);
+  p.fill(200, 200, 220);
+  p.textSize(11);
+  p.textAlign(p.LEFT, p.CENTER);
+  p.text('\u2190 back to mosaic', 16, 21);
+
+  // Min edge weight label (bottom-right)
+  p.fill(120, 120, 140);
+  p.textSize(9);
+  p.textAlign(p.RIGHT, p.BOTTOM);
+  p.text(`min edge: ${networkMinEdgeWeight.toFixed(2)}  [\u2190/\u2192 to adjust]`, canvasW - 10, canvasH - 10);
+
+  // Legend
+  p.textAlign(p.LEFT, p.TOP);
+  p.textSize(9);
+  let ly = 44;
+  for (const [label, color] of [['burning', NODE_COLORS.burning], ['at-risk', NODE_COLORS.atRisk], ['safe', NODE_COLORS.safe], ['barrier', NODE_COLORS.barrier]]) {
+    p.fill(color);
+    p.ellipse(18, ly + 5, 8, 8);
+    p.fill(180, 180, 190);
+    p.noStroke();
+    p.text(label, 28, ly);
+    ly += 14;
+  }
+}
 
 new p5(sketch);

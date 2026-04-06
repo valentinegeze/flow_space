@@ -14,6 +14,7 @@ import {
   computeComposition,
   generateMockNLCDGrid,
 } from './nlcd-mapper.js';
+import { simState } from './state.js';
 
 const COLS = 64;
 const ROWS = 64;
@@ -40,19 +41,16 @@ let _onRunSim = null;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function initParcelAnalysis(containerId, { onGridReady, onRunSim }) {
-  console.log('[PA] initParcelAnalysis called, container:', containerId);
   _onGridReady = onGridReady;
   _onRunSim = onRunSim;
 
   const el = document.getElementById(containerId);
   if (!el) { console.error('[PA] container not found:', containerId); return; }
-  console.log('[PA] container found, size:', el.offsetWidth, 'x', el.offsetHeight);
 
   // Build the HTML skeleton and sidebar controls immediately.
   // The Leaflet map is initialized lazily in onTabActivated() because Leaflet
   // requires the container to be visible (non-zero size) at init time.
   el.innerHTML = _buildHTML();
-  console.log('[PA] HTML injected, #pa-map exists:', !!document.getElementById('pa-map'));
   _injectStyles();
 
   // Offscreen canvas for sim overlay (doesn't need to be visible)
@@ -71,9 +69,6 @@ export function initParcelAnalysis(containerId, { onGridReady, onRunSim }) {
  * then invalidates size on subsequent calls.
  */
 export function onTabActivated() {
-  console.log('[PA] onTabActivated, _mapReady:', _mapReady);
-  const mapEl = document.getElementById('pa-map');
-  console.log('[PA] #pa-map size at activation:', mapEl?.offsetWidth, 'x', mapEl?.offsetHeight);
   if (!_mapReady) {
     _initMap();
   } else {
@@ -83,15 +78,10 @@ export function onTabActivated() {
 
 /** Initialize Leaflet — must be called only when the container is visible. */
 function _initMap() {
-  console.log('[PA] _initMap called');
   _mapReady = true;
-
-  const mapEl = document.getElementById('pa-map');
-  console.log('[PA] #pa-map offsetWidth/Height:', mapEl?.offsetWidth, mapEl?.offsetHeight);
 
   // Esri World Imagery satellite base — free, no API key required
   _map = L.map('pa-map', { zoomControl: true }).setView([39.5, -98.35], 4);
-  console.log('[PA] L.map created:', _map);
 
   L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -557,14 +547,14 @@ function _renderLCOverlay() {
 
 function _startSimOverlay() {
   if (_simAnimId) cancelAnimationFrame(_simAnimId);
-  if (!_map || !_bounds || !window.renderSimToCanvas) return;
+  if (!_map || !_bounds || !simState.renderSimToCanvas) return;
 
   const sw = _bounds.getSouthWest();
   const ne = _bounds.getNorthEast();
 
   const tick = () => {
-    if (!window.renderSimToCanvas) return;
-    window.renderSimToCanvas(_simCanvas);
+    if (!simState.renderSimToCanvas) return;
+    simState.renderSimToCanvas(_simCanvas);
     const url = _simCanvas.toDataURL();
 
     if (!_simOverlay) {
@@ -603,7 +593,7 @@ function _runSimulation() {
   if (!_patchGrid) return;
 
   // Push grid into the simulation engine
-  if (window.loadParcelGrid) window.loadParcelGrid(_patchGrid);
+  if (simState.loadParcelGrid) simState.loadParcelGrid(_patchGrid);
 
   // Start live overlay if checked
   if (document.getElementById('pa-show-sim-overlay')?.checked) {
