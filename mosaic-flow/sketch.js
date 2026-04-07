@@ -10,6 +10,7 @@ import { spawnParticles, advectParticles } from './particles.js';
 import { createLBMState, stepLBM } from './lbm.js';
 import { createFireState, resetFireState, igniteAt, stepFire, FIRE } from './fire.js';
 import { simState } from './state.js';
+import { fetchSiteFeatures, rebuildGraph, PHI_STAR as SITE_PHI_STAR } from './site-features.js';
 import { createPhiPanel, setPhiGrid, getClusterOverlay } from './phi-panel.js';
 
 const COLS = 64;
@@ -41,6 +42,18 @@ let canvasH = 0;
 let networkZoom = null; // null = mosaic view; { centerR, centerC } = network view
 const NETWORK_RADIUS = 6; // 12×12 neighborhood (radius 6 from center)
 let networkMinEdgeWeight = 0.05;
+
+// ── Cell selection + site features state ─────────────────────────────────────
+let selectedCells = [];           // [{r, c}]
+let _selDragStart = null;         // {r, c} during drag select
+let _siteFeatureResult = null;    // { nodes, edges, phiLocal, giantSize, status }
+let _siteFeatureNodes = null;     // raw nodes array (for edge rebuild on wind change)
+let _siteFetching = false;
+let _siteFetchError = false;
+let _lastFetchKey = '';
+let _lastWindAngle = -1;
+let _lastWindSpeed = -1;
+
 
 const patchKeys = Object.keys(PATCH_PARAMS);
 
@@ -849,21 +862,41 @@ const sketch = (p) => {
     }
   }
 
+  // ── Cell selection overlay ──
+  drawSelectionOverlay(p);
+
+  // ── Selection drag preview ──
+  if (_selDragStart) {
+    const j = Math.floor(p.mouseX / cellPx);
+    const i = Math.floor(p.mouseY / cellPx);
+    const r0 = Math.min(_selDragStart.r, i), r1 = Math.max(_selDragStart.r, i);
+    const c0 = Math.min(_selDragStart.c, j), c1 = Math.max(_selDragStart.c, j);
+    p.noFill();
+    p.stroke(240, 100, 60, 120);
+    p.strokeWeight(1);
+    p.rect(c0 * cellPx, r0 * cellPx, (c1 - c0 + 1) * cellPx, (r1 - r0 + 1) * cellPx);
+    p.noStroke();
+  }
+
   p.doubleClicked = () => {
     if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
-    if (networkZoom) return; // already in network mode
+    if (networkZoom) return;
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
     if (i >= 0 && i < ROWS && j >= 0 && j < COLS) {
+      // If cells are selected, zoom with those; otherwise select the double-clicked cell
+      if (selectedCells.length === 0) toggleCellSelection(i, j, false);
       networkZoom = { centerR: i, centerC: j };
     }
   };
 
   p.keyPressed = () => {
-    if (!networkZoom) return;
     if (p.key === 'Escape' || p.key === 'Backspace') {
-      networkZoom = null;
-    } else if (p.keyCode === p.LEFT_ARROW) {
+      if (networkZoom) { networkZoom = null; }
+      else if (selectedCells.length > 0) { clearSelection(); }
+    }
+    if (!networkZoom) return;
+    if (p.keyCode === p.LEFT_ARROW) {
       networkMinEdgeWeight = Math.max(0, networkMinEdgeWeight - 0.02);
     } else if (p.keyCode === p.RIGHT_ARROW) {
       networkMinEdgeWeight = Math.min(1, networkMinEdgeWeight + 0.02);
@@ -877,29 +910,34 @@ const sketch = (p) => {
       networkZoom = null;
       return;
     }
+    if (networkZoom) return; // no painting in network view
     if (p.mouseButton === p.RIGHT) {
-      // Right-click: toggle contributing area for clicked cell
       const j = Math.floor(p.mouseX / cellPx);
       const i = Math.floor(p.mouseY / cellPx);
-      if (contributingArea) {
-        contributingArea = null;
-      } else {
-        contributingArea = computeContributingArea(i, j);
-      }
+      if (contributingArea) { contributingArea = null; }
+      else { contributingArea = computeContributingArea(i, j); }
       return false;
     }
-    const activeTool = simState.controls?.activeTool ?? 'paint';
+
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
+    if (i < 0 || i >= ROWS || j < 0 || j >= COLS) return;
+
+    // Alt+click: cell selection
+    if (p.keyIsDown(p.ALT)) {
+      toggleCellSelection(i, j, p.keyIsDown(p.SHIFT));
+      return;
+    }
+    // Alt+drag: rectangle selection
+    // (handled in mouseDragged via _selDragStart)
+
+    const activeTool = simState.controls?.activeTool ?? 'paint';
     if (activeTool === 'ignite') {
       if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (activeTool === 'water-source') {
       const existing = waterSources.findIndex(s => s.i === i && s.j === j);
-      if (existing >= 0) {
-        waterSources.splice(existing, 1);
-      } else {
-        waterSources.push({ i, j });
-      }
+      if (existing >= 0) { waterSources.splice(existing, 1); }
+      else { waterSources.push({ i, j }); }
     } else if (
       activeTool === 'paint' &&
       p.keyIsDown(p.SHIFT) &&
@@ -907,16 +945,29 @@ const sketch = (p) => {
     ) {
       floodRect = { r0: i, c0: j, r1: i, c1: j };
     } else {
+      // Normal click on empty space clears selection
+      if (selectedCells.length > 0) { clearSelection(); }
       paintAt(p.mouseX, p.mouseY);
     }
   };
 
   p.mouseDragged = () => {
     if (p.mouseX < 0 || p.mouseX >= canvasW || p.mouseY < 0 || p.mouseY >= canvasH) return;
-    if (p.mouseButton === p.RIGHT) return; // don't paint on right-drag
-    const activeTool = simState.controls?.activeTool ?? 'paint';
+    if (networkZoom) return;
+    if (p.mouseButton === p.RIGHT) return;
+
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
+
+    // Alt+drag: rectangle cell selection
+    if (p.keyIsDown(p.ALT)) {
+      if (!_selDragStart) {
+        _selDragStart = { r: i, c: j };
+      }
+      return;
+    }
+
+    const activeTool = simState.controls?.activeTool ?? 'paint';
     if (activeTool === 'ignite') {
       if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (floodRect) {
@@ -928,6 +979,14 @@ const sketch = (p) => {
   };
 
   p.mouseReleased = () => {
+    // Complete rectangle cell selection
+    if (_selDragStart) {
+      const j = Math.floor(p.mouseX / cellPx);
+      const i = Math.floor(p.mouseY / cellPx);
+      selectCellRect(_selDragStart.r, _selDragStart.c, i, j);
+      _selDragStart = null;
+      return;
+    }
     if (floodRect && simState.controls?.simMode !== 'fire') {
       const rMin = Math.min(floodRect.r0, floodRect.r1);
       const rMax = Math.max(floodRect.r0, floodRect.r1);
@@ -1042,145 +1101,164 @@ simState.renderSimToCanvas = _renderSimToCanvas;
 window.loadParcelGrid = _loadParcelGrid;
 window.renderSimToCanvas = _renderSimToCanvas;
 
-// ── Network zoom view ────────────────────────────────────────────────────────
+// ── Cell selection helpers ────────────────────────────────────────────────────
 
-const DIRS8 = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
-const NODE_COLORS = {
-  burning:  '#F0997B',
-  atRisk:   '#FAC775',
-  safe:     '#C0DD97',
-  barrier:  '#D3D1C7',
-};
-
-/**
- * Compute P(i→j) using the same formula as fire.js (read-only, no mutation).
- */
-function edgeSpreadProb(r1, c1, r2, c2) {
-  const idx1 = r1 * COLS + c1, idx2 = r2 * COLS + c2;
-  const params1 = PATCH_PARAMS[patchKeys[patchGrid[idx1]]] || PATCH_PARAMS.grass;
-  const params2 = PATCH_PARAMS[patchKeys[patchGrid[idx2]]] || PATCH_PARAMS.grass;
-  const fuel = params2.fuelLoad ?? 0;
-  if (fuel <= 0) return 0;
-  const crownOut = params1.crownSpreadOut ?? 1;
-
-  // Wind
-  const wAngle = simState.controls?.windAngle ?? 225;
-  const wSpeed = simState.controls?.windSpeed ?? 2.5;
-  const rad = (wAngle * Math.PI) / 180;
-  const wx = Math.sin(rad), wy = -Math.cos(rad);
-  const dr = r2 - r1, dc = c2 - c1;
-  const dist = Math.sqrt(dr * dr + dc * dc) || 1;
-  const dot = (dc / dist) * wx + (dr / dist) * wy;
-  const windF = Math.max(0.06, 1 + dot * wSpeed * 0.45);
-
-  // Slope
-  const dElev = elevations[idx2] - elevations[idx1];
-  const slopeF = Math.max(0.2, 1 + dElev * 14);
-
-  // Continuity (simplified: count fuel neighbors of target)
-  let fuelNeighbors = 0;
-  for (const [ddr, ddc] of DIRS8) {
-    const nr = r2 + ddr, nc = c2 + ddc;
-    if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
-    const nk = patchKeys[patchGrid[nr * COLS + nc]];
-    if (nk === 'forest' || nk === 'grass' || nk === 'corridor') fuelNeighbors++;
-  }
-  const continuity = Math.min(2.08, 1 + 0.11 * fuelNeighbors);
-
-  return Math.min(1, fuel * continuity * windF * slopeF * crownOut);
+function toggleCellSelection(r, c, additive) {
+  if (!additive) selectedCells = [];
+  const idx = selectedCells.findIndex(s => s.r === r && s.c === c);
+  if (idx >= 0) { selectedCells.splice(idx, 1); }
+  else if (selectedCells.length < 16) { selectedCells.push({ r, c }); }
+  onSelectionChanged();
 }
 
-function drawNetworkView(p) {
-  const { centerR, centerC } = networkZoom;
-  const rMin = Math.max(0, centerR - NETWORK_RADIUS);
-  const rMax = Math.min(ROWS - 1, centerR + NETWORK_RADIUS);
-  const cMin = Math.max(0, centerC - NETWORK_RADIUS);
-  const cMax = Math.min(COLS - 1, centerC + NETWORK_RADIUS);
-  const nCols = cMax - cMin + 1;
-  const nRows = rMax - rMin + 1;
+function selectCellRect(r0, c0, r1, c1) {
+  selectedCells = [];
+  const rMin = Math.max(0, Math.min(r0, r1));
+  const rMax = Math.min(ROWS - 1, Math.max(r0, r1));
+  const cMin = Math.max(0, Math.min(c0, c1));
+  const cMax = Math.min(COLS - 1, Math.max(c0, c1));
+  for (let r = rMin; r <= rMax && selectedCells.length < 16; r++)
+    for (let c = cMin; c <= cMax && selectedCells.length < 16; c++)
+      selectedCells.push({ r, c });
+  onSelectionChanged();
+}
 
-  // Layout: distribute nodes evenly across canvas
-  const padX = 40, padY = 40;
-  const spacingX = (canvasW - 2 * padX) / Math.max(1, nCols - 1);
-  const spacingY = (canvasH - 2 * padY) / Math.max(1, nRows - 1);
+function clearSelection() {
+  selectedCells = [];
+  _siteFeatureResult = null;
+  _siteFeatureNodes = null;
+  _siteFetching = false;
+  _siteFetchError = false;
+}
 
-  // Build node positions and classify state
-  const nodes = []; // [{r, c, x, y, state, fuel}]
-  const nodeIdx = new Map(); // "r,c" → index
-  for (let r = rMin; r <= rMax; r++) {
-    for (let c = cMin; c <= cMax; c++) {
-      const idx = r * COLS + c;
-      const key = patchKeys[patchGrid[idx]];
-      const params = PATCH_PARAMS[key];
-      const fuel = params.fuelLoad ?? 0;
-      const isFlammable = fuel > 0;
-
-      let nodeState = 'barrier';
-      if (isFlammable) {
-        if (fireState && fireState.cell[idx] === FIRE.BURNING) {
-          nodeState = 'burning';
-        } else if (fireState && fireState.cell[idx] === FIRE.BURNED) {
-          nodeState = 'barrier';
-        } else {
-          // Check if adjacent to burning
-          let adjBurn = false;
-          if (fireState) {
-            for (const [dr, dc] of DIRS8) {
-              const nr = r + dr, nc = c + dc;
-              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
-                if (fireState.cell[nr * COLS + nc] === FIRE.BURNING) { adjBurn = true; break; }
-              }
-            }
-          }
-          nodeState = adjBurn ? 'atRisk' : 'safe';
-        }
-      }
-
-      const x = padX + (c - cMin) * spacingX;
-      const y = padY + (r - rMin) * spacingY;
-      nodeIdx.set(`${r},${c}`, nodes.length);
-      nodes.push({ r, c, x, y, state: nodeState, fuel });
-    }
+function getSelectedBounds() {
+  if (selectedCells.length === 0 || !simState.parcelBounds) return null;
+  const pb = simState.parcelBounds;
+  const latStep = (pb.north - pb.south) / ROWS;
+  const lonStep = (pb.east - pb.west) / COLS;
+  let rMin = ROWS, rMax = 0, cMin = COLS, cMax = 0;
+  for (const { r, c } of selectedCells) {
+    if (r < rMin) rMin = r; if (r > rMax) rMax = r;
+    if (c < cMin) cMin = c; if (c > cMax) cMax = c;
   }
+  return {
+    south: pb.south + rMin * latStep,
+    north: pb.south + (rMax + 1) * latStep,
+    west: pb.west + cMin * lonStep,
+    east: pb.west + (cMax + 1) * lonStep,
+  };
+}
 
-  // Draw edges (between adjacent flammable pairs)
-  for (let ni = 0; ni < nodes.length; ni++) {
-    const a = nodes[ni];
-    if (a.fuel <= 0) continue;
-    for (const [dr, dc] of DIRS8) {
-      const nr = a.r + dr, nc = a.c + dc;
-      const nj = nodeIdx.get(`${nr},${nc}`);
-      if (nj === undefined || nj <= ni) continue;
-      const b = nodes[nj];
-      if (b.fuel <= 0) continue;
+function onSelectionChanged() {
+  const bounds = getSelectedBounds();
+  if (!bounds) { _siteFeatureResult = null; return; }
+  const key = `${bounds.south.toFixed(6)},${bounds.west.toFixed(6)},${bounds.north.toFixed(6)},${bounds.east.toFixed(6)}`;
+  if (key === _lastFetchKey && _siteFeatureResult) return; // already fetched
+  _lastFetchKey = key;
+  triggerFetch(bounds);
+}
 
-      const prob = edgeSpreadProb(a.r, a.c, b.r, b.c);
-      if (prob < networkMinEdgeWeight) continue;
+async function triggerFetch(bounds) {
+  _siteFetching = true;
+  _siteFetchError = false;
 
-      const alpha = Math.min(200, 40 + prob * 180);
-      const weight = 0.5 + prob * 4;
-      p.stroke(180, 200, 230, alpha);
-      p.strokeWeight(weight);
-      p.line(a.x, a.y, b.x, b.y);
-    }
+  const timeout = setTimeout(() => { if (_siteFetching) _siteFetchError = true; }, 8000);
+
+  try {
+    const wAngle = simState.controls?.windAngle ?? 225;
+    const wSpeed = simState.controls?.windSpeed ?? 2.5;
+    _lastWindAngle = wAngle;
+    _lastWindSpeed = wSpeed;
+
+    const result = await fetchSiteFeatures({
+      bounds, patchGrid, patchKeys, elevations, cols: COLS, rows: ROWS,
+      windAngle: wAngle, windSpeed: wSpeed,
+    });
+    _siteFeatureResult = result;
+    _siteFeatureNodes = result.nodes;
+  } catch {
+    _siteFetchError = true;
+    _siteFeatureResult = null;
+  } finally {
+    clearTimeout(timeout);
+    _siteFetching = false;
   }
+}
 
-  // Draw nodes
+function maybeRebuildEdges() {
+  if (!_siteFeatureNodes || !_siteFeatureResult) return;
+  const wAngle = simState.controls?.windAngle ?? 225;
+  const wSpeed = simState.controls?.windSpeed ?? 2.5;
+  if (wAngle === _lastWindAngle && wSpeed === _lastWindSpeed) return;
+  _lastWindAngle = wAngle;
+  _lastWindSpeed = wSpeed;
+  const bounds = getSelectedBounds();
+  if (!bounds) return;
+  const { edges, phiLocal, giantSize } = rebuildGraph(_siteFeatureNodes, {
+    windAngle: wAngle, windSpeed: wSpeed, elevations, bounds, cols: COLS, rows: ROWS,
+  });
+  _siteFeatureResult = { ..._siteFeatureResult, edges, phiLocal, giantSize };
+}
+
+// ── Selection overlay on mosaic ──────────────────────────────────────────────
+
+function drawSelectionOverlay(p) {
+  if (selectedCells.length === 0) return;
+  p.noFill();
+  p.stroke(240, 100, 60);
+  p.strokeWeight(2);
+  for (const { r, c } of selectedCells) {
+    p.rect(c * cellPx, r * cellPx, cellPx, cellPx);
+  }
   p.noStroke();
-  for (const n of nodes) {
-    const radius = Math.max(4, 4 + n.fuel * 20);
-    p.fill(NODE_COLORS[n.state] || NODE_COLORS.barrier);
-    p.ellipse(n.x, n.y, radius * 2, radius * 2);
 
-    // Thin border
-    p.noFill();
-    p.stroke(0, 0, 0, 60);
-    p.strokeWeight(0.5);
-    p.ellipse(n.x, n.y, radius * 2, radius * 2);
-    p.noStroke();
+  // Label
+  p.fill(40, 40, 55, 200);
+  p.noStroke();
+  p.rect(canvasW - 220, canvasH - 28, 210, 22, 4);
+  p.fill(200, 200, 220);
+  p.textSize(10);
+  p.textAlign(p.RIGHT, p.CENTER);
+  p.text(`${selectedCells.length} cell${selectedCells.length > 1 ? 's' : ''} selected \u2014 double-click to zoom`, canvasW - 16, canvasH - 17);
+}
+
+// ── Network zoom view (site-features-aware) ──────────────────────────────────
+
+const DIRS8 = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+
+function drawNetworkView(p) {
+  // Rebuild edges if wind changed
+  maybeRebuildEdges();
+
+  const sr = _siteFeatureResult;
+
+  // If we have site features with real nodes, draw that graph
+  if (sr && sr.nodes && sr.nodes.length > 0) {
+    drawSiteFeatureGraph(p, sr);
+  } else if (_siteFetching) {
+    // Loading state
+    p.fill(200, 200, 220);
+    p.textSize(13);
+    p.textAlign(p.CENTER, p.CENTER);
+    p.text('Fetching trees and buildings...', canvasW / 2, canvasH / 2);
+  } else if (_siteFetchError) {
+    p.fill(180, 160, 160);
+    p.textSize(12);
+    p.textAlign(p.CENTER, p.CENTER);
+    p.text('Could not fetch feature data for this area.', canvasW / 2, canvasH / 2 - 16);
+    p.textSize(10);
+    p.fill(140, 140, 150);
+    p.text('OSM coverage may be sparse here. Showing synthetic graph.', canvasW / 2, canvasH / 2 + 4);
+    // Fall through to synthetic graph
+    drawSyntheticNetworkView(p);
+  } else if (!simState.parcelBounds) {
+    // No parcel drawn — use synthetic graph
+    drawSyntheticNetworkView(p);
+  } else {
+    drawSyntheticNetworkView(p);
   }
 
-  // "Back to mosaic" button area (top-left)
+  // "Back to mosaic" button (always visible)
   p.fill(40, 40, 55, 200);
   p.noStroke();
   p.rect(8, 8, 120, 26, 5);
@@ -1189,17 +1267,206 @@ function drawNetworkView(p) {
   p.textAlign(p.LEFT, p.CENTER);
   p.text('\u2190 back to mosaic', 16, 21);
 
-  // Min edge weight label (bottom-right)
+  // Min edge weight (bottom-right)
   p.fill(120, 120, 140);
   p.textSize(9);
   p.textAlign(p.RIGHT, p.BOTTOM);
-  p.text(`min edge: ${networkMinEdgeWeight.toFixed(2)}  [\u2190/\u2192 to adjust]`, canvasW - 10, canvasH - 10);
+  p.text(`min edge: ${networkMinEdgeWeight.toFixed(2)}  [\u2190/\u2192]`, canvasW - 10, canvasH - 10);
+}
+
+function drawSiteFeatureGraph(p, sr) {
+  const { nodes, edges, phiLocal } = sr;
+  const bounds = getSelectedBounds();
+  if (!bounds) return;
+
+  const padX = 50, padY = 50;
+  const plotW = canvasW - 2 * padX;
+  const plotH = canvasH - 2 * padY;
+  const latRange = bounds.north - bounds.south || 1e-6;
+  const lonRange = bounds.east - bounds.west || 1e-6;
+
+  // Map lat/lon to canvas
+  function toScreen(lat, lon) {
+    return {
+      x: padX + ((lon - bounds.west) / lonRange) * plotW,
+      y: padY + ((bounds.north - lat) / latRange) * plotH,
+    };
+  }
+
+  // Draw edges
+  for (const e of edges) {
+    if (e.weight < networkMinEdgeWeight) continue;
+    const a = toScreen(nodes[e.i].lat, nodes[e.i].lon);
+    const b = toScreen(nodes[e.j].lat, nodes[e.j].lon);
+    const alpha = Math.min(200, 40 + e.weight * 180);
+    const w = 0.5 + e.weight * 3;
+    p.stroke(180, 200, 230, alpha);
+    p.strokeWeight(w);
+    p.line(a.x, a.y, b.x, b.y);
+  }
+
+  // Draw nodes
+  p.noStroke();
+  for (const n of nodes) {
+    const s = toScreen(n.lat, n.lon);
+    if (n.type === 'tree') {
+      const r = (n.crownRadius || 3) * 1.5;
+      p.fill(110, 190, 110);
+      p.ellipse(s.x, s.y, r * 2, r * 2);
+      p.noFill();
+      p.stroke(0, 0, 0, 40);
+      p.strokeWeight(0.5);
+      p.ellipse(s.x, s.y, r * 2, r * 2);
+      p.noStroke();
+    } else {
+      // Building: rounded square, border = vulnerability
+      const sz = 8;
+      const vuln = n.vulnerability || 0.3;
+      p.fill(200, 160, 120);
+      p.rect(s.x - sz / 2, s.y - sz / 2, sz, sz, 2);
+      p.noFill();
+      p.stroke(240, 100, 60, 60 + vuln * 180);
+      p.strokeWeight(0.5 + vuln * 2.5);
+      p.rect(s.x - sz / 2, s.y - sz / 2, sz, sz, 2);
+      p.noStroke();
+    }
+  }
+
+  // Wind arrow (top-right)
+  const wAngle = simState.controls?.windAngle ?? 225;
+  const cx = canvasW - 30, cy = 45;
+  const rad = (wAngle * Math.PI) / 180;
+  const arrowLen = 16;
+  const ax = cx + Math.sin(rad) * arrowLen, ay = cy - Math.cos(rad) * arrowLen;
+  p.stroke(200, 180, 130, 180);
+  p.strokeWeight(2);
+  p.line(cx, cy, ax, ay);
+  p.noStroke();
+  p.fill(200, 180, 130);
+  p.ellipse(ax, ay, 5, 5);
+  p.fill(140, 140, 150);
+  p.textSize(8);
+  p.textAlign(p.CENTER, p.TOP);
+  p.text('wind', cx, cy + 20);
+
+  // Local φ (top-left, below back button)
+  p.textAlign(p.LEFT, p.TOP);
+  p.textSize(11);
+  const phiColor = phiLocal > SITE_PHI_STAR ? [240, 130, 70] : [120, 180, 220];
+  p.fill(...phiColor);
+  p.text(`\u03C6 = ${phiLocal.toFixed(2)}`, 14, 44);
+  if (phiLocal > SITE_PHI_STAR) {
+    p.textSize(9);
+    p.fill(240, 130, 70);
+    p.text('\u2014 supercritical', 14, 58);
+  }
+
+  // Status badge
+  p.textSize(8);
+  p.fill(100, 100, 110);
+  const statusLabel = sr.status === 'real' ? `${nodes.length} features (OSM)` :
+    sr.status === 'synthetic' ? `${nodes.length} features (OSM + synthetic)` :
+    `${nodes.length} features (synthetic)`;
+  p.text(statusLabel, 14, 72);
+
+  // Legend (bottom-left)
+  p.textAlign(p.LEFT, p.TOP);
+  p.textSize(9);
+  let ly = canvasH - 60;
+  p.fill(110, 190, 110);
+  p.ellipse(18, ly + 5, 8, 8);
+  p.fill(180, 180, 190);
+  p.noStroke();
+  p.text('tree', 28, ly);
+  ly += 14;
+  p.fill(200, 160, 120);
+  p.rect(14, ly + 1, 8, 8, 2);
+  p.fill(180, 180, 190);
+  p.text('building', 28, ly);
+}
+
+/** Fallback: draw the old synthetic cell-based network when no parcel bounds exist. */
+function drawSyntheticNetworkView(p) {
+  const { centerR, centerC } = networkZoom;
+  const rMin = Math.max(0, centerR - NETWORK_RADIUS);
+  const rMax = Math.min(ROWS - 1, centerR + NETWORK_RADIUS);
+  const cMin = Math.max(0, centerC - NETWORK_RADIUS);
+  const cMax = Math.min(COLS - 1, centerC + NETWORK_RADIUS);
+  const nCols = cMax - cMin + 1;
+  const nRows = rMax - rMin + 1;
+
+  const padX = 40, padY = 40;
+  const spacingX = (canvasW - 2 * padX) / Math.max(1, nCols - 1);
+  const spacingY = (canvasH - 2 * padY) / Math.max(1, nRows - 1);
+
+  const NODE_COLORS = {
+    burning: '#F0997B', atRisk: '#FAC775', safe: '#C0DD97', barrier: '#D3D1C7',
+  };
+
+  const nodes = [];
+  const nodeIdx = new Map();
+  for (let r = rMin; r <= rMax; r++) {
+    for (let c = cMin; c <= cMax; c++) {
+      const idx = r * COLS + c;
+      const key = patchKeys[patchGrid[idx]];
+      const params = PATCH_PARAMS[key];
+      const fuel = params.fuelLoad ?? 0;
+      let nodeState = 'barrier';
+      if (fuel > 0) {
+        if (fireState && fireState.cell[idx] === FIRE.BURNING) nodeState = 'burning';
+        else if (fireState && fireState.cell[idx] === FIRE.BURNED) nodeState = 'barrier';
+        else {
+          let adj = false;
+          if (fireState) {
+            for (const [dr, dc] of DIRS8) {
+              const nr = r + dr, nc = c + dc;
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && fireState.cell[nr * COLS + nc] === FIRE.BURNING) { adj = true; break; }
+            }
+          }
+          nodeState = adj ? 'atRisk' : 'safe';
+        }
+      }
+      const x = padX + (c - cMin) * spacingX;
+      const y = padY + (r - rMin) * spacingY;
+      nodeIdx.set(`${r},${c}`, nodes.length);
+      nodes.push({ r, c, x, y, state: nodeState, fuel });
+    }
+  }
+
+  // Edges
+  for (let ni = 0; ni < nodes.length; ni++) {
+    const a = nodes[ni];
+    if (a.fuel <= 0) continue;
+    for (const [dr, dc] of DIRS8) {
+      const nj = nodeIdx.get(`${a.r + dr},${a.c + dc}`);
+      if (nj === undefined || nj <= ni) continue;
+      const b = nodes[nj];
+      if (b.fuel <= 0) continue;
+      // Simplified spread probability
+      const fuel2 = PATCH_PARAMS[patchKeys[patchGrid[b.r * COLS + b.c]]]?.fuelLoad ?? 0;
+      const prob = Math.min(1, fuel2 * 1.5);
+      if (prob < networkMinEdgeWeight) continue;
+      p.stroke(180, 200, 230, 40 + prob * 160);
+      p.strokeWeight(0.5 + prob * 4);
+      p.line(a.x, a.y, b.x, b.y);
+    }
+  }
+
+  // Nodes
+  p.noStroke();
+  for (const n of nodes) {
+    const radius = Math.max(4, 4 + n.fuel * 20);
+    p.fill(NODE_COLORS[n.state] || NODE_COLORS.barrier);
+    p.ellipse(n.x, n.y, radius * 2, radius * 2);
+    p.noFill(); p.stroke(0, 0, 0, 60); p.strokeWeight(0.5);
+    p.ellipse(n.x, n.y, radius * 2, radius * 2); p.noStroke();
+  }
 
   // Legend
   p.textAlign(p.LEFT, p.TOP);
   p.textSize(9);
   let ly = 44;
-  for (const [label, color] of [['burning', NODE_COLORS.burning], ['at-risk', NODE_COLORS.atRisk], ['safe', NODE_COLORS.safe], ['barrier', NODE_COLORS.barrier]]) {
+  for (const [label, color] of [['burning','#F0997B'],['at-risk','#FAC775'],['safe','#C0DD97'],['barrier','#D3D1C7']]) {
     p.fill(color);
     p.ellipse(18, ly + 5, 8, 8);
     p.fill(180, 180, 190);

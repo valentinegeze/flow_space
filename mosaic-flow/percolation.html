@@ -276,6 +276,11 @@
 
     <!-- ═══ CENTER: Order Parameter φ ═══ -->
     <div id="center-panel">
+      <div style="padding:8px 16px;border-bottom:1px solid rgba(255,255,255,0.05);">
+        <button id="stream-table-upload-btn" style="width:100%;padding:6px 0;background:rgba(80,200,180,0.12);border:1px solid rgba(80,200,180,0.3);border-radius:4px;color:#50c8b4;font-size:11px;cursor:pointer;font-family:inherit;">Load stream table data</button>
+        <div id="stream-table-status" style="font-size:10px;color:#666;margin-top:4px;min-height:14px;"></div>
+      </div>
+
       <div id="phi-display">
         <span id="phi-symbol">order parameter &phi;</span>
         <div id="phi-value">0.00</div>
@@ -285,7 +290,7 @@
       <div id="threshold-section">
         <div class="section-label">Flammability Threshold</div>
         <div class="slider-row">
-          <input type="range" id="threshold-slider" min="0" max="0.5" step="0.005" value="0.5">
+          <input type="range" id="threshold-slider" min="0" max="0.5" step="0.005" value="0.1">
           <span class="val" id="threshold-value">0.50</span>
         </div>
       </div>

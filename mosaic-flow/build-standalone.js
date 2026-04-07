@@ -21,6 +21,7 @@ const BUNDLE_ORDER = [
   'dem.js',
   'nlcd-mapper.js',
   'state.js',
+  'site-features.js',
   'parcel-analysis.js',
   'phi-panel.js',
   'ui.js',
@@ -74,7 +75,7 @@ function buildStandaloneHtml() {
   // The bundled initTabs() from tabs.js handles tab switching + parcel init
   const tabScript = `
   <script>
-    initTabs({ enableFireSweep: false });
+    initTabs();
   </script>`;
 
   const bundle = buildBundle();

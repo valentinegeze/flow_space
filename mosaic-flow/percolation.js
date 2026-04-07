@@ -60,7 +60,7 @@ const state = {
   timestep: 0,
   maxTimestep: 0,
   mode: 'fire',             // 'fire' | 'flood' | 'both'
-  flammabilityThreshold: 0.5,
+  flammabilityThreshold: 0.1,
   scaleSlider: 0,           // 0 = landscape, 1 = granular
   zoomTarget: { r: 32, c: 32 },
   windDirection: 225,       // degrees FROM
@@ -90,6 +90,9 @@ const state = {
 
   // Empirical data points [{phi, spreadExtent}]
   empiricalPoints: [],
+
+  // Stream table imported overlay data (loaded via JSON file picker)
+  streamTableData: null,
 
   // Dirty flags for selective recomputation
   _dirty: { clusters: true, graph: true, timeline: true },
@@ -213,8 +216,9 @@ function recomputeClusters() {
     for (let c = 0; c < COLS; c++) {
       const idx = r * COLS + c;
       if (!active[idx]) continue;
-      // Connect to neighbors (only need right and down + diagonals to avoid double-counting)
-      for (const [dr, dc] of DIRS8) {
+      // 4-connectivity for correct percolation threshold φ* ≈ 0.59
+      const DIRS4 = [[-1,0],[1,0],[0,-1],[0,1]];
+      for (const [dr, dc] of DIRS4) {
         const nr = r + dr, nc = c + dc;
         if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
         const nidx = nr * COLS + nc;
@@ -340,6 +344,11 @@ function takeSnapshot() {
     depths: new Float32Array(state.depths),
   });
   state.maxTimestep = state.snapshots.length - 1;
+  const scrubber = document.getElementById('timeline-scrubber');
+  if (scrubber) {
+    scrubber.max = state.maxTimestep;
+    scrubber.value = state.timestep;
+  }
 }
 
 function resetSimulation() {
@@ -355,9 +364,34 @@ function resetSimulation() {
   state.spanningTimestep = -1;
   state.playing = false;
 
-  // Ignite from center of giant cluster
+  // Ignite from center of giant cluster — walk outward if target cell has no active neighbors
   if (state.giantClusterId >= 0) {
-    igniteAt(state.fireState, state.zoomTarget.r, state.zoomTarget.c,
+    let ir = state.zoomTarget.r, ic = state.zoomTarget.c;
+    const hasActiveNeighbor = (r, c) => {
+      for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.cellIsActive[nr * COLS + nc]) return true;
+      }
+      return false;
+    };
+    const idx0 = ir * COLS + ic;
+    if (!state.cellIsActive[idx0] || !hasActiveNeighbor(ir, ic)) {
+      // Spiral outward from center to find a viable cell
+      let found = false;
+      for (let radius = 1; radius < Math.max(ROWS, COLS) && !found; radius++) {
+        for (let dr = -radius; dr <= radius && !found; dr++) {
+          for (let dc = -radius; dc <= radius && !found; dc++) {
+            if (Math.abs(dr) !== radius && Math.abs(dc) !== radius) continue;
+            const nr = state.zoomTarget.r + dr, nc = state.zoomTarget.c + dc;
+            if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+            if (state.cellIsActive[nr * COLS + nc] && hasActiveNeighbor(nr, nc)) {
+              ir = nr; ic = nc; found = true;
+            }
+          }
+        }
+      }
+    }
+    igniteAt(state.fireState, ir, ic,
              COLS, ROWS, state.patchGrid, patchKeys, PATCH_PARAMS);
   }
   takeSnapshot();
@@ -425,6 +459,8 @@ function restoreTimestep(t) {
   state.fireState.cell = new Uint8Array(snap.cellState);
   state.depths = new Float32Array(snap.depths);
   state.timestep = t;
+  const scrubber = document.getElementById('timeline-scrubber');
+  if (scrubber) scrubber.value = state.timestep;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -815,6 +851,36 @@ function renderSCurve() {
       ctx.beginPath();
       ctx.arc(x, y, 2.5, 0, Math.PI * 2);
       ctx.fill();
+    }
+  }
+
+  // Stream table empirical overlay
+  if (state.streamTableData) {
+    const st = state.streamTableData;
+    if (st.empiricalPoints) {
+      ctx.fillStyle = 'rgba(240,100,60,0.85)';
+      for (const pt of st.empiricalPoints) {
+        const x = pad.left + Math.min(1, pt.phi) * plotW;
+        const y = pad.top + plotH - Math.min(1, pt.spreadExtent) * plotH;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    if (st.phiStar != null) {
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = 'rgba(80,200,180,0.7)';
+      ctx.lineWidth = 1;
+      const xEmp = pad.left + Math.min(1, st.phiStar) * plotW;
+      ctx.beginPath();
+      ctx.moveTo(xEmp, pad.top);
+      ctx.lineTo(xEmp, pad.top + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#50c8b4';
+      ctx.font = '9px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('empirical \u03C6*=' + st.phiStar.toFixed(2), xEmp, pad.top + plotH + 26);
     }
   }
 
@@ -1310,13 +1376,49 @@ function wireEvents() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Stream Table Data Import
+// ════════════════════════════════════════════════════════════════════════════
+function wireStreamTableUpload() {
+  const btn = document.getElementById('stream-table-upload-btn');
+  const statusEl = document.getElementById('stream-table-status');
+  if (!btn) return;
+
+  btn.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.addEventListener('change', () => {
+      const file = input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (!Array.isArray(data.empiricalPoints)) throw new Error('Missing empiricalPoints array');
+          state.streamTableData = data;
+          if (statusEl) {
+            statusEl.textContent = `Loaded ${data.empiricalPoints.length} points`;
+            statusEl.style.color = '#50c8b4';
+          }
+          renderAll();
+        } catch (err) {
+          if (statusEl) { statusEl.textContent = 'Error: ' + err.message; statusEl.style.color = '#e55'; }
+        }
+      };
+      reader.readAsText(file);
+    });
+    input.click();
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Bootstrap
 // ════════════════════════════════════════════════════════════════════════════
 export function init() {
   getCanvasRefs();
   initGrid();
   wireEvents();
-  // Start with a simulation ready to go
+  wireStreamTableUpload();
   resetSimulation();
   renderAll();
   animFrame = requestAnimationFrame(animationLoop);

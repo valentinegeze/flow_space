@@ -53,7 +53,7 @@
     }
 
     /* ── View containers ── */
-    #mosaic-container, #site-analysis-container, #firesweep-container {
+    #mosaic-container, #site-analysis-container, #stream-table-container {
       position: fixed;
       top: 36px; left: 0; right: 0; bottom: 0;
     }
@@ -76,7 +76,7 @@
       z-index: 1;
     }
 
-    #firesweep-container {
+    #stream-table-container {
       display: none;
       z-index: 1;
     }
@@ -85,13 +85,11 @@
 <body>
   <!-- Tab bar -->
   <div id="tab-bar">
-    <button class="tab-btn active" data-tab="mosaic">Mosaic Design</button>
+    <button class="tab-btn active" data-tab="mosaic">Mosaic</button>
     <div class="tab-divider"></div>
-    <button class="tab-btn" data-tab="site">◈ Site Analysis</button>
+    <button class="tab-btn" data-tab="site">&#9672; Site Analysis</button>
     <div class="tab-divider"></div>
-    <button class="tab-btn" data-tab="firesweep">FireSweep</button>
-    <div class="tab-divider"></div>
-    <a class="tab-btn" href="./percolation.html" style="text-decoration:none">Percolation Explorer</a>
+    <button class="tab-btn" data-tab="stream-table">Stream Table</button>
     <span id="tab-title">Land Mosaic Flow Model</span>
   </div>
 
@@ -101,19 +99,16 @@
   <!-- Site analysis view (Leaflet map + parcel workflow) -->
   <div id="site-analysis-container"></div>
 
-  <!-- FireSweep percolation lab (dedicated tab) -->
-  <div id="firesweep-container"></div>
+  <!-- Stream Table: percolation explorer + empirical upload -->
+  <div id="stream-table-container"></div>
 
   <!-- Main simulation sketch -->
   <script type="module" src="./sketch.js"></script>
 
-  <!-- Tab switching + parcel analysis init (shared via tabs.js) -->
+  <!-- Tab switching -->
   <script type="module">
     import { initTabs } from './tabs.js';
-    import { initFireSweepTab, pauseFireSweep, onFireSweepTabActivated } from './firesweep-tab.js';
-
-    const tabs = initTabs({ enableFireSweep: true });
-    tabs.setFireSweep(initFireSweepTab, pauseFireSweep, onFireSweepTabActivated);
+    initTabs();
   </script>
 </body>
 </html>

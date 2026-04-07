@@ -1,36 +1,29 @@
 /**
  * tabs.js — Shared tab-switching logic.
  *
- * Used by both index.html (ES module) and build-standalone.js (bundled).
- * Avoids duplicating the show/hide logic in two places.
+ * Three tabs: Mosaic, Site Analysis, Stream Table.
+ * Stream Table lazy-initializes its own module on first activation.
  */
 
 import { initParcelAnalysis, onTabActivated, stopSimOverlay } from './parcel-analysis.js';
 import { simState } from './state.js';
 
+let _streamTableInited = false;
+
 /**
  * Wire up tab buttons and initialize the parcel-analysis module.
- *
- * @param {Object} opts
- * @param {boolean} [opts.enableFireSweep]  If true, also wire the FireSweep tab
- *   (requires firesweep-tab.js to be loaded separately).
  */
-export function initTabs({ enableFireSweep = false } = {}) {
-  const mosaicEl    = document.getElementById('mosaic-container');
-  const siteEl      = document.getElementById('site-analysis-container');
-  const firesweepEl = document.getElementById('firesweep-container');
-  const tabBtns     = document.querySelectorAll('.tab-btn[data-tab]');
+export function initTabs() {
+  const mosaicEl      = document.getElementById('mosaic-container');
+  const siteEl        = document.getElementById('site-analysis-container');
+  const streamTableEl = document.getElementById('stream-table-container');
+  const tabBtns       = document.querySelectorAll('.tab-btn[data-tab]');
 
   function hideAllPanes() {
-    if (mosaicEl)    mosaicEl.style.display = 'none';
-    if (siteEl)      siteEl.style.display = 'none';
-    if (firesweepEl) firesweepEl.style.display = 'none';
+    if (mosaicEl)      mosaicEl.style.display = 'none';
+    if (siteEl)        siteEl.style.display = 'none';
+    if (streamTableEl) streamTableEl.style.display = 'none';
   }
-
-  // Lazy references for firesweep (only resolved if enableFireSweep is true)
-  let _fsInit = null;
-  let _fsPause = null;
-  let _fsActivated = null;
 
   tabBtns.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -39,7 +32,6 @@ export function initTabs({ enableFireSweep = false } = {}) {
 
       const tab = btn.dataset.tab;
       hideAllPanes();
-      if (_fsPause) _fsPause();
 
       if (tab === 'mosaic') {
         if (mosaicEl) mosaicEl.style.display = 'flex';
@@ -47,15 +39,23 @@ export function initTabs({ enableFireSweep = false } = {}) {
       } else if (tab === 'site') {
         if (siteEl) siteEl.style.display = 'block';
         onTabActivated();
-      } else if (tab === 'firesweep' && enableFireSweep) {
-        if (firesweepEl) firesweepEl.style.display = 'block';
-        if (_fsInit)      _fsInit('firesweep-container');
-        if (_fsActivated) _fsActivated();
+      } else if (tab === 'stream-table') {
+        if (streamTableEl) streamTableEl.style.display = 'block';
+        if (!_streamTableInited) {
+          _streamTableInited = true;
+          import('./stream-table-tab.js').then(mod => {
+            mod.initStreamTableTab('stream-table-container');
+          });
+        } else {
+          import('./stream-table-tab.js').then(mod => {
+            if (mod.onStreamTableActivated) mod.onStreamTableActivated();
+          });
+        }
       }
     });
   });
 
-  // Initialize parcel analysis
+  // Initialize parcel analysis (Site Analysis tab)
   initParcelAnalysis('site-analysis-container', {
     onGridReady: (patchGrid) => {
       if (simState.loadParcelGrid) simState.loadParcelGrid(patchGrid);
@@ -67,16 +67,4 @@ export function initTabs({ enableFireSweep = false } = {}) {
       });
     },
   });
-
-  // Return a handle so the caller can register firesweep callbacks
-  return {
-    /**
-     * Register FireSweep tab callbacks after dynamic import.
-     */
-    setFireSweep(initFn, pauseFn, activatedFn) {
-      _fsInit = initFn;
-      _fsPause = pauseFn;
-      _fsActivated = activatedFn;
-    },
-  };
 }

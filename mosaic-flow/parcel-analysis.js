@@ -367,6 +367,7 @@ function _onShapeCreated(e) {
   _drawnItems.addLayer(_polygon);
   _polygonGeoJson = _polygon.toGeoJSON();
   _bounds = _polygon.getBounds();
+  _syncParcelBounds();
   _updateParcelInfo();
   document.getElementById('pa-clear-btn').style.display = '';
   _setStep(2);
@@ -378,8 +379,18 @@ function _onShapeEdited() {
     _polygon = layers[0];
     _polygonGeoJson = _polygon.toGeoJSON();
     _bounds = _polygon.getBounds();
+    _syncParcelBounds();
     _updateParcelInfo();
     _setStep(2);
+  }
+}
+
+function _syncParcelBounds() {
+  if (_bounds) {
+    const sw = _bounds.getSouthWest(), ne = _bounds.getNorthEast();
+    simState.parcelBounds = { west: sw.lng, south: sw.lat, east: ne.lng, north: ne.lat };
+  } else {
+    simState.parcelBounds = null;
   }
 }
 
@@ -387,6 +398,7 @@ function _clearDrawing(resetToStep1 = true) {
   _polygon = null;
   _polygonGeoJson = null;
   _bounds = null;
+  simState.parcelBounds = null;
   _nlcdGrid = null;
   _patchGrid = null;
   _composition = null;

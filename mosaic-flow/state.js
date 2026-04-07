@@ -26,4 +26,11 @@ export const simState = {
    * @type {((canvas: HTMLCanvasElement) => void) | null}
    */
   renderSimToCanvas: null,
+
+  /**
+   * Current parcel bounding box from Site Analysis (lat/lng).
+   * Set by parcel-analysis.js when a parcel is drawn/edited.
+   * @type {{ west: number, south: number, east: number, north: number } | null}
+   */
+  parcelBounds: null,
 };
