@@ -313,7 +313,7 @@ export function createUI(onUpdate) {
     simMode:             'fire',    // 'fire' | 'flood'
     windAngle:           225,
     windSpeed:           2.5,
-    activeTool:          'paint',   // 'paint' | 'ignite' | 'water-source'
+    activeTool:          'paint',   // 'paint' | 'ignite' | 'water-source' | 'select'
     waterSourceRate:     0.04,
   };
 
@@ -418,6 +418,7 @@ export function createUI(onUpdate) {
   igniteToolBtn.addEventListener('click', () => {
     controls.activeTool = controls.activeTool === 'ignite' ? 'paint' : 'ignite';
     refreshIgniteBtn();
+    refreshSelectBtn();
     onUpdate?.();
   });
   firePanelDiv.appendChild(igniteToolBtn);
@@ -535,6 +536,7 @@ export function createUI(onUpdate) {
   waterSourceToolBtn.addEventListener('click', () => {
     controls.activeTool = controls.activeTool === 'water-source' ? 'paint' : 'water-source';
     refreshWaterSourceBtn();
+    refreshSelectBtn();
     onUpdate?.();
   });
   floodPanelDiv.appendChild(waterSourceToolBtn);
@@ -654,6 +656,28 @@ export function createUI(onUpdate) {
 
   floodPanelDiv.appendChild(buildExportImport(onUpdate));
 
+  // ── Select tool (shared across modes) ────────────────────────────────────
+  const selectToolBtn = makeBtn('Select Tool', `
+    display:block; width:100%; padding:7px 10px;
+    border:2px solid #e07848; background:transparent; color:#ddd;
+    border-radius:4px; cursor:pointer; font-size:12px; margin-bottom:10px;
+  `);
+  const refreshSelectBtn = () => {
+    const active = controls.activeTool === 'select';
+    selectToolBtn.style.background = active ? '#e0784830' : 'transparent';
+    selectToolBtn.style.fontWeight = active ? 'bold' : 'normal';
+    selectToolBtn.style.color      = active ? '#e07848' : '#ddd';
+    selectToolBtn.textContent      = active ? 'Select Tool (ON)' : 'Select Tool';
+  };
+  selectToolBtn.addEventListener('click', () => {
+    controls.activeTool = controls.activeTool === 'select' ? 'paint' : 'select';
+    refreshSelectBtn();
+    refreshIgniteBtn();
+    refreshWaterSourceBtn();
+    onUpdate?.();
+  });
+  menuContent.appendChild(selectToolBtn);
+
   // ── Mount panels, set initial visibility ─────────────────────────────────
   menuContent.appendChild(firePanelDiv);
   menuContent.appendChild(floodPanelDiv);
@@ -673,6 +697,7 @@ export function createUI(onUpdate) {
     if (chartCanvas) chartCanvas.style.display = mode === 'fire' ? 'none' : 'block';
 
     refreshModeBtns();
+    refreshSelectBtn();
     refreshIgniteBtn();
     refreshWaterSourceBtn();
     onUpdate?.();

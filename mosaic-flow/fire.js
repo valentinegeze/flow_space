@@ -49,17 +49,39 @@ function neighborContinuityFast(patchGrid, kForest, kGrass, kCorridor, r, c, col
   return Math.min(CONTINUITY_CAP, raw);
 }
 
+/**
+ * Build a cached params array: one entry per grid cell containing
+ * { fuelLoad, burnDuration, crownSpreadOut }. Build once per grid change,
+ * pass into stepFire to avoid repeated hash lookups in the hot loop.
+ */
+export function buildParamsCache(patchGrid, patchKeys, patchParams, cols, rows) {
+  const n = cols * rows;
+  const cache = new Array(n);
+  for (let i = 0; i < n; i++) {
+    cache[i] = patchParams[patchKeys[patchGrid[i]]] || {};
+  }
+  return cache;
+}
+
 export function createFireState(cols, rows) {
   return {
-    cell:   new Uint8Array(cols * rows),  // FIRE enum per cell
-    age:    new Uint8Array(cols * rows),  // fire-ticks spent burning
-    embers: [],                            // { x, y, tx, ty, age, life }
+    cell:         new Uint8Array(cols * rows),  // FIRE enum per cell
+    age:          new Uint8Array(cols * rows),  // fire-ticks spent burning
+    _nextCell:    new Uint8Array(cols * rows),  // double-buffer for cell
+    _nextAge:     new Uint8Array(cols * rows),  // double-buffer for age
+    _attempted:   new Uint8Array(cols * rows),  // reusable per-tick scratch
+    burningCells: new Set(),                     // active set of burning cell indices
+    embers: [],                                  // { x, y, tx, ty, age, life }
   };
 }
 
 export function resetFireState(fs) {
   fs.cell.fill(0);
   fs.age.fill(0);
+  fs._nextCell.fill(0);
+  fs._nextAge.fill(0);
+  fs._attempted.fill(0);
+  fs.burningCells.clear();
   fs.embers = [];
 }
 
@@ -76,14 +98,12 @@ export function igniteAt(fs, row, col, cols, rows, patchGrid, patchKeys, patchPa
   }
   fs.cell[idx] = FIRE.BURNING;
   fs.age[idx]  = 0;
+  fs.burningCells.add(idx);
 }
 
 /** Returns true if any cell is still burning. */
 export function hasActiveFire(fs) {
-  for (let i = 0; i < fs.cell.length; i++) {
-    if (fs.cell[i] === FIRE.BURNING) return true;
-  }
-  return false;
+  return fs.burningCells.size > 0;
 }
 
 /**
@@ -94,10 +114,11 @@ export function hasActiveFire(fs) {
  *
  * windAngleDeg : compass direction the wind blows FROM (0=N, 90=E, 180=S, 270=W)
  * windSpeed    : 0 – 5 (0 = calm, no directional bias)
+ * cachedParams : optional pre-built params cache from buildParamsCache()
  */
 export function stepFire(fs, patchGrid, patchKeys, patchParams,
                          elevations, windAngleDeg, windSpeed, depths,
-                         cols, rows) {
+                         cols, rows, cachedParams) {
   // Wind vector: direction fire is pushed TOWARD (opposite of "from" convention)
   const rad = (windAngleDeg * Math.PI) / 180;
   const wx =  Math.sin(rad);   // east  component of push direction
@@ -107,91 +128,114 @@ export function stepFire(fs, patchGrid, patchKeys, patchParams,
   // `attempted` ensures each unburned cell gets AT MOST ONE ignition roll per tick
   // regardless of how many burning neighbors surround it. This makes fuelLoad
   // directly equivalent to the site-percolation density p — the core FireSweep property.
-  const nextCell  = new Uint8Array(fs.cell);
-  const nextAge   = new Uint8Array(fs.age);
-  const attempted = new Uint8Array(cols * rows); // 1 = already rolled this tick
+  const nextCell  = fs._nextCell;
+  const nextAge   = fs._nextAge;
+  const attempted = fs._attempted;
+  nextCell.set(fs.cell);
+  nextAge.set(fs.age);
+  attempted.fill(0);
 
   // Cache patch-key indices once to avoid O(n) indexOf inside tight loop
   const kForestIdx    = patchKeys.indexOf('forest');
   const kGrassIdx     = patchKeys.indexOf('grass');
   const kCorridorIdx  = patchKeys.indexOf('corridor');
 
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const idx = r * cols + c;
-      if (fs.cell[idx] !== FIRE.BURNING) continue;
+  // Use params cache if provided, otherwise fall back to hash lookup
+  const getParams = cachedParams
+    ? (idx) => cachedParams[idx]
+    : (idx) => patchParams[patchKeys[patchGrid[idx]]] || {};
 
-      nextAge[idx]++;
+  // Track cells to add/remove from burningCells after the tick
+  const newlyBurning = [];
+  const newlyBurned = [];
 
-      // How many ticks this patch type smolders before going dark
-      const params   = patchParams[patchKeys[patchGrid[idx]]] || {};
-      const burnLife = params.burnDuration ?? 3;
+  // Only iterate burning cells (active set), not the entire grid
+  for (const idx of fs.burningCells) {
+    const r = (idx / cols) | 0;
+    const c = idx % cols;
 
-      if (nextAge[idx] >= burnLife) {
-        nextCell[idx] = FIRE.BURNED;
-        // (don't continue — still try to spread on the final tick)
+    nextAge[idx]++;
+
+    // How many ticks this patch type smolders before going dark
+    const params   = getParams(idx);
+    const burnLife = params.burnDuration ?? 3;
+
+    if (nextAge[idx] >= burnLife) {
+      nextCell[idx] = FIRE.BURNED;
+      newlyBurned.push(idx);
+      // (don't continue — still try to spread on the final tick)
+    }
+
+    const crownOut = params.crownSpreadOut ?? 1.0;
+    if (crownOut <= 0) continue;
+
+    // ── Attempt spread to all 8 neighbors ──────────────────────────────────
+    for (let d = 0; d < 8; d++) {
+      const ni = r + DIRS[d][0];
+      const nj = c + DIRS[d][1];
+      if (ni < 0 || ni >= rows || nj < 0 || nj >= cols) continue;
+      const nidx = ni * cols + nj;
+      // Use original state (fs.cell) so we don't spread into cells already
+      // ignited by an earlier iteration in this same tick.
+      if (fs.cell[nidx] !== FIRE.UNBURNED) continue;
+      // One roll per cell per tick — prevents multi-neighbor probability inflation.
+      if (attempted[nidx]) continue;
+      attempted[nidx] = 1;
+
+      const nParams = getParams(nidx);
+      const fuel    = nParams.fuelLoad ?? 0;
+      if (fuel <= 0) continue;
+      if (depths[nidx] > 0.012) continue; // standing water suppresses ignition
+
+      const continuity = neighborContinuityFast(patchGrid, kForestIdx, kGrassIdx, kCorridorIdx, ni, nj, cols, rows);
+
+      // ── Wind factor ───────────────────────────────────────────────────────
+      const scale  = IS_DIAG[d] ? 1.414 : 1.0;
+      const sdx    = DIRS[d][1] / scale;
+      const sdy    = DIRS[d][0] / scale;
+      const dot    = sdx * wx + sdy * wy;
+      const windF  = Math.max(0.06, 1 + dot * windSpeed * 0.45);
+
+      // ── Slope factor ──────────────────────────────────────────────────────
+      const dElev  = elevations[nidx] - elevations[idx];
+      const slopeF = Math.max(0.2, 1 + dElev * 14);
+
+      // P = p_target × continuity × wind × slope × crown from source cell
+      const P = Math.min(1.0, fuel * continuity * windF * slopeF * crownOut);
+      if (Math.random() < P) {
+        nextCell[nidx] = FIRE.BURNING;
+        nextAge[nidx]  = 0;
+        newlyBurning.push(nidx);
       }
+    }
 
-      const srcParams = patchParams[patchKeys[patchGrid[idx]]] || {};
-      const crownOut = srcParams.crownSpreadOut ?? 1.0;
-      if (crownOut <= 0) continue;
-
-      // ── Attempt spread to all 8 neighbors ──────────────────────────────────
-      for (let d = 0; d < 8; d++) {
-        const ni = r + DIRS[d][0];
-        const nj = c + DIRS[d][1];
-        if (ni < 0 || ni >= rows || nj < 0 || nj >= cols) continue;
-        const nidx = ni * cols + nj;
-        // Use original state (fs.cell) so we don't spread into cells already
-        // ignited by an earlier iteration in this same tick.
-        if (fs.cell[nidx] !== FIRE.UNBURNED) continue;
-        // One roll per cell per tick — prevents multi-neighbor probability inflation.
-        if (attempted[nidx]) continue;
-        attempted[nidx] = 1;
-
-        const nParams = patchParams[patchKeys[patchGrid[nidx]]] || {};
-        const fuel    = nParams.fuelLoad ?? 0;
-        if (fuel <= 0) continue;
-        if (depths[nidx] > 0.012) continue; // standing water suppresses ignition
-
-        const continuity = neighborContinuityFast(patchGrid, kForestIdx, kGrassIdx, kCorridorIdx, ni, nj, cols, rows);
-
-        // ── Wind factor ───────────────────────────────────────────────────────
-        const scale  = IS_DIAG[d] ? 1.414 : 1.0;
-        const sdx    = DIRS[d][1] / scale;
-        const sdy    = DIRS[d][0] / scale;
-        const dot    = sdx * wx + sdy * wy;
-        const windF  = Math.max(0.06, 1 + dot * windSpeed * 0.45);
-
-        // ── Slope factor ──────────────────────────────────────────────────────
-        const dElev  = elevations[nidx] - elevations[idx];
-        const slopeF = Math.max(0.2, 1 + dElev * 14);
-
-        // P = p_target × continuity × wind × slope × crown from source cell
-        const P = Math.min(1.0, fuel * continuity * windF * slopeF * crownOut);
-        if (Math.random() < P) {
-          nextCell[nidx] = FIRE.BURNING;
-          nextAge[nidx]  = 0;
-        }
-      }
-
-      // ── Ember spotting ────────────────────────────────────────────────────
-      // Firebrands carried by wind that can ignite distant unburned cells.
-      if (windSpeed > 1.0 && Math.random() < 0.006) {
-        const dist    = (3 + Math.random() * 8) * windSpeed * 0.38;
-        const scatter = (Math.random() - 0.5) * 3.2;
-        // Target drifts in wind direction with lateral scatter
-        fs.embers.push({
-          x: c + 0.5, y: r + 0.5,
-          tx: c + 0.5 + wx * dist - wy * scatter,
-          ty: r + 0.5 + wy * dist + wx * scatter,
-          age: 0, life: 7 + Math.floor(Math.random() * 5),
-        });
-      }
+    // ── Ember spotting ────────────────────────────────────────────────────
+    // Firebrands carried by wind that can ignite distant unburned cells.
+    if (windSpeed > 1.0 && Math.random() < 0.006) {
+      const dist    = (3 + Math.random() * 8) * windSpeed * 0.38;
+      const scatter = (Math.random() - 0.5) * 3.2;
+      // Target drifts in wind direction with lateral scatter
+      fs.embers.push({
+        x: c + 0.5, y: r + 0.5,
+        tx: c + 0.5 + wx * dist - wy * scatter,
+        ty: r + 0.5 + wy * dist + wx * scatter,
+        age: 0, life: 7 + Math.floor(Math.random() * 5),
+      });
     }
   }
 
   // ── Advance ember particles ───────────────────────────────────────────────
+  // Skip ember processing entirely when wind is too low to create embers
+  if (windSpeed < 1.0) {
+    // Update active set and swap buffers
+    for (const idx of newlyBurned) fs.burningCells.delete(idx);
+    for (const idx of newlyBurning) fs.burningCells.add(idx);
+    fs._nextCell = fs.cell;
+    fs._nextAge  = fs.age;
+    fs.cell = nextCell;
+    fs.age  = nextAge;
+    return fs;
+  }
   const alive = [];
   for (const e of fs.embers) {
     e.age++;
@@ -204,7 +248,7 @@ export function stepFire(fs, patchGrid, patchKeys, patchParams,
       const li = Math.floor(e.y), lj = Math.floor(e.x);
       if (li >= 0 && li < rows && lj >= 0 && lj < cols) {
         const lidx = li * cols + lj;
-        const lp   = patchParams[patchKeys[patchGrid[lidx]]] || {};
+        const lp   = getParams(lidx);
         const fuel = lp.fuelLoad ?? 0;
         if (nextCell[lidx] === FIRE.UNBURNED && fuel > 0 && depths[lidx] < 0.01) {
           const cont = neighborContinuity(patchGrid, patchKeys, li, lj, cols, rows);
@@ -212,6 +256,7 @@ export function stepFire(fs, patchGrid, patchKeys, patchParams,
           if (Math.random() < pEmber) {
             nextCell[lidx] = FIRE.BURNING;
             nextAge[lidx]  = 0;
+            newlyBurning.push(lidx);
           }
         }
       }
@@ -222,6 +267,13 @@ export function stepFire(fs, patchGrid, patchKeys, patchParams,
   }
   fs.embers = alive;
 
+  // Update active burning set
+  for (const idx of newlyBurned) fs.burningCells.delete(idx);
+  for (const idx of newlyBurning) fs.burningCells.add(idx);
+
+  // Swap buffers: nextCell becomes current, old current becomes next scratch space
+  fs._nextCell = fs.cell;
+  fs._nextAge  = fs.age;
   fs.cell = nextCell;
   fs.age  = nextAge;
   return fs;

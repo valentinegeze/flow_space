@@ -10,7 +10,7 @@ An interactive browser-based model that combines Richard T.T. Forman's patch-mat
 
 The main simulation view. Draw patches on a 64x64 grid, adjust rainfall and topography, and watch overland flow with sediment particles.
 
-**Cell selection and granular view**: Alt+click to select cells, Alt+drag to select a rectangle, Shift+Alt+click to add to selection (max 16 cells). Double-click to zoom into the tree-to-tree network view. If you've drawn a real parcel in Site Analysis, the network view automatically fetches trees and buildings from OpenStreetMap and displays a fire-spread graph with:
+**Cell selection and granular view**: Activate the Select Tool in the panel, then click to select a cell, shift-click to add to selection (max 16 cells), or click-drag to select a rectangle. Double-click to zoom into the tree-to-tree network view. If you've drawn a real parcel in Site Analysis, the network view automatically fetches trees and buildings from OpenStreetMap and displays a fire-spread graph with:
 - Trees (green circles) sized by crown radius
 - Buildings (tan squares) with border thickness proportional to vulnerability
 - Edges weighted by spread probability (wind, slope, fuel continuity)
@@ -51,7 +51,7 @@ Then open `http://localhost:8000`.
 - **Physics**: Manning's equation for overland flow, infiltration by patch type, steepest-descent routing
 - **Sediment particles**: Colored particles spawn in erodible patches, advect with flow, settle when velocity drops
 - **Topography**: Simple slope or DEM file upload
-- **Granular view**: Alt+click cells to select, double-click to zoom. Auto-fetches OSM trees and buildings for real parcels.
+- **Granular view**: Use Select Tool to pick cells, double-click to zoom. Auto-fetches OSM trees and buildings for real parcels.
 - **Stream table analysis**: In-browser video analysis with Web Worker, perspective correction, real-time channel metrics
 - **Percolation explorer**: Standalone at `percolation.html` — order parameter φ, S-curve, fire/flood simulation
 

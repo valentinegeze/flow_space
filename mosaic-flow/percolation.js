@@ -11,9 +11,10 @@
  */
 
 import { PATCH_TYPES, PATCH_PARAMS } from './patches.js';
-import { stepFire, createFireState, resetFireState, igniteAt, FIRE, hasActiveFire } from './fire.js';
+import { stepFire, createFireState, resetFireState, igniteAt, FIRE, hasActiveFire, buildParamsCache } from './fire.js';
 import { stepFlow, getElevation, flowWeights } from './flow.js';
 import { generateMockNLCDGrid, nlcdToPatchIndex, PATCH_KEYS } from './nlcd-mapper.js';
+import { exportFireToSharedState, sharedState } from './sharedState.js';
 
 // ════════════════════════════════════════════════════════════════════════════
 // Constants
@@ -99,6 +100,17 @@ const state = {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+// Fire Worker + Params Cache
+// ════════════════════════════════════════════════════════════════════════════
+const _fireWorker = new Worker('./fire-worker.js', { type: 'module' });
+let _fireWorkerBusy = false;
+let _cachedParams = null;
+
+function invalidateParamsCache() {
+  _cachedParams = buildParamsCache(state.patchGrid, patchKeys, PATCH_PARAMS, COLS, ROWS);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Grid Initialization
 // ════════════════════════════════════════════════════════════════════════════
 function initGrid() {
@@ -124,6 +136,7 @@ function initGrid() {
   state.fluxes = new Float32Array(COLS * ROWS * 2);
   state.fireState = createFireState(COLS, ROWS);
   _elevMinMax = null; // invalidate elevation cache
+  invalidateParamsCache();
 
   // Reset simulation
   state.timestep = 0;
@@ -399,20 +412,8 @@ function resetSimulation() {
   renderAll();
 }
 
-function stepSimulation() {
-  if (state.mode === 'fire' || state.mode === 'both') {
-    stepFire(state.fireState, state.patchGrid, patchKeys, PATCH_PARAMS,
-             state.elevations, state.windDirection, state.windSpeed,
-             state.depths, COLS, ROWS);
-  }
-  if (state.mode === 'flood' || state.mode === 'both') {
-    const result = stepFlow(
-      { depths: state.depths, patchGrid: state.patchGrid, elevations: state.elevations, cols: COLS, rows: ROWS },
-      10, 1, { patchParams: PATCH_PARAMS, patchKeys }
-    );
-    state.depths = result.depths;
-    state.fluxes = result.fluxes;
-  }
+/** Post-step bookkeeping: snapshot, empirical data, event detection. */
+function finishStep() {
   state.timestep++;
   takeSnapshot();
 
@@ -423,13 +424,89 @@ function stepSimulation() {
     if (state.depths[i] > 0.005) affected++;
   }
   const spreadExtent = affected / (COLS * ROWS);
-  // Only add if phi changed meaningfully
   if (state.empiricalPoints.length === 0 ||
       Math.abs(spreadExtent - state.empiricalPoints[state.empiricalPoints.length-1].spreadExtent) > 0.005) {
     state.empiricalPoints.push({ phi: state.phi, spreadExtent });
   }
 
   detectEvents();
+}
+
+/**
+ * Dispatch a fire step to the Web Worker (fire-only mode).
+ * Returns true if dispatched, false if worker is busy.
+ */
+function dispatchFireWorker() {
+  if (_fireWorkerBusy) return false;
+  _fireWorkerBusy = true;
+  const cellBuf = new Uint8Array(state.fireState.cell);
+  const ageBuf = new Uint8Array(state.fireState.age);
+  _fireWorker.postMessage({
+    cell: cellBuf,
+    age: ageBuf,
+    embers: state.fireState.embers,
+    patchGrid: state.patchGrid,
+    patchKeys,
+    patchParams: PATCH_PARAMS,
+    elevations: state.elevations,
+    windAngleDeg: state.windDirection,
+    windSpeed: state.windSpeed,
+    depths: state.depths,
+    cols: COLS,
+    rows: ROWS,
+  }, [cellBuf.buffer, ageBuf.buffer]);
+  return true;
+}
+
+// Wire up worker result handler
+_fireWorker.onmessage = ({ data }) => {
+  _fireWorkerBusy = false;
+  state.fireState.cell = data.cell;
+  state.fireState.age = data.age;
+  state.fireState.embers = data.embers;
+  state.fireState.burningCells.clear();
+  for (let i = 0; i < data.cell.length; i++) {
+    if (data.cell[i] === FIRE.BURNING) state.fireState.burningCells.add(i);
+  }
+  // Export burn severity if fire just completed
+  if (state.fireState.burningCells.size === 0 && state.timestep > 0 &&
+      sharedState.scenarioPhase !== 'fire-complete') {
+    exportFireToSharedState(state.fireState, COLS, ROWS);
+  }
+  finishStep();
+  // Render after worker result arrives
+  renderMosaicMap();
+  renderTimeline();
+  if (_simTicksSinceFullRender >= 5) {
+    _simTicksSinceFullRender = 0;
+    renderCenterPanel();
+    renderGraph();
+  }
+  _simTicksSinceFullRender++;
+};
+
+function stepSimulation() {
+  // Fire-only mode: dispatch to worker (non-blocking)
+  if (state.mode === 'fire') {
+    dispatchFireWorker();
+    return; // finishStep is called in onmessage handler
+  }
+
+  // Flood or both: run synchronously (flood is cheap, both needs sequential fire+flood)
+  if (state.mode === 'fire' || state.mode === 'both') {
+    stepFire(state.fireState, state.patchGrid, patchKeys, PATCH_PARAMS,
+             state.elevations, state.windDirection, state.windSpeed,
+             state.depths, COLS, ROWS, _cachedParams);
+  }
+  if (state.mode === 'flood' || state.mode === 'both') {
+    const result = stepFlow(
+      { depths: state.depths, patchGrid: state.patchGrid, elevations: state.elevations, cols: COLS, rows: ROWS },
+      10, 1, { patchParams: PATCH_PARAMS, patchKeys }
+    );
+    state.depths = result.depths;
+    state.fluxes = result.fluxes;
+  }
+  finishStep();
 }
 
 function detectEvents() {
@@ -459,6 +536,11 @@ function restoreTimestep(t) {
   state.fireState.cell = new Uint8Array(snap.cellState);
   state.depths = new Float32Array(snap.depths);
   state.timestep = t;
+  // Rebuild burning set from restored cell state
+  state.fireState.burningCells.clear();
+  for (let i = 0; i < state.fireState.cell.length; i++) {
+    if (state.fireState.cell[i] === FIRE.BURNING) state.fireState.burningCells.add(i);
+  }
   const scrubber = document.getElementById('timeline-scrubber');
   if (scrubber) scrubber.value = state.timestep;
 }
@@ -515,6 +597,10 @@ let chartCanvas, chartCtx;
 let rightCanvas, rightCtx;
 let animFrame = null;
 
+// Reusable small canvas for scaled mosaic rendering (avoids per-pixel screen fill)
+const _mosaicSmall = new OffscreenCanvas(COLS, ROWS);
+const _mosaicSmallCtx = _mosaicSmall.getContext('2d');
+
 function getCanvasRefs() {
   leftCanvas = document.getElementById('mosaic-canvas');
   leftCtx = leftCanvas.getContext('2d');
@@ -547,10 +633,18 @@ function renderMosaicMap() {
   const cellW = w / viewCols;
   const cellH = h / viewRows;
 
-  const imgData = ctx.createImageData(w, h);
+  // Scaled rendering: fill a small viewCols × viewRows ImageData (one pixel per cell)
+  // then scale up with drawImage — avoids filling every screen pixel individually.
+  const smallW = viewCols, smallH = viewRows;
+  // Resize the offscreen canvas if the view region changed
+  if (_mosaicSmall.width !== smallW || _mosaicSmall.height !== smallH) {
+    _mosaicSmall.width = smallW;
+    _mosaicSmall.height = smallH;
+  }
+  const imgData = _mosaicSmallCtx.createImageData(smallW, smallH);
   const data = imgData.data;
 
-  // Pre-render cell colors
+  // One pixel per cell
   for (let r = minR; r <= maxR; r++) {
     for (let c = minC; c <= maxC; c++) {
       const idx = r * COLS + c;
@@ -561,16 +655,13 @@ function renderMosaicMap() {
 
       let cr, cg, cb;
       if (!isActive) {
-        // Desaturated for non-active cells
         [cr, cg, cb] = desaturate(baseCol[0], baseCol[1], baseCol[2], 0.2);
       } else if (clusterId === state.giantClusterId) {
-        // Giant cluster: saturated highlight blended with base
         const gc = clusterColor(clusterId, true);
         cr = Math.round(baseCol[0] * 0.35 + gc[0] * 0.65);
         cg = Math.round(baseCol[1] * 0.35 + gc[1] * 0.65);
         cb = Math.round(baseCol[2] * 0.35 + gc[2] * 0.65);
       } else {
-        // Small cluster: muted tint
         const cc = clusterColor(clusterId, false);
         cr = Math.round(baseCol[0] * 0.5 + cc[0] * 0.5);
         cg = Math.round(baseCol[1] * 0.5 + cc[1] * 0.5);
@@ -593,22 +684,16 @@ function renderMosaicMap() {
         cb = Math.round(cb * (1-alpha) + 210 * alpha);
       }
 
-      // Fill pixel region
-      const px0 = Math.floor((c - minC) * cellW);
-      const py0 = Math.floor((r - minR) * cellH);
-      const px1 = Math.floor((c - minC + 1) * cellW);
-      const py1 = Math.floor((r - minR + 1) * cellH);
-
-      for (let py = py0; py < py1 && py < h; py++) {
-        for (let px = px0; px < px1 && px < w; px++) {
-          const off = (py * w + px) * 4;
-          data[off] = cr; data[off+1] = cg; data[off+2] = cb; data[off+3] = 255;
-        }
-      }
+      // Single pixel assignment per cell
+      const off = ((r - minR) * smallW + (c - minC)) * 4;
+      data[off] = cr; data[off+1] = cg; data[off+2] = cb; data[off+3] = 255;
     }
   }
 
-  ctx.putImageData(imgData, 0, 0);
+  // Put the small image and scale up with nearest-neighbor interpolation
+  _mosaicSmallCtx.putImageData(imgData, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(_mosaicSmall, 0, 0, w, h);
 
   // ── Soil type overlay (hatch pattern) ──
   if (state.showSoil) {
@@ -1162,6 +1247,7 @@ function renderTimeline() {
 // Render All
 // ════════════════════════════════════════════════════════════════════════════
 function renderAll() {
+  _simTicksSinceFullRender = 0;
   renderMosaicMap();
   renderCenterPanel();
   renderGraph();
@@ -1172,11 +1258,15 @@ function renderAll() {
 // Animation Loop
 // ════════════════════════════════════════════════════════════════════════════
 let lastStepTime = 0;
-const STEP_INTERVAL = 150; // ms between sim steps
+let lastRenderTime = 0;
+let _simTicksSinceFullRender = 0;
+const STEP_INTERVAL = 80; // ms between sim steps (reduced from 150ms — worker is non-blocking)
+const RENDER_INTERVAL = 33; // ~30fps cap
 
 function animationLoop(timestamp) {
   animFrame = requestAnimationFrame(animationLoop);
 
+  let stepped = false;
   if (state.playing && timestamp - lastStepTime >= STEP_INTERVAL) {
     lastStepTime = timestamp;
 
@@ -1186,15 +1276,39 @@ function animationLoop(timestamp) {
       if ((state.mode === 'fire' || state.mode === 'both') && !hasActiveFire(state.fireState) && state.timestep > 0) {
         state.playing = false;
         document.getElementById('play-btn').textContent = '▶';
+        // Export burn severity to shared state on fire completion
+        if (sharedState.scenarioPhase !== 'fire-complete') {
+          exportFireToSharedState(state.fireState, COLS, ROWS);
+        }
       } else {
         stepSimulation();
+        // For fire-only mode, the worker handles render via onmessage.
+        // For flood/both, step is synchronous so we render here.
+        stepped = (state.mode !== 'fire');
       }
     } else {
       // Scrubbing through existing snapshots
       state.timestep++;
       restoreTimestep(state.timestep);
+      stepped = true;
     }
-    renderAll();
+  }
+
+  // Throttle rendering to ~30fps (skip for fire-only — worker's onmessage renders)
+  const shouldRender = stepped || (timestamp - lastRenderTime >= RENDER_INTERVAL);
+  if (shouldRender && (stepped || (state.playing && state.mode !== 'fire'))) {
+    lastRenderTime = timestamp;
+    _simTicksSinceFullRender++;
+
+    // During playback: only redraw mosaic + timeline per tick.
+    // Full renderAll (center panel + graph) every 5 ticks — φ doesn't change during fire.
+    renderMosaicMap();
+    renderTimeline();
+    if (_simTicksSinceFullRender >= 5 || !state.playing) {
+      _simTicksSinceFullRender = 0;
+      renderCenterPanel();
+      renderGraph();
+    }
   }
 }
 

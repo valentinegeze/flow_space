@@ -8,10 +8,12 @@ import { createUI } from './ui.js';
 import { computeConnectivity } from './connectivity.js';
 import { spawnParticles, advectParticles } from './particles.js';
 import { createLBMState, stepLBM } from './lbm.js';
-import { createFireState, resetFireState, igniteAt, stepFire, FIRE } from './fire.js';
+import { createFireState, resetFireState, igniteAt, FIRE, buildParamsCache } from './fire.js';
 import { simState } from './state.js';
 import { fetchSiteFeatures, rebuildGraph, PHI_STAR as SITE_PHI_STAR } from './site-features.js';
 import { createPhiPanel, setPhiGrid, getClusterOverlay } from './phi-panel.js';
+import { createZoomPanel } from './zoom-panel.js';
+import { exportFireToSharedState, sharedState } from './sharedState.js';
 
 const COLS = 64;
 const ROWS = 64;
@@ -32,6 +34,12 @@ let fireState = null;
 let waterSources = []; // Array<{i, j}> — persistent point sources
 let floodRect = null;  // {r0,c0,r1,c1} during shift-drag preview; null otherwise
 let fireTickAccum = 0; // accumulator for fire's independent tick rate
+let _cachedParams = null; // pre-built params cache for stepFire (invalidated on grid change)
+let _fireTimeline = [];   // snapshots of burning cells per tick for soil study timeline
+
+// ── Fire Web Worker ──────────────────────────────────────────────────────────
+const _fireWorker = new Worker('./fire-worker.js', { type: 'module' });
+let _fireWorkerBusy = false; // true while a step is in flight
 // chartHistory: ring buffer of { runoffRatio, meanStorage, etFraction, concentration }
 let chartHistory = [];
 let cellPx = 8;
@@ -42,6 +50,10 @@ let canvasH = 0;
 let networkZoom = null; // null = mosaic view; { centerR, centerC } = network view
 const NETWORK_RADIUS = 6; // 12×12 neighborhood (radius 6 from center)
 let networkMinEdgeWeight = 0.05;
+
+// ── Zoom panel handle ────────────────────────────────────────────────────────
+let _zoomPanel = null;            // returned by createZoomPanel()
+let _fireTickCount = 0;           // global fire tick counter for zoom arrival detection
 
 // ── Cell selection + site features state ─────────────────────────────────────
 let selectedCells = [];           // [{r, c}]
@@ -120,7 +132,12 @@ function initGrid() {
     }
   }
 
+  invalidateParamsCache();
   updateElevations();
+}
+
+function invalidateParamsCache() {
+  _cachedParams = buildParamsCache(patchGrid, patchKeys, PATCH_PARAMS, COLS, ROWS);
 }
 
 function resizeCanvas(p) {
@@ -226,8 +243,20 @@ const sketch = (p) => {
         a.click();
         URL.revokeObjectURL(a.href);
       } else if (msg === 'clear-fire') {
+        // Export burn severity before clearing, if fire had progressed
+        if (fireState && _fireTickCount > 0 && sharedState.scenarioPhase !== 'fire-complete') {
+          exportFireToSharedState(fireState, COLS, ROWS, {
+            patchGrid,
+            elevations,
+            geoBounds: simState.parcelBounds || null,
+            timeline: _fireTimeline,
+          });
+        }
         if (fireState) resetFireState(fireState);
         fireTickAccum = 0;
+        _fireTickCount = 0;
+        _fireTimeline = [];
+        if (_zoomPanel) _zoomPanel.resetMicroSim();
       } else if (msg === 'clear-sources') {
         waterSources = [];
       } else if (msg === 'sim-fire') {
@@ -243,6 +272,8 @@ const sketch = (p) => {
         lbmState = null;
         if (fireState) resetFireState(fireState);
         fireTickAccum = 0;
+        _fireTimeline = [];
+        sharedState.scenarioPhase = 'pre-fire';
         updateElevations();
       } else if (msg === 'sim-water') {
         if (fireState) resetFireState(fireState);
@@ -272,8 +303,9 @@ const sketch = (p) => {
       } else {
         updateElevations();
       }
-      // Refresh phi panel whenever landscape or elevation changes
+      // Refresh phi panel and params cache whenever landscape or elevation changes
       setPhiGrid(patchGrid, COLS, ROWS);
+      invalidateParamsCache();
     });
 
     simState.controls = controls;
@@ -285,29 +317,80 @@ const sketch = (p) => {
     createPhiPanel(document.getElementById('mosaic-container'));
     setPhiGrid(patchGrid, COLS, ROWS);
 
+    // Zoom panel (side-by-side fire micro-sim)
+    _zoomPanel = createZoomPanel(document.getElementById('mosaic-container'), {
+      getSelectedBounds,
+      getFireState: () => fireState,
+      getSelectedCells: () => selectedCells,
+      getControls: () => simState.controls,
+      clearSelection,
+    });
+
+    // ── Fire Worker receive handler ──────────────────────────────────────────
+    _fireWorker.onmessage = ({ data }) => {
+      _fireWorkerBusy = false;
+      // Receive transferred buffers back from worker
+      fireState.cell = data.cell;
+      fireState.age = data.age;
+      fireState.embers = data.embers;
+      // Rebuild burningCells set from the returned data
+      fireState.burningCells.clear();
+      for (let i = 0; i < data.cell.length; i++) {
+        if (data.cell[i] === FIRE.BURNING) fireState.burningCells.add(i);
+      }
+      _fireTickCount++;
+      // Record timeline snapshot for soil study
+      if (fireState.burningCells.size > 0) {
+        _fireTimeline.push({ tick: _fireTickCount, cell: new Uint8Array(fireState.cell) });
+      }
+      // Check if fire reached selected cells for zoom panel
+      if (_zoomPanel && selectedCells.length > 0) {
+        _zoomPanel.checkFireArrival(fireState, selectedCells, COLS, ROWS, _fireTickCount);
+      }
+      // Detect fire completion: no burning cells remain after at least one tick
+      if (fireState.burningCells.size === 0 && _fireTickCount > 0 &&
+          sharedState.scenarioPhase !== 'fire-complete') {
+        exportFireToSharedState(fireState, COLS, ROWS, {
+          patchGrid,
+          elevations,
+          geoBounds: simState.parcelBounds || null,
+          timeline: _fireTimeline,
+        });
+      }
+      sedimentCount = 0;
+      updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
+    };
+
     const runLoop = () => {
       if (!controls.running) return;
 
-      // Fire mode: only wildfire spread — no rainfall, flow, or sediment
+      // Fire mode: dispatch to Web Worker — non-blocking
       if (controls.simMode === 'fire') {
-        const mult = Math.max(1, controls.speedMultiplier ?? 1);
-        if (fireState) {
-          for (let s = 0; s < mult; s++) {
-            fireTickAccum += 1;
-            if (fireTickAccum >= 1.5) {
-              fireTickAccum -= 1.5;
-              stepFire(
-                fireState, patchGrid, patchKeys, PATCH_PARAMS,
-                elevations,
-                controls.windAngle ?? 225,
-                controls.windSpeed ?? 2.5,
-                depths, COLS, ROWS
-              );
-            }
+        if (fireState && !_fireWorkerBusy) {
+          fireTickAccum += Math.max(1, controls.speedMultiplier ?? 1);
+          if (fireTickAccum >= 1.5) {
+            fireTickAccum -= 1.5;
+            _fireWorkerBusy = true;
+            // Transfer cell and age buffers to worker (zero-copy).
+            // We must clone them first since the originals become detached.
+            const cellBuf = new Uint8Array(fireState.cell);
+            const ageBuf = new Uint8Array(fireState.age);
+            _fireWorker.postMessage({
+              cell: cellBuf,
+              age: ageBuf,
+              embers: fireState.embers,
+              patchGrid,
+              patchKeys,
+              patchParams: PATCH_PARAMS,
+              elevations,
+              windAngleDeg: controls.windAngle ?? 225,
+              windSpeed: controls.windSpeed ?? 2.5,
+              depths,
+              cols: COLS,
+              rows: ROWS,
+            }, [cellBuf.buffer, ageBuf.buffer]);
           }
         }
-        sedimentCount = 0;
-        updateMetrics({ chartHistory, interventionMarkers, connectivity, sedimentCount });
         return;
       }
 
@@ -704,6 +787,7 @@ const sketch = (p) => {
       paint: 'Left: paint \u00B7 Right: upstream \u00B7 Shift+drag: flood area',
       ignite: 'Click/drag to ignite \u00B7 Run to spread \u00B7 Paint: edit land cover',
       'water-source': 'Click to toggle water source \u00B7 Right: upstream',
+      select: 'Click: select cell \u00B7 Shift+click: add \u00B7 Drag: rectangle \u00B7 Dbl-click: network zoom',
     };
     const hint = toolHints[simState.controls?.activeTool ?? 'paint'] ?? '';
     p.text(hint, 8, canvasH - 8);
@@ -923,17 +1007,22 @@ const sketch = (p) => {
     const i = Math.floor(p.mouseY / cellPx);
     if (i < 0 || i >= ROWS || j < 0 || j >= COLS) return;
 
-    // Alt+click: cell selection
-    if (p.keyIsDown(p.ALT)) {
+    const activeTool = simState.controls?.activeTool ?? 'paint';
+
+    // Select tool: click selects cell, shift-click adds, drag selects rectangle
+    if (activeTool === 'select') {
       toggleCellSelection(i, j, p.keyIsDown(p.SHIFT));
+      _selDragStart = { r: i, c: j };
       return;
     }
-    // Alt+drag: rectangle selection
-    // (handled in mouseDragged via _selDragStart)
 
-    const activeTool = simState.controls?.activeTool ?? 'paint';
     if (activeTool === 'ignite') {
-      if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
+      if (fireState) {
+        igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
+        if (sharedState.scenarioPhase === 'pre-fire' || sharedState.scenarioPhase === 'fire-complete') {
+          sharedState.scenarioPhase = 'fire-running';
+        }
+      }
     } else if (activeTool === 'water-source') {
       const existing = waterSources.findIndex(s => s.i === i && s.j === j);
       if (existing >= 0) { waterSources.splice(existing, 1); }
@@ -959,15 +1048,13 @@ const sketch = (p) => {
     const j = Math.floor(p.mouseX / cellPx);
     const i = Math.floor(p.mouseY / cellPx);
 
-    // Alt+drag: rectangle cell selection
-    if (p.keyIsDown(p.ALT)) {
-      if (!_selDragStart) {
-        _selDragStart = { r: i, c: j };
-      }
+    const activeTool = simState.controls?.activeTool ?? 'paint';
+
+    // Select tool drag: rectangle selection
+    if (activeTool === 'select') {
+      // _selDragStart set in mousePressed
       return;
     }
-
-    const activeTool = simState.controls?.activeTool ?? 'paint';
     if (activeTool === 'ignite') {
       if (fireState) igniteAt(fireState, i, j, COLS, ROWS, patchGrid, patchKeys, PATCH_PARAMS);
     } else if (floodRect) {
@@ -979,11 +1066,13 @@ const sketch = (p) => {
   };
 
   p.mouseReleased = () => {
-    // Complete rectangle cell selection
+    // Complete rectangle cell selection (only if dragged to a different cell)
     if (_selDragStart) {
       const j = Math.floor(p.mouseX / cellPx);
       const i = Math.floor(p.mouseY / cellPx);
-      selectCellRect(_selDragStart.r, _selDragStart.c, i, j);
+      if (i !== _selDragStart.r || j !== _selDragStart.c) {
+        selectCellRect(_selDragStart.r, _selDragStart.c, i, j);
+      }
       _selDragStart = null;
       return;
     }
@@ -1026,8 +1115,9 @@ function paintAt(x, y) {
         }
       }
 
-      // Refresh phi panel when landscape changes
+      // Refresh phi panel and params cache when landscape changes
       setPhiGrid(patchGrid, COLS, ROWS);
+      invalidateParamsCache();
 
       // Record intervention marker when simulation is running.
       // Debounce: only one marker per 3-frame window per patch type.
@@ -1129,6 +1219,10 @@ function clearSelection() {
   _siteFeatureNodes = null;
   _siteFetching = false;
   _siteFetchError = false;
+  if (_zoomPanel) {
+    _zoomPanel.hidePanel();
+    _zoomPanel.resetMicroSim();
+  }
 }
 
 function getSelectedBounds() {
@@ -1150,12 +1244,137 @@ function getSelectedBounds() {
 }
 
 function onSelectionChanged() {
+  // Show/hide zoom panel based on selection
+  if (_zoomPanel) {
+    if (selectedCells.length > 0) {
+      _zoomPanel.showPanel();
+    } else {
+      _zoomPanel.hidePanel();
+      _zoomPanel.resetMicroSim();
+    }
+  }
+
   const bounds = getSelectedBounds();
-  if (!bounds) { _siteFeatureResult = null; return; }
+  if (!bounds) {
+    // No parcel bounds — build synthetic grid-based graph for the zoom panel
+    if (_zoomPanel && selectedCells.length > 0) {
+      const synth = buildSyntheticZoomGraph();
+      _zoomPanel.setFeatureData(synth, false);
+    } else {
+      _siteFeatureResult = null;
+      if (_zoomPanel) _zoomPanel.setFeatureData(null, false);
+    }
+    return;
+  }
   const key = `${bounds.south.toFixed(6)},${bounds.west.toFixed(6)},${bounds.north.toFixed(6)},${bounds.east.toFixed(6)}`;
-  if (key === _lastFetchKey && _siteFeatureResult) return; // already fetched
+  if (key === _lastFetchKey && _siteFeatureResult) {
+    // Already fetched — just update zoom panel with existing data
+    if (_zoomPanel) _zoomPanel.setFeatureData(_siteFeatureResult, _hasSiteFeatures());
+    return;
+  }
   _lastFetchKey = key;
   triggerFetch(bounds);
+}
+
+function _hasSiteFeatures() {
+  return _siteFeatureResult && _siteFeatureResult.status !== 'synthetic-only';
+}
+
+/** Build a grid-based graph for the zoom panel when no parcel bounds are available. */
+function buildSyntheticZoomGraph() {
+  if (selectedCells.length === 0) return null;
+
+  // Determine bounding box of selected cells in grid coords
+  let rMin = ROWS, rMax = 0, cMin = COLS, cMax = 0;
+  for (const { r, c } of selectedCells) {
+    if (r < rMin) rMin = r; if (r > rMax) rMax = r;
+    if (c < cMin) cMin = c; if (c > cMax) cMax = c;
+  }
+  // Expand by NETWORK_RADIUS for context
+  rMin = Math.max(0, rMin - NETWORK_RADIUS);
+  rMax = Math.min(ROWS - 1, rMax + NETWORK_RADIUS);
+  cMin = Math.max(0, cMin - NETWORK_RADIUS);
+  cMax = Math.min(COLS - 1, cMax + NETWORK_RADIUS);
+
+  const nodes = [];
+  const nodeIdx = new Map();
+
+  for (let r = rMin; r <= rMax; r++) {
+    for (let c = cMin; c <= cMax; c++) {
+      const idx = r * COLS + c;
+      const key = patchKeys[patchGrid[idx]];
+      const params = PATCH_PARAMS[key];
+      const fuel = params.fuelLoad ?? 0;
+      if (fuel <= 0) continue;
+
+      // Use grid coords as pseudo-lat/lon for layout
+      nodeIdx.set(`${r},${c}`, nodes.length);
+      nodes.push({
+        type: 'tree',
+        lat: r,
+        lon: c,
+        id: idx,
+        crownRadius: 2 + fuel * 4,
+        vulnerability: 0,
+        fuelLoad: fuel,
+      });
+    }
+  }
+
+  // 8-neighbor edges
+  const DIRS8 = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+  const edges = [];
+  const wAngle = simState.controls?.windAngle ?? 225;
+  const wSpeed = simState.controls?.windSpeed ?? 2.5;
+  const wRad = (wAngle * Math.PI) / 180;
+  const wx = Math.sin(wRad), wy = -Math.cos(wRad);
+
+  for (let ni = 0; ni < nodes.length; ni++) {
+    const a = nodes[ni];
+    for (const [dr, dc] of DIRS8) {
+      const nj = nodeIdx.get(`${a.lat + dr},${a.lon + dc}`);
+      if (nj === undefined || nj <= ni) continue;
+      const b = nodes[nj];
+      const bFuel = b.fuelLoad || 0.2;
+      let weight = Math.min(1, bFuel * 1.5);
+
+      // Wind factor
+      const dist = Math.sqrt(dr * dr + dc * dc);
+      const dot = (dc / dist) * wx + (dr / dist) * wy;
+      weight *= Math.max(0.1, 1 + dot * wSpeed * 0.3);
+      weight = Math.max(0, Math.min(1, weight));
+
+      edges.push({ i: ni, j: nj, weight, distanceM: dist * 10 });
+    }
+  }
+
+  // Compute phiLocal
+  let giantSize = 0;
+  if (nodes.length > 0) {
+    // Simple union-find
+    const parent = new Int32Array(nodes.length);
+    const sz = new Int32Array(nodes.length);
+    for (let i = 0; i < nodes.length; i++) { parent[i] = i; sz[i] = 1; }
+    const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    const union = (a, b) => {
+      a = find(a); b = find(b); if (a === b) return;
+      if (sz[a] < sz[b]) { const t = a; a = b; b = t; }
+      parent[b] = a; sz[a] += sz[b];
+    };
+    for (const e of edges) union(e.i, e.j);
+    for (let i = 0; i < nodes.length; i++) {
+      const s = sz[find(i)];
+      if (s > giantSize) giantSize = s;
+    }
+  }
+
+  return {
+    nodes,
+    edges,
+    phiLocal: nodes.length > 0 ? giantSize / nodes.length : 0,
+    giantSize,
+    status: 'synthetic-only',
+  };
 }
 
 async function triggerFetch(bounds) {
@@ -1176,9 +1395,12 @@ async function triggerFetch(bounds) {
     });
     _siteFeatureResult = result;
     _siteFeatureNodes = result.nodes;
+    // Feed data to zoom panel
+    if (_zoomPanel) _zoomPanel.setFeatureData(result, _hasSiteFeatures());
   } catch {
     _siteFetchError = true;
     _siteFeatureResult = null;
+    if (_zoomPanel) _zoomPanel.setFeatureData(null, false);
   } finally {
     clearTimeout(timeout);
     _siteFetching = false;
@@ -1198,28 +1420,73 @@ function maybeRebuildEdges() {
     windAngle: wAngle, windSpeed: wSpeed, elevations, bounds, cols: COLS, rows: ROWS,
   });
   _siteFeatureResult = { ..._siteFeatureResult, edges, phiLocal, giantSize };
+  // Update zoom panel with reweighted edges
+  if (_zoomPanel) _zoomPanel.updateZoomPanel(_siteFeatureResult, _hasSiteFeatures());
 }
 
 // ── Selection overlay on mosaic ──────────────────────────────────────────────
 
 function drawSelectionOverlay(p) {
   if (selectedCells.length === 0) return;
-  p.noFill();
-  p.stroke(240, 100, 60);
-  p.strokeWeight(2);
+
+  // Build a fast lookup set for the selected cells
+  const selSet = new Set();
+  let rMin = ROWS, rMax = 0, cMin = COLS, cMax = 0;
+  for (const { r, c } of selectedCells) {
+    selSet.add(r * COLS + c);
+    if (r < rMin) rMin = r; if (r > rMax) rMax = r;
+    if (c < cMin) cMin = c; if (c > cMax) cMax = c;
+  }
+
+  // ── 1. Coral fill at 20% opacity over each selected cell ──────────────
+  p.noStroke();
+  p.fill(240, 100, 60, 51); // 20% of 255 ≈ 51
   for (const { r, c } of selectedCells) {
     p.rect(c * cellPx, r * cellPx, cellPx, cellPx);
   }
+
+  // ── 2. Trace outer boundary of the combined selection region ──────────
+  // Walk every selected cell; for each of the 4 edges, if the neighbor
+  // across that edge is NOT selected, that edge is on the perimeter.
+  const segments = []; // [{x1,y1,x2,y2}]
+  for (const { r, c } of selectedCells) {
+    const x = c * cellPx, y = r * cellPx;
+    // top edge
+    if (r === 0 || !selSet.has((r - 1) * COLS + c))
+      segments.push({ x1: x, y1: y, x2: x + cellPx, y2: y });
+    // bottom edge
+    if (r === ROWS - 1 || !selSet.has((r + 1) * COLS + c))
+      segments.push({ x1: x, y1: y + cellPx, x2: x + cellPx, y2: y + cellPx });
+    // left edge
+    if (c === 0 || !selSet.has(r * COLS + (c - 1)))
+      segments.push({ x1: x, y1: y, x2: x, y2: y + cellPx });
+    // right edge
+    if (c === COLS - 1 || !selSet.has(r * COLS + (c + 1)))
+      segments.push({ x1: x + cellPx, y1: y, x2: x + cellPx, y2: y + cellPx });
+  }
+
+  // ── 3. Pulsing border: outer glow toggles at ~1Hz ────────────────────
+  const pulse = 0.3 + 0.3 * Math.sin(performance.now() / 500 * Math.PI);
+
+  // Outer glow pass (slightly offset outward, reduced opacity)
+  p.stroke(240, 100, 60, Math.floor(pulse * 255));
+  p.strokeWeight(4);
+  for (const s of segments) p.line(s.x1, s.y1, s.x2, s.y2);
+
+  // Solid coral border
+  p.stroke(240, 100, 60);
+  p.strokeWeight(2);
+  for (const s of segments) p.line(s.x1, s.y1, s.x2, s.y2);
   p.noStroke();
 
-  // Label
-  p.fill(40, 40, 55, 200);
+  // ── 4. "viewing detail" label centered over the selection group ───────
+  const cx = ((cMin + cMax + 1) / 2) * cellPx;
+  const cy = ((rMin + rMax + 1) / 2) * cellPx;
+  p.fill(200, 190, 180, 160);
   p.noStroke();
-  p.rect(canvasW - 220, canvasH - 28, 210, 22, 4);
-  p.fill(200, 200, 220);
   p.textSize(10);
-  p.textAlign(p.RIGHT, p.CENTER);
-  p.text(`${selectedCells.length} cell${selectedCells.length > 1 ? 's' : ''} selected \u2014 double-click to zoom`, canvasW - 16, canvasH - 17);
+  p.textAlign(p.CENTER, p.CENTER);
+  p.text('viewing detail', cx, cy);
 }
 
 // ── Network zoom view (site-features-aware) ──────────────────────────────────

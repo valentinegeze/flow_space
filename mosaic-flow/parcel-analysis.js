@@ -15,6 +15,8 @@ import {
   generateMockNLCDGrid,
 } from './nlcd-mapper.js';
 import { simState } from './state.js';
+import { sharedState, emit } from './sharedState.js';
+import { fetchSSURGOSimple } from './ssurgo-fetch.js';
 
 const COLS = 64;
 const ROWS = 64;
@@ -388,9 +390,19 @@ function _onShapeEdited() {
 function _syncParcelBounds() {
   if (_bounds) {
     const sw = _bounds.getSouthWest(), ne = _bounds.getNorthEast();
-    simState.parcelBounds = { west: sw.lng, south: sw.lat, east: ne.lng, north: ne.lat };
+    const b = { west: sw.lng, south: sw.lat, east: ne.lng, north: ne.lat };
+    simState.parcelBounds = b;
+
+    // Fetch real SSURGO soil data for this parcel
+    fetchSSURGOSimple(b).then(data => {
+      if (data) {
+        sharedState.ssurgoData = data;
+        emit();
+      }
+    });
   } else {
     simState.parcelBounds = null;
+    sharedState.ssurgoData = null;
   }
 }
 
