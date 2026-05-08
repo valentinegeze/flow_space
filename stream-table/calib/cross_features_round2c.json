@@ -1,0 +1,11 @@
+{
+  "exported_at": "2026-04-17T21:24:19.115Z",
+  "timestamp_moment": "clack+60s",
+  "n_features": 4,
+  "features": [
+    {"name": "feature_3", "clicks_per_phone": {"anna": [146.70, 306.40], "valentine": [402.47, 679.89], "sophia": [454.58, 407.86], "kinect": [414.05, 726.12]}},
+    {"name": "feature_4", "clicks_per_phone": {"anna": [403.43, 788.67], "valentine": [741.23, 979.04], "sophia": [738.34, 679.77]}},
+    {"name": "feature_5", "clicks_per_phone": {"anna": [79.14, 1133.14], "valentine": [411.15, 1408.73], "sophia": [269.28, 993.29], "kinect": [356.14, 1506.63]}},
+    {"name": "feature_6", "clicks_per_phone": {"anna": [65.63, 150.48], "valentine": [289.54, 595.58], "sophia": [353.24, 335.72], "kinect": [286.65, 595.58]}}
+  ]
+}

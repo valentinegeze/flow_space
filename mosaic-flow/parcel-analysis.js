@@ -53,7 +53,6 @@ export function initParcelAnalysis(containerId, { onGridReady, onRunSim }) {
   // The Leaflet map is initialized lazily in onTabActivated() because Leaflet
   // requires the container to be visible (non-zero size) at init time.
   el.innerHTML = _buildHTML();
-  _injectStyles();
 
   // Offscreen canvas for sim overlay (doesn't need to be visible)
   _simCanvas = document.createElement('canvas');
@@ -72,7 +71,12 @@ export function initParcelAnalysis(containerId, { onGridReady, onRunSim }) {
  */
 export function onTabActivated() {
   if (!_mapReady) {
-    _initMap();
+    // Delay init slightly so the container has real dimensions after display change
+    setTimeout(() => {
+      _initMap();
+      // Invalidate once more after tiles load
+      setTimeout(() => _map && _map.invalidateSize(), 200);
+    }, 50);
   } else {
     setTimeout(() => _map && _map.invalidateSize(), 50);
   }
@@ -97,10 +101,10 @@ function _initMap() {
       polygon: {
         allowIntersection: false,
         showArea: true,
-        shapeOptions: { color: '#b8e04a', weight: 2, fillOpacity: 0.06 },
+        shapeOptions: { color: '#c05030', weight: 2, fillOpacity: 0.06 },
       },
       rectangle: {
-        shapeOptions: { color: '#b8e04a', weight: 2, fillOpacity: 0.06 },
+        shapeOptions: { color: '#c05030', weight: 2, fillOpacity: 0.06 },
       },
       polyline: false, circle: false, circlemarker: false, marker: false,
     },
@@ -123,174 +127,81 @@ export function stopSimOverlay() {
 function _buildHTML() {
   return `
 <div id="pa-layout">
-  <aside id="pa-sidebar">
-    <div id="pa-header"><span class="pa-logo">◈</span> Site Analysis</div>
-
-    <div class="pa-step" id="pa-step-0">
-      <div class="pa-step-hd"><span class="pa-num">1</span><span class="pa-title">Search Location</span></div>
-      <div class="pa-step-body">
-        <div id="pa-search-row">
-          <input id="pa-search-input" type="text" placeholder="Address or place name…" autocomplete="off"/>
-          <button id="pa-search-btn">Go</button>
-        </div>
-        <div id="pa-search-results"></div>
-      </div>
-    </div>
-
-    <div class="pa-step pa-locked" id="pa-step-1">
-      <div class="pa-step-hd"><span class="pa-num">2</span><span class="pa-title">Draw Parcel</span></div>
-      <div class="pa-step-body">
-        <p class="pa-hint">Use the polygon or rectangle tool on the map toolbar. Double-click a polygon to close it.</p>
-        <button id="pa-clear-btn" class="pa-secondary" style="display:none">Clear Shape</button>
-      </div>
-    </div>
-
-    <div class="pa-step pa-locked" id="pa-step-2">
-      <div class="pa-step-hd"><span class="pa-num">3</span><span class="pa-title">Confirm Parcel</span></div>
-      <div class="pa-step-body">
-        <div id="pa-parcel-info"></div>
-        <div class="pa-row">
-          <button id="pa-load-btn">Load Land Cover</button>
-          <button id="pa-redraw-btn" class="pa-secondary">Redraw</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="pa-step pa-locked" id="pa-step-3">
-      <div class="pa-step-hd"><span class="pa-num">4</span><span class="pa-title">Land Cover</span></div>
-      <div class="pa-step-body">
-        <div id="pa-lc-status"></div>
-        <div id="pa-lc-comp"></div>
-        <label class="pa-check-row">
-          <input type="checkbox" id="pa-show-lc" checked> Show land cover overlay
-        </label>
-      </div>
-    </div>
-
-    <div class="pa-step pa-locked" id="pa-step-4">
-      <div class="pa-step-hd"><span class="pa-num">5</span><span class="pa-title">Simulate</span></div>
-      <div class="pa-step-body">
-        <p class="pa-hint">The simulation runs in the Mosaic Design view with your parcel's land cover loaded.</p>
-        <div class="pa-row">
-          <button id="pa-run-btn">Run Simulation →</button>
-          <button id="pa-export-btn" class="pa-secondary">Export</button>
-        </div>
-        <label class="pa-check-row" id="pa-overlay-row" style="display:none">
-          <input type="checkbox" id="pa-show-sim-overlay" checked> Live simulation overlay
-        </label>
-      </div>
-    </div>
-  </aside>
-
   <div id="pa-map-wrap">
     <div id="pa-map"></div>
+
+    <!-- Floating search bar (optional, top-left) -->
+    <div id="pa-search-float">
+      <div id="pa-search-row">
+        <input id="pa-search-input" type="text" placeholder="Search location (optional)…" autocomplete="off"/>
+        <button id="pa-search-btn">Go</button>
+      </div>
+      <div id="pa-search-results"></div>
+    </div>
+
+    <!-- Draw hint -->
+    <div id="pa-draw-hint">Use the polygon or rectangle tool to delineate your site</div>
+
+    <!-- Floating info panel (appears after polygon drawn) -->
+    <div id="pa-info-float">
+      <div class="pa-panel-title">Site Details</div>
+      <div id="pa-parcel-info"></div>
+
+      <div id="pa-lc-status"></div>
+      <div id="pa-lc-comp"></div>
+
+      <div class="pa-row" id="pa-confirm-row">
+        <button id="pa-load-btn">Load Land Cover</button>
+        <button id="pa-redraw-btn" class="pa-secondary">Redraw</button>
+      </div>
+
+      <label class="pa-check-row" id="pa-lc-check-row" style="display:none">
+        <input type="checkbox" id="pa-show-lc" checked> Show land cover overlay
+      </label>
+
+      <div class="pa-row" id="pa-sim-row" style="display:none">
+        <button id="pa-run-btn">Proceed to Fire Model</button>
+        <button id="pa-export-btn" class="pa-secondary">Export</button>
+      </div>
+
+      <label class="pa-check-row" id="pa-overlay-row" style="display:none">
+        <input type="checkbox" id="pa-show-sim-overlay" checked> Live simulation overlay
+      </label>
+
+      <button id="pa-clear-btn" class="pa-secondary" style="display:none;margin-top:8px;width:100%">Clear Shape</button>
+    </div>
   </div>
 </div>`;
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
-
-function _injectStyles() {
-  if (document.getElementById('pa-styles')) return;
-  const s = document.createElement('style');
-  s.id = 'pa-styles';
-  s.textContent = `
-    #pa-layout {
-      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-      display: flex;
-      background: #0f0f12; color: #e0e0e0;
-      font-family: system-ui, -apple-system, sans-serif; font-size: 13px;
-    }
-    #pa-sidebar {
-      width: 270px; min-width: 270px; height: 100%; overflow-y: auto;
-      background: rgba(18,18,26,0.99);
-      border-right: 1px solid rgba(255,255,255,0.08);
-      display: flex; flex-direction: column;
-    }
-    #pa-header {
-      padding: 13px 16px 11px; font-size: 14px; font-weight: 600;
-      color: #b8e04a; border-bottom: 1px solid rgba(255,255,255,0.07);
-      display: flex; align-items: center; gap: 7px; letter-spacing: 0.01em;
-    }
-    .pa-logo { font-size: 17px; }
-    .pa-step { border-bottom: 1px solid rgba(255,255,255,0.06); transition: opacity 0.2s; }
-    .pa-locked { opacity: 0.35; pointer-events: none; }
-    .pa-step-hd {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 16px 7px; cursor: default;
-    }
-    .pa-num {
-      width: 21px; height: 21px; border-radius: 50%;
-      background: rgba(184,224,74,0.12); border: 1px solid #b8e04a;
-      color: #b8e04a; font-size: 10px; font-weight: 700;
-      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .pa-title { font-weight: 600; font-size: 12.5px; color: #e0e0e0; }
-    .pa-step-body { padding: 0 16px 12px; }
-    .pa-hint { color: #888; font-size: 11.5px; margin-bottom: 8px; line-height: 1.55; }
-    #pa-search-row { display: flex; gap: 6px; }
-    #pa-search-input {
-      flex: 1; background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.14); border-radius: 5px;
-      padding: 6px 8px; color: #e0e0e0; font-size: 12px; outline: none;
-    }
-    #pa-search-input:focus { border-color: #b8e04a; }
-    #pa-search-results { margin-top: 5px; max-height: 150px; overflow-y: auto; }
-    .pa-result {
-      padding: 5px 8px; border-radius: 4px; cursor: pointer;
-      font-size: 11.5px; color: #ccc; line-height: 1.4;
-    }
-    .pa-result:hover { background: rgba(255,255,255,0.08); color: #fff; }
-    #pa-parcel-info { font-size: 11.5px; color: #aaa; margin-bottom: 8px; line-height: 1.5; }
-    #pa-lc-status { font-size: 11.5px; color: #aaa; margin-bottom: 6px; min-height: 18px; }
-    .pa-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
-    .pa-comp-item { display: flex; align-items: center; gap: 5px; padding: 2px 0; font-size: 11px; }
-    .pa-swatch { width: 11px; height: 11px; border-radius: 2px; flex-shrink: 0; }
-    .pa-comp-name { flex: 1; color: #bbb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .pa-bar-wrap { width: 52px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; flex-shrink: 0; }
-    .pa-bar { height: 100%; border-radius: 2px; }
-    .pa-pct { width: 28px; text-align: right; color: #777; flex-shrink: 0; }
-    .pa-check-row {
-      display: flex; align-items: center; gap: 7px;
-      font-size: 11.5px; color: #aaa; cursor: pointer; margin-top: 7px;
-    }
-    button {
-      background: rgba(184,224,74,0.1); border: 1px solid rgba(184,224,74,0.38);
-      color: #b8e04a; border-radius: 5px; padding: 5px 11px;
-      font-size: 12px; cursor: pointer; transition: background 0.15s; white-space: nowrap;
-    }
-    button:hover { background: rgba(184,224,74,0.2); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    .pa-secondary {
-      background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.18); color: #aaa;
-    }
-    .pa-secondary:hover { background: rgba(255,255,255,0.09); }
-    #pa-map-wrap { flex: 1; position: relative; overflow: hidden; }
-    #pa-map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
-    .pa-spin {
-      display: inline-block; width: 12px; height: 12px;
-      border: 2px solid rgba(184,224,74,0.3); border-top-color: #b8e04a;
-      border-radius: 50%; animation: pa-spin 0.6s linear infinite;
-      vertical-align: middle; margin-right: 5px;
-    }
-    @keyframes pa-spin { to { transform: rotate(360deg); } }
-    .leaflet-draw-toolbar a,
-    .leaflet-bar a { background-color: #1a1a26 !important; color: #b8e04a !important; border-color: rgba(255,255,255,0.12) !important; }
-    .leaflet-draw-toolbar a:hover,
-    .leaflet-bar a:hover { background-color: #252534 !important; }
-    .leaflet-control-zoom a { color: #ccc !important; }
-  `;
-  document.head.appendChild(s);
-}
+// Styles are now in styles.css — no injection needed.
 
 // ── Workflow step management ──────────────────────────────────────────────────
 
 function _setStep(step) {
-  for (let i = 0; i <= 4; i++) {
-    const el = document.getElementById(`pa-step-${i}`);
-    if (!el) continue;
-    el.classList.toggle('pa-locked', i > step);
+  const infoFloat = document.getElementById('pa-info-float');
+  const drawHint = document.getElementById('pa-draw-hint');
+  const confirmRow = document.getElementById('pa-confirm-row');
+  const lcCheckRow = document.getElementById('pa-lc-check-row');
+  const simRow = document.getElementById('pa-sim-row');
+  const overlayRow = document.getElementById('pa-overlay-row');
+
+  // Step 0/1: waiting for polygon — show draw hint, hide info panel
+  if (step <= 1) {
+    if (infoFloat) infoFloat.style.display = 'none';
+    if (drawHint) drawHint.style.display = 'block';
+    return;
   }
+
+  // Step 2+: polygon drawn — show info panel, hide draw hint
+  if (drawHint) drawHint.style.display = 'none';
+  if (infoFloat) infoFloat.style.display = 'block';
+
+  // Show/hide sections within the floating panel based on step
+  if (confirmRow) confirmRow.style.display = step === 2 ? 'flex' : 'none';
+  if (lcCheckRow) lcCheckRow.style.display = step >= 4 ? 'flex' : 'none';
+  if (simRow) simRow.style.display = step >= 4 ? 'flex' : 'none';
+  if (overlayRow) overlayRow.style.display = step >= 4 ? 'flex' : 'none';
 }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
@@ -351,7 +262,6 @@ async function _doSearch() {
         const [s, n, w, e] = item.boundingbox.map(Number);
         _map.fitBounds([[s, w], [n, e]], { maxZoom: 16 });
         resultsEl.innerHTML = '';
-        _setStep(1);
       });
       resultsEl.appendChild(div);
     }
@@ -371,7 +281,8 @@ function _onShapeCreated(e) {
   _bounds = _polygon.getBounds();
   _syncParcelBounds();
   _updateParcelInfo();
-  document.getElementById('pa-clear-btn').style.display = '';
+  const clearBtn = document.getElementById('pa-clear-btn');
+  if (clearBtn) clearBtn.style.display = 'block';
   _setStep(2);
 }
 
@@ -423,7 +334,7 @@ function _clearDrawing(resetToStep1 = true) {
   const pi = document.getElementById('pa-parcel-info'); if (pi) pi.innerHTML = '';
   const ls = document.getElementById('pa-lc-status');   if (ls) ls.innerHTML = '';
   const lc = document.getElementById('pa-lc-comp');     if (lc) lc.innerHTML = '';
-  if (resetToStep1) _setStep(1);
+  if (resetToStep1) _setStep(0);
 }
 
 function _updateParcelInfo() {
@@ -434,7 +345,7 @@ function _updateParcelInfo() {
   const km2 = _approxAreaKm2(_bounds);
   infoEl.innerHTML = `
     <div>${sw.lat.toFixed(4)}°N, ${sw.lng.toFixed(4)}°E  →  ${ne.lat.toFixed(4)}°N, ${ne.lng.toFixed(4)}°E</div>
-    <div style="color:#b8e04a;margin-top:3px">≈ ${km2.toFixed(2)} km² · ${(km2 * 100).toFixed(0)} ha</div>
+    <div style="color:#c05030;margin-top:3px">≈ ${km2.toFixed(2)} km² · ${(km2 * 100).toFixed(0)} ha</div>
   `;
 }
 
@@ -442,7 +353,9 @@ function _updateParcelInfo() {
 
 async function _loadLandCover() {
   if (!_polygon || !_bounds) return;
-  _setStep(3);
+  // Show loading state
+  const confirmRow = document.getElementById('pa-confirm-row');
+  if (confirmRow) confirmRow.style.display = 'none';
 
   const statusEl = document.getElementById('pa-lc-status');
   statusEl.innerHTML = '<span class="pa-spin"></span>Fetching NLCD 2021 data from MRLC…';
@@ -474,8 +387,6 @@ async function _loadLandCover() {
   if (_onGridReady) _onGridReady(_patchGrid);
 
   _setStep(4);
-  const overlayRow = document.getElementById('pa-overlay-row');
-  if (overlayRow) overlayRow.style.display = '';
 }
 
 /**

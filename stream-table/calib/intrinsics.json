@@ -1,0 +1,164 @@
+{
+  "phones": [
+    {
+      "label": "anna",
+      "W": 720,
+      "H": 1280,
+      "device": "iPhone (model stripped by re-export)",
+      "lens": "main (assumed)",
+      "focal_equiv_mm": 24.0,
+      "fx_px": 480.0,
+      "cx_px": 360.0,
+      "cy_px": 640.0,
+      "dist_coeffs_initial": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "fov_horizontal_deg": 73.7,
+      "fov_vertical_deg": 106.3,
+      "certain": false,
+      "note": "Apple metadata stripped; assuming main-camera 24mm equiv.",
+      "predicted_extents": {
+        "d=0.5m": {
+          "flume_length_1930mm_px": 1852.8,
+          "flume_width_838mm_px": 804.5
+        },
+        "d=1.0m": {
+          "flume_length_1930mm_px": 926.4,
+          "flume_width_838mm_px": 402.2
+        },
+        "d=1.5m": {
+          "flume_length_1930mm_px": 617.6,
+          "flume_width_838mm_px": 268.2
+        },
+        "d=2.0m": {
+          "flume_length_1930mm_px": 463.2,
+          "flume_width_838mm_px": 201.1
+        },
+        "d=2.5m": {
+          "flume_length_1930mm_px": 370.6,
+          "flume_width_838mm_px": 160.9
+        },
+        "d=3.0m": {
+          "flume_length_1930mm_px": 308.8,
+          "flume_width_838mm_px": 134.1
+        }
+      }
+    },
+    {
+      "label": "sophia",
+      "W": 1080,
+      "H": 1920,
+      "device": "iPhone 16 Pro",
+      "lens": "main (assumed; no explicit focal tag)",
+      "focal_equiv_mm": 24.0,
+      "fx_px": 720.0,
+      "cx_px": 540.0,
+      "cy_px": 960.0,
+      "dist_coeffs_initial": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "fov_horizontal_deg": 73.7,
+      "fov_vertical_deg": 106.3,
+      "certain": false,
+      "note": "Device confirmed; lens inferred.",
+      "predicted_extents": {
+        "d=0.5m": {
+          "flume_length_1930mm_px": 2779.2,
+          "flume_width_838mm_px": 1206.7
+        },
+        "d=1.0m": {
+          "flume_length_1930mm_px": 1389.6,
+          "flume_width_838mm_px": 603.4
+        },
+        "d=1.5m": {
+          "flume_length_1930mm_px": 926.4,
+          "flume_width_838mm_px": 402.2
+        },
+        "d=2.0m": {
+          "flume_length_1930mm_px": 694.8,
+          "flume_width_838mm_px": 301.7
+        },
+        "d=2.5m": {
+          "flume_length_1930mm_px": 555.8,
+          "flume_width_838mm_px": 241.3
+        },
+        "d=3.0m": {
+          "flume_length_1930mm_px": 463.2,
+          "flume_width_838mm_px": 201.1
+        }
+      }
+    },
+    {
+      "label": "javier",
+      "W": 1080,
+      "H": 1920,
+      "device": "iPhone 12 Pro or newer (Dolby Vision profile 8 / level 4 in stream side data)",
+      "lens": "main (assumed; Apple EXIF tags stripped by re-export)",
+      "focal_equiv_mm": 26.0,
+      "fx_px": 780.0,
+      "cx_px": 540.0,
+      "cy_px": 960.0,
+      "dist_coeffs_initial": [0, 0, 0, 0, 0],
+      "fov_horizontal_deg": 69.4,
+      "fov_vertical_deg": 101.8,
+      "certain": false,
+      "note": "Device stripped by Lavf61 re-export; inferred 26mm-equiv from DV metadata. fx_px will be re-solved from vanishing-point orthogonality."
+    },
+    {
+      "label": "valentine",
+      "W": 1080,
+      "H": 1920,
+      "device": "iPhone 13 mini",
+      "lens": "main (wide, 26mm equiv \u2014 assumed default)",
+      "focal_equiv_mm": 26.0,
+      "fx_px": 780.0,
+      "cx_px": 540.0,
+      "cy_px": 960.0,
+      "dist_coeffs_initial": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "fov_horizontal_deg": 69.4,
+      "fov_vertical_deg": 101.8,
+      "certain": false,
+      "note": "Device confirmed by user. Lens assumed main-wide (default Camera app). iPhone 13 mini main: f=5.1mm, sensor 1/1.9\" (~5.6mm wide).",
+      "predicted_extents": {
+        "d=0.5m": {
+          "flume_length_1930mm_px": 3010.8,
+          "flume_width_838mm_px": 1307.3
+        },
+        "d=1.0m": {
+          "flume_length_1930mm_px": 1505.4,
+          "flume_width_838mm_px": 653.6
+        },
+        "d=1.5m": {
+          "flume_length_1930mm_px": 1003.6,
+          "flume_width_838mm_px": 435.8
+        },
+        "d=2.0m": {
+          "flume_length_1930mm_px": 752.7,
+          "flume_width_838mm_px": 326.8
+        },
+        "d=2.5m": {
+          "flume_length_1930mm_px": 602.2,
+          "flume_width_838mm_px": 261.5
+        },
+        "d=3.0m": {
+          "flume_length_1930mm_px": 501.8,
+          "flume_width_838mm_px": 217.9
+        }
+      }
+    }
+  ]
+}

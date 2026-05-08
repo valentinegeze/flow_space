@@ -1,0 +1,120 @@
+{
+  "schema_version": "1",
+  "world_points_mm": {
+    "rim_NW": {
+      "X": 0,
+      "Y": 0,
+      "Z": 0,
+      "label": "Rim NW corner"
+    },
+    "rim_NE": {
+      "X": 838,
+      "Y": 0,
+      "Z": 0,
+      "label": "Rim NE corner"
+    },
+    "rim_SW": {
+      "X": 0,
+      "Y": 1930,
+      "Z": 0,
+      "label": "Rim SW corner"
+    },
+    "rim_SE": {
+      "X": 838,
+      "Y": 1930,
+      "Z": 0,
+      "label": "Rim SE corner"
+    },
+    "standpipe_base": {
+      "X": 419,
+      "Y": 1900,
+      "Z": 0,
+      "label": "Standpipe base (rim level)"
+    },
+    "standpipe_top": {
+      "X": 419,
+      "Y": 1900,
+      "Z": 60,
+      "label": "Standpipe top (Z≈60, refined later)"
+    },
+    "edu_midpoint": {
+      "X": 419,
+      "Y": 30,
+      "Z": 127,
+      "label": "EDU midpoint"
+    },
+    "rib_W_upper": {
+      "X": 0,
+      "Y": 343,
+      "Z": 0,
+      "label": "Rib W upper attachment"
+    },
+    "rib_E_upper": {
+      "X": 838,
+      "Y": 343,
+      "Z": 0,
+      "label": "Rib E upper attachment"
+    },
+    "rib_W_lower": {
+      "X": 0,
+      "Y": 1588,
+      "Z": 0,
+      "label": "Rib W lower (Y=343+1245)"
+    }
+  },
+  "views": {
+    "anna": {
+      "file": "reference_frames/anna.jpg",
+      "W": 720,
+      "H": 1280
+    },
+    "sophia": {
+      "file": "reference_frames/sophia.jpg",
+      "W": 1080,
+      "H": 1920
+    },
+    "valentine": {
+      "file": "reference_frames/valentine.jpg",
+      "W": 1080,
+      "H": 1920
+    },
+    "javier": {
+      "file": "reference_frames/javier.jpg",
+      "W": 1080,
+      "H": 1920
+    },
+    "kinect_color": {
+      "file": "reference_frames/kinect_color.jpg",
+      "W": 1920,
+      "H": 1080
+    }
+  },
+  "annotations": {
+    "anna": {},
+    "sophia": {},
+    "valentine": {},
+    "javier": {
+      "rim_NE": {
+        "u": 478.7399140657127,
+        "v": 1595.743558473603,
+        "visible": true
+      },
+      "rim_SE": {
+        "u": 4.995249507224929,
+        "v": 1906.1279938739915,
+        "visible": true
+      },
+      "rail_pt_A": {
+        "u": 541.4640395290672,
+        "v": 813.5960470932715,
+        "visible": true
+      },
+      "rail_pt_B": {
+        "u": 497.5428536570487,
+        "v": 1589.5369974989326,
+        "visible": true
+      }
+    },
+    "kinect_color": {}
+  }
+}

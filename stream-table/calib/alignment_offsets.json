@@ -1,0 +1,45 @@
+{
+  "_comment": "2D-overlay alignment of each phone over kinect_flow.jpg, captured from calib/alignment.html. Numbers are in DISPLAY-PIXEL space of the stacked frames (not native image pixels). The sx/sy split is independent X and Y stretch. yaw/pitch/roll are CSS rotateY/rotateX/rotateZ with .stack at perspective: 1800px, so they introduce true foreshortening. skew is in addition.",
+  "_source": "calib/alignment.html localStorage (multiview-alignment-v1)",
+  "_alignment_quality_notes": {
+    "anna": "Pure scale+translate fit (no yaw/pitch/roll/skew). Crude — anna's view is oblique so a flat affine cannot capture her perspective foreshortening of the bed. To convert to a meaningful 3D pose the alignment would need pitch added (her optical axis tilts strongly across-and-downstream).",
+    "sophia": "Full perspective fit: pitch=-17.5° plus separate scaleX (0.905) / scaleY (1.635) — captures the trapezoidal foreshortening of the bed as seen from the downstream end.",
+    "valentine": "Full perspective fit: pitch=-14°, small yaw (+0.5°), some skewX (-6°). Similar geometry to sophia — downstream end looking up the channel."
+  },
+  "anna": {
+    "opacity": 0.56,
+    "tx": 45,
+    "ty": 24,
+    "scaleX": 0.58,
+    "scaleY": 0.58,
+    "yaw": 0,
+    "pitch": 0,
+    "roll": 0,
+    "skewX": 0,
+    "skewY": 0
+  },
+  "sophia": {
+    "opacity": 0.66,
+    "tx": -5,
+    "ty": 285,
+    "scaleX": 0.905,
+    "scaleY": 1.635,
+    "yaw": 0,
+    "pitch": -17.5,
+    "roll": 0,
+    "skewX": 0,
+    "skewY": 0
+  },
+  "valentine": {
+    "opacity": 0.8,
+    "tx": -21,
+    "ty": 41,
+    "scaleX": 0.815,
+    "scaleY": 1.36,
+    "yaw": 0.5,
+    "pitch": -14,
+    "roll": 0,
+    "skewX": -6,
+    "skewY": 0
+  }
+}

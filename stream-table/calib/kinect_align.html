@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Camera → flume aligner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #0f0f0f; color: #eee; overflow: hidden; }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #333; }
+  .topbar strong { color: #ffd43b; letter-spacing: 0.04em; font-size: 12px; text-transform: uppercase; }
+  .topbar button { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 5px 11px; cursor: pointer; font-size: 12px; font-family: inherit; }
+  .topbar button:hover { border-color: #ffd43b; color: #ffd43b; }
+  .topbar button.primary { background: #c05030; border-color: #c05030; color: #fff; }
+  .topbar select { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .topbar .pill { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #6a9; margin-left: auto; }
+  .topbar .pill.warn { color: #eb5; }
+  .topbar .pill.bad { color: #e55; }
+  .main { flex: 1; display: flex; min-height: 0; }
+  .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100%; max-height: 100%; display: block; cursor: crosshair; }
+  .sidebar { width: 380px; background: #151515; border-left: 1px solid #333; overflow-y: auto; padding: 14px; }
+  .sidebar h3 { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: #888; margin: 12px 0 6px; padding-bottom: 3px; border-bottom: 1px solid #2a2a2a; }
+  .sidebar h3:first-child { margin-top: 0; }
+  .corner-list { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
+  .corner-list .corner { display: grid; grid-template-columns: 14px 60px 1fr 16px; gap: 6px; align-items: center; padding: 5px 4px; border-radius: 3px; cursor: pointer; }
+  .corner-list .corner:hover { background: #1a1a1a; }
+  .corner-list .corner.active { background: #1a1a28; outline: 1px solid #ffd43b; }
+  .corner-list .dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid #444; }
+  .corner-list .name { color: #ddd; }
+  .corner-list .pos { color: #9cf; font-size: 10px; }
+  .corner-list .clr { background: transparent; color: #666; border: none; cursor: pointer; padding: 0; font-size: 12px; }
+  .corner-list .clr:hover { color: #e66; }
+  .corner-list .corner.disabled { opacity: 0.4; }
+  .corner-list input[type=checkbox] { accent-color: #ffd43b; cursor: pointer; }
+  .help { color: #888; font-size: 11px; line-height: 1.5; }
+  .stats { font-family: 'SF Mono', Menlo, monospace; font-size: 10px; color: #9cf; background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px; line-height: 1.55; }
+  .stats .ok { color: #6a9; }
+  .stats .warn { color: #eb5; }
+  .stats .label { color: #667; font-size: 9px; letter-spacing: 0.05em; text-transform: uppercase; margin-top: 4px; }
+  textarea { width: 100%; height: 130px; background: #0a0a0a; color: #9cf; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: 'SF Mono', Menlo, monospace; font-size: 10px; resize: vertical; }
+  .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+  .btn-row button { flex: 1; background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 11px; font-family: inherit; }
+  .btn-row button:hover { border-color: #ffd43b; color: #ffd43b; }
+  .btn-row button.primary { background: #c05030; border-color: #c05030; color: #fff; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <strong>Camera → flume aligner</strong>
+    <span style="color:#888;font-size:11px">cam</span>
+    <select id="camSelect"></select>
+    <button id="resetBtn">Clear all</button>
+    <button id="solveBtn" class="primary" disabled>Solve transform</button>
+    <button id="commitBtn" disabled>Commit to disk</button>
+    <span id="status" class="pill">pick a camera</span>
+  </div>
+
+  <div class="main">
+    <div class="canvas-wrap"><canvas id="cv"></canvas></div>
+    <div class="sidebar">
+      <h3>Z=0 landmarks — enable the ones visible, then click each in image</h3>
+      <div id="cornerList" class="corner-list"></div>
+      <div class="help" style="margin-top:6px">
+        All 9 landmarks lie on the flume's rim plane (Z=0). The four <strong>cross-rib
+        endpoints</strong> are usually the most reliable choice — they mark the corners of
+        the active water-flow region (Y=343 to Y=1588) and are visible from most angles,
+        whereas the true rim corners (Y=0 and Y=1930) are often occluded by inlet/outlet
+        hardware. Need ≥4 enabled+clicked to solve.
+      </div>
+
+      <h3>Pose recovery</h3>
+      <div id="stats" class="stats">No solve yet — need 4 corners.</div>
+
+      <h3>Sanity check vs your tape measure</h3>
+      <div id="tapeCheck" class="stats">awaiting solve</div>
+
+      <h3>Output  (pose_{cam}_flume.json)</h3>
+      <textarea id="exportArea" readonly></textarea>
+      <div class="btn-row">
+        <button id="copyBtn">Copy JSON</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+// All pose math now lives in calib/lib/flume_pose.js. This file only owns the
+// landmark UI, intrinsic loading, click handling, and rendering — the math is
+// shared with batch tooling and the synthetic-correspondence test in
+// calib/lib/flume_pose.test.html.
+import {
+  homographyDLT, poseFromHomography, orthonormalize3,
+  projectWorld, transpose3, mulMV,
+} from './lib/flume_pose.js';
+
+// ============================================================
+// State
+// ============================================================
+const FLUME_W = 838, FLUME_L = 1930;   // mm — rim dimensions from pose_tune.html WORLD dict
+// All known landmarks on the flume's Z=0 plane. Defaults below choose which group to enable
+// based on the cam picked: rim corners for wide phone views, cross-ribs for the Kinect.
+const LANDMARKS = [
+  { name: 'rim_NW',       xy: [0,       0      ], color: '#ff5555', group: 'rim' },
+  { name: 'rim_NE',       xy: [FLUME_W, 0      ], color: '#55aaff', group: 'rim' },
+  { name: 'rim_SE',       xy: [FLUME_W, FLUME_L], color: '#55ff99', group: 'rim' },
+  { name: 'rim_SW',       xy: [0,       FLUME_L], color: '#ffd43b', group: 'rim' },
+  { name: 'rib_W_upper',  xy: [0,       343    ], color: '#ff99ff', group: 'rib' },
+  { name: 'rib_E_upper',  xy: [FLUME_W, 343    ], color: '#ff66cc', group: 'rib' },
+  { name: 'rib_W_lower',  xy: [0,       1588   ], color: '#99ccff', group: 'rib' },
+  { name: 'rib_E_lower',  xy: [FLUME_W, 1588   ], color: '#66aacc', group: 'rib' },
+  { name: 'standpipe_b',  xy: [419,     1900   ], color: '#ffaa44', group: 'misc' },
+];
+// User-supplied tape measurements (Kinect only):
+const TAPE = {
+  height_mm: 30.25 * 25.4,                    // 768.35
+  table_long_mm: 120 * 25.4,                  // 3048
+  table_wide_mm: 38.5 * 25.4,                 // 977.9
+  kinect_along_long_mm: 57.5 * 25.4,          // 1460.5
+  kinect_along_wide_mm: 19 * 25.4,            // 482.6
+};
+
+const state = {
+  cam: 'kinect',
+  img: null,
+  imgW: 1080, imgH: 1920,
+  K: null,
+  enabled: LANDMARKS.map(l => l.group === 'rib'),  // default to ribs (Kinect-friendly)
+  active: 0,                                       // active landmark index (in LANDMARKS)
+  picks: LANDMARKS.map(() => null),                // image-pixel coords per landmark
+  pose: null,
+  phones: {},                                       // intrinsics by cam label (loaded once)
+};
+
+const PHONE_FILES = {
+  anna: 'reference_frames/anna.jpg',
+  sophia: 'reference_frames/sophia.jpg',
+  valentine: 'reference_frames/valentine.jpg',
+  javier: 'reference_frames/javier.jpg',
+  kinect: 'reference_frames/kinect.jpg',
+};
+
+// Load all phone intrinsics + the Kinect color-proxy intrinsic. Same priority chain as
+// pair_tune.html: empirically-fitted file first (correct, accounts for the proxy's
+// 90° rotation + 16:9 crop + scale), then buggy non-uniform scaling of the factory blob
+// (only as a last resort).
+async function loadAllK() {
+  const phones = {};
+  try {
+    const intr = await (await fetch('intrinsics.json')).json();
+    for (const p of intr.phones) {
+      phones[p.label] = {
+        K: [p.fx_px, 0, p.cx_px,  0, p.fx_px, p.cy_px,  0, 0, 1],
+        W: p.W, H: p.H,
+      };
+    }
+  } catch (e) {}
+  // Preferred: fitted K from scripts/fit_kinect_proxy_K.py
+  try {
+    const fit = await (await fetch('kinect_proxy_intrinsics_fitted.json')).json();
+    phones.kinect = {
+      K: [fit.fx, 0, fit.cx,  0, fit.fy, fit.cy,  0, 0, 1],
+      W: fit.W, H: fit.H,
+    };
+  } catch (e) {}
+  // Fallback: scaled factory blob (KNOWN-BUGGY — gives fx≈511 instead of ≈909)
+  if (!phones.kinect) {
+    try {
+      const j = await (await fetch('kinect_intrinsics.json')).json();
+      const color = (j.cameras || []).find(c => /PhotoVideo/i.test(c.purpose || ''));
+      if (color) {
+        const sx = 1080 / color.W_px, sy = 1920 / color.H_px;
+        phones.kinect = {
+          K: [color.fx_px*sx, 0, color.cx_px*sx,  0, color.fy_px*sy, color.cy_px*sy,  0, 0, 1],
+          W: 1080, H: 1920,
+        };
+      }
+    } catch (e) {}
+  }
+  if (!phones.kinect) {
+    phones.kinect = { K: [909.3,0,544.1, 0,909.5,958.4, 0,0,1], W: 1080, H: 1920 };
+  }
+  return phones;
+}
+
+function loadImage(src) {
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => res(null);
+    img.src = src;
+  });
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+function render() {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const wrap = cv.parentElement;
+  const ww = wrap.clientWidth, wh = wrap.clientHeight;
+  const ar = state.imgW / state.imgH;
+  let cw, ch;
+  if (ww / wh > ar) { ch = wh; cw = ch * ar; } else { cw = ww; ch = cw / ar; }
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
+  cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+  const s = cv.width / state.imgW;
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (state.img) ctx.drawImage(state.img, 0, 0, cv.width, cv.height);
+
+  // If we have a solved pose, draw the full flume rim outline (4 rim corners) projected
+  // through (pose, K). Even if the user clicked only ribs, this lets you visually confirm
+  // the flume box lands sensibly in the image (or extends off-frame, which is expected
+  // for the Kinect since it doesn't see the corners).
+  if (state.pose && state.K) {
+    const rimNames = ['rim_NW', 'rim_NE', 'rim_SE', 'rim_SW'];
+    const projected = rimNames.map(n => {
+      const lm = LANDMARKS.find(l => l.name === n);
+      return projectWorld([lm.xy[0], lm.xy[1], 0], state.pose, state.K);
+    });
+    if (projected.every(Boolean)) {
+      ctx.strokeStyle = 'rgba(85,255,153,0.7)';
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.setLineDash([4*dpr, 4*dpr]);
+      ctx.beginPath();
+      projected.forEach((p, idx) => {
+        const x = p[0]*s, y = p[1]*s;
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.lineTo(projected[0][0]*s, projected[0][1]*s);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Project all enabled landmarks too — green crosses where they SHOULD be
+      LANDMARKS.forEach((lm, i) => {
+        if (!state.enabled[i]) return;
+        const p = projectWorld([lm.xy[0], lm.xy[1], 0], state.pose, state.K);
+        if (!p) return;
+        const x = p[0]*s, y = p[1]*s;
+        ctx.strokeStyle = 'rgba(85,255,153,0.85)';
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.beginPath(); ctx.moveTo(x-7*dpr,y); ctx.lineTo(x+7*dpr,y);
+        ctx.moveTo(x,y-7*dpr); ctx.lineTo(x,y+7*dpr); ctx.stroke();
+      });
+    }
+  }
+
+  // Pick markers — only for enabled landmarks
+  LANDMARKS.forEach((c, i) => {
+    if (!state.enabled[i]) return;
+    const p = state.picks[i];
+    if (!p) return;
+    const x = p[0] * s, y = p[1] * s;
+    ctx.beginPath(); ctx.arc(x, y, 11*dpr, 0, Math.PI*2);
+    ctx.fillStyle = c.color + '55'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, 7*dpr, 0, Math.PI*2);
+    ctx.fillStyle = c.color; ctx.fill();
+    ctx.strokeStyle = (i === state.active ? '#ffd43b' : '#fff');
+    ctx.lineWidth = (i === state.active ? 2 : 1) * dpr;
+    ctx.stroke();
+    ctx.font = `bold ${Math.round(11*dpr)}px 'SF Mono', Menlo, monospace`;
+    const tw = ctx.measureText(c.name).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x + 12*dpr - 3*dpr, y - 8*dpr, tw + 6*dpr, 13*dpr);
+    ctx.fillStyle = c.color;
+    ctx.fillText(c.name, x + 12*dpr, y + 3*dpr);
+  });
+}
+
+// projectWorld is imported from ./lib/flume_pose.js
+
+// ============================================================
+// UI: landmark list
+// ============================================================
+function renderCornerList() {
+  const el = document.getElementById('cornerList');
+  // Group rendering: rim, rib, misc
+  const groups = [
+    { key: 'rim', label: 'rim corners' },
+    { key: 'rib', label: 'cross-rib endpoints' },
+    { key: 'misc', label: 'other' },
+  ];
+  const parts = [];
+  for (const g of groups) {
+    parts.push(`<div style="color:#667; font-size:9px; letter-spacing:0.06em; text-transform:uppercase; margin:6px 0 2px">${g.label}</div>`);
+    LANDMARKS.forEach((c, i) => {
+      if (c.group !== g.key) return;
+      const enabled = state.enabled[i];
+      const placed = state.picks[i];
+      const cls = (i === state.active ? ' active' : '') + (enabled ? '' : ' disabled');
+      const posStr = !enabled ? 'disabled'
+                   : placed ? `(${Math.round(placed[0])},${Math.round(placed[1])})`
+                   : 'click in image…';
+      parts.push(
+        `<div class="corner${cls}" data-idx="${i}">` +
+        `<input type="checkbox" data-cb="${i}"${enabled ? ' checked' : ''}>` +
+        `<span class="name" style="color:${enabled ? '#ddd' : '#666'}">${c.name}</span>` +
+        `<span class="pos">${posStr}</span>` +
+        `<button class="clr" title="clear pick">×</button>` +
+        `</div>`
+      );
+    });
+  }
+  el.innerHTML = parts.join('');
+  for (const row of el.querySelectorAll('.corner')) {
+    const i = +row.dataset.idx;
+    row.addEventListener('click', (e) => {
+      if (e.target.classList.contains('clr')) { e.stopPropagation(); state.picks[i] = null; state.pose = null; if (state.active === i) state.active = nextEmpty(); updateAll(); return; }
+      if (e.target.tagName === 'INPUT') return;  // checkbox handler runs separately
+      if (state.enabled[i]) { state.active = i; updateAll(); }
+    });
+  }
+  for (const cb of el.querySelectorAll('input[data-cb]')) {
+    cb.addEventListener('change', () => {
+      const i = +cb.dataset.cb;
+      state.enabled[i] = cb.checked;
+      if (!cb.checked) state.picks[i] = null;
+      state.pose = null;
+      if (!state.enabled[state.active]) state.active = nextEmpty();
+      updateAll();
+    });
+  }
+}
+
+function nextEmpty() {
+  // Next enabled-but-unplaced landmark
+  for (let i = 0; i < LANDMARKS.length; i++) {
+    if (state.enabled[i] && !state.picks[i]) return i;
+  }
+  // Fallback: first enabled
+  for (let i = 0; i < LANDMARKS.length; i++) if (state.enabled[i]) return i;
+  return 0;
+}
+
+function enabledCount()      { return state.enabled.filter(Boolean).length; }
+function enabledPlacedCount() { return state.enabled.reduce((a, e, i) => a + (e && state.picks[i] ? 1 : 0), 0); }
+
+function bindCanvas() {
+  const cv = document.getElementById('cv');
+  cv.addEventListener('click', (e) => {
+    if (!state.enabled[state.active]) return;
+    const rect = cv.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width * state.imgW;
+    const y = (e.clientY - rect.top) / rect.height * state.imgH;
+    state.picks[state.active] = [x, y];
+    state.pose = null;
+    state.active = nextEmpty();
+    updateAll();
+    // Auto-solve when every enabled landmark has a pick (≥4 needed)
+    if (enabledCount() >= 4 && enabledPlacedCount() === enabledCount()) trySolve();
+  });
+}
+
+// ============================================================
+// Solver — works with any 4+ enabled landmarks (must be coplanar; all our Z=0 ones are)
+// ============================================================
+function trySolve() {
+  const worldXY = [], imageUV = [];
+  LANDMARKS.forEach((c, i) => {
+    if (state.enabled[i] && state.picks[i]) { worldXY.push(c.xy); imageUV.push(state.picks[i]); }
+  });
+  if (worldXY.length < 4) { setStatus(`need 4+ clicked landmarks (have ${worldXY.length})`, 'warn'); return; }
+  const H = homographyDLT(worldXY, imageUV);
+  const pose = poseFromHomography(H, state.K);
+  if (!pose) { setStatus('homography decomposition failed', 'bad'); state.pose = null; return; }
+  pose.R = orthonormalize3(pose.R);
+  state.pose = pose;
+  updateAll();
+  document.getElementById('commitBtn').disabled = false;
+}
+
+// Average reprojection error from the solved pose, over all enabled-and-clicked landmarks.
+function reprojRMSE() {
+  if (!state.pose) return null;
+  let sumSq = 0, n = 0;
+  LANDMARKS.forEach((c, i) => {
+    if (!state.enabled[i] || !state.picks[i]) return;
+    const proj = projectWorld([c.xy[0], c.xy[1], 0], state.pose, state.K);
+    if (!proj) return;
+    const dx = proj[0] - state.picks[i][0], dy = proj[1] - state.picks[i][1];
+    sumSq += dx*dx + dy*dy; n++;
+  });
+  return n > 0 ? Math.sqrt(sumSq / n) : null;
+}
+
+// Camera center in flume frame: C_flume = -Rᵀ · t
+function cameraCenter() {
+  if (!state.pose) return null;
+  const Rt = transpose3(state.pose.R);
+  return mulMV(Rt, [-state.pose.t[0], -state.pose.t[1], -state.pose.t[2]]);
+}
+
+function fmt(v) { return (v >= 0 ? ' ' : '') + v.toFixed(3); }
+
+function renderStats() {
+  const el = document.getElementById('stats');
+  if (!state.pose) {
+    const got = state.picks.filter(Boolean).length;
+    el.textContent = got < 4 ? `Need ${4-got} more corner click${got === 3 ? '' : 's'}.` : 'No solve yet.';
+    return;
+  }
+  const rms = reprojRMSE();
+  const C = cameraCenter();
+  const R = state.pose.R, t = state.pose.t;
+  let html = '';
+  html += `<div class="label">Rotation R (world→Kinect)</div>`;
+  html += `<div>[ ${fmt(R[0])} ${fmt(R[1])} ${fmt(R[2])} ]</div>`;
+  html += `<div>[ ${fmt(R[3])} ${fmt(R[4])} ${fmt(R[5])} ]</div>`;
+  html += `<div>[ ${fmt(R[6])} ${fmt(R[7])} ${fmt(R[8])} ]</div>`;
+  html += `<div class="label">Translation t (mm)</div>`;
+  html += `<div>[ ${t[0].toFixed(1)},  ${t[1].toFixed(1)},  ${t[2].toFixed(1)} ]</div>`;
+  html += `<div class="label">Camera center in flume frame  (mm)</div>`;
+  html += `<div>[ ${C[0].toFixed(1)},  ${C[1].toFixed(1)},  ${C[2].toFixed(1)} ]</div>`;
+  html += `<div class="label">Reprojection RMS</div>`;
+  const rmsCls = rms < 3 ? 'ok' : rms < 10 ? 'warn' : 'bad';
+  html += `<div class="${rmsCls}">${rms.toFixed(2)} px (over 4 corners)</div>`;
+  el.innerHTML = html;
+}
+
+function renderTapeCheck() {
+  const el = document.getElementById('tapeCheck');
+  if (state.cam !== 'kinect') { el.textContent = 'tape measurements apply only to the Kinect (above-bed mount)'; return; }
+  if (!state.pose) { el.textContent = 'awaiting solve'; return; }
+  const C = cameraCenter();
+  const expectedHeight = TAPE.height_mm;
+  const gotHeight = C[2];
+  const dh = gotHeight - expectedHeight;
+  let html = '';
+  html += `<div class="label">Height above bed (Z)</div>`;
+  html += `<div>tape: ${expectedHeight.toFixed(1)} mm  ·  solved: ${gotHeight.toFixed(1)} mm  ·  Δ ${dh >= 0 ? '+' : ''}${dh.toFixed(1)} mm</div>`;
+  html += `<div class="label">Lateral position vs flume centre  (419, 965)</div>`;
+  html += `<div>solved: (${C[0].toFixed(1)}, ${C[1].toFixed(1)}) mm</div>`;
+  // If flume is centered on lab table, expected = tape position − (table − flume)/2.
+  const expX = TAPE.kinect_along_wide_mm - (TAPE.table_wide_mm - FLUME_W) / 2;
+  const expY = TAPE.kinect_along_long_mm - (TAPE.table_long_mm - FLUME_L) / 2;
+  html += `<div class="label">If flume centred on lab table</div>`;
+  html += `<div>expected: (${expX.toFixed(1)}, ${expY.toFixed(1)}) mm</div>`;
+  html += `<div>Δ: (${(C[0]-expX).toFixed(1)}, ${(C[1]-expY).toFixed(1)}) mm</div>`;
+  el.innerHTML = html;
+}
+
+function renderExport() {
+  const el = document.getElementById('exportArea');
+  if (!state.pose) { el.value = ''; return; }
+  const C = cameraCenter();
+  const usedClicks = {};
+  LANDMARKS.forEach((c, i) => {
+    if (state.enabled[i] && state.picks[i]) usedClicks[c.name] = state.picks[i];
+  });
+  const pack = {
+    description: `Rigid transform from flume world frame (mm, rim_NW at origin, rim plane Z=0) to ${state.cam} camera frame. Solved from ${Object.keys(usedClicks).length} planar landmark click(s) by homography decomposition.`,
+    cam: state.cam,
+    image: PHONE_FILES[state.cam],
+    image_size: [state.imgW, state.imgH],
+    K: state.K,
+    R_flume_to_cam: state.pose.R,
+    t_flume_to_cam_mm: state.pose.t,
+    camera_center_in_flume_mm: C,
+    landmark_clicks: usedClicks,
+    reprojection_rms_px: reprojRMSE(),
+    tape_measurements_for_reference: state.cam === 'kinect' ? TAPE : null,
+  };
+  el.value = JSON.stringify(pack, null, 2);
+}
+
+async function commitToFile() {
+  if (!state.pose) return;
+  const body = document.getElementById('exportArea').value;
+  const filename = `pose_${state.cam}_flume.json`;
+  try {
+    const res = await fetch(filename, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body,
+    });
+    setStatus(res.ok ? `committed → calib/${filename}` : `commit failed (${res.status})`, res.ok ? '' : 'bad');
+  } catch (e) {
+    setStatus('commit failed — is pair_tune_server.py running?', 'bad');
+  }
+}
+
+function setStatus(text, cls = '') {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'pill' + (cls ? ' ' + cls : '');
+}
+
+function updateAll() {
+  const enabled = enabledCount(), placed = enabledPlacedCount();
+  document.getElementById('solveBtn').disabled = (placed < 4);
+  if (state.pose) {
+    const rms = reprojRMSE();
+    setStatus(`${state.cam} solved · rms ${rms.toFixed(1)} px (${placed} pts)`, rms < 3 ? '' : rms < 10 ? 'warn' : 'bad');
+  } else if (enabled === 0) {
+    setStatus('enable some landmarks to begin', 'warn');
+  } else {
+    setStatus(`${state.cam} · ${placed}/${enabled} clicked`, '');
+  }
+  render();
+  renderCornerList();
+  renderStats();
+  renderTapeCheck();
+  renderExport();
+}
+
+// Load any pre-existing clicks for this cam from calib/annotations/<cam>.json and
+// pre-populate state.picks for landmarks whose names match. Names that don't appear in
+// LANDMARKS (e.g. rail_pt_A) are silently skipped — there's nowhere to put them.
+async function loadAnnotations(label) {
+  let ann;
+  try {
+    const j = await (await fetch(`annotations/${label}.json`)).json();
+    // Some files have annotations.<cam>.<name>.{u,v}; others put it at the top level under
+    // 'annotations' with a single cam key. Handle both shapes.
+    ann = (j.annotations && (j.annotations[label] || j.annotations[label + '_color'])) || null;
+  } catch (e) { return { count: 0, prefilled: [], skipped: [] }; }
+  if (!ann) return { count: 0, prefilled: [], skipped: [] };
+  const aliases = {
+    standpipe_base: 'standpipe_b',  // annotation file uses _base, LANDMARKS uses _b
+  };
+  const prefilled = [], skipped = [];
+  for (const [annName, click] of Object.entries(ann)) {
+    if (!click || click.visible === false || click.u == null || click.v == null) continue;
+    const lmName = aliases[annName] || annName;
+    const idx = LANDMARKS.findIndex(l => l.name === lmName);
+    if (idx === -1) { skipped.push(annName); continue; }
+    state.picks[idx] = [click.u, click.v];
+    state.enabled[idx] = true;
+    prefilled.push(annName);
+  }
+  return { count: prefilled.length, prefilled, skipped };
+}
+
+async function selectCam(label) {
+  state.cam = label;
+  const ph = state.phones[label];
+  if (!ph) return;
+  state.K = ph.K;
+  state.imgW = ph.W; state.imgH = ph.H;
+  state.img = await loadImage(PHONE_FILES[label]);
+  state.picks = LANDMARKS.map(() => null);
+  state.pose = null;
+  // Default enabled set: cross-rib endpoints. The ribs mark the active water-flow region's
+  // corners and are reliably visible from every cam; rim corners (Y=0, Y=1930) are often
+  // occluded by inlet/outlet hardware. User can still toggle rim corners on per cam.
+  state.enabled = LANDMARKS.map(l => l.group === 'rib');
+  // Pre-populate any existing clicks from calib/annotations/<cam>.json. This both fills
+  // state.picks AND flips state.enabled on for any matched landmark, so the user can see
+  // what's already known and only click whatever's missing.
+  const ann = await loadAnnotations(label);
+  if (ann.count > 0) {
+    setStatus(`${label}: pre-loaded ${ann.count} click${ann.count === 1 ? '' : 's'} from annotations` +
+              (ann.skipped.length ? ` (skipped: ${ann.skipped.join(', ')})` : ''), '');
+  }
+  state.active = nextEmpty();
+  document.getElementById('commitBtn').disabled = true;
+  if (state.picks.filter((p, i) => state.enabled[i] && p).length >= 4) trySolve();
+  else updateAll();
+}
+
+// ============================================================
+// Boot
+// ============================================================
+(async () => {
+  state.phones = await loadAllK();
+  // Populate cam selector
+  const sel = document.getElementById('camSelect');
+  for (const lbl of Object.keys(PHONE_FILES)) sel.add(new Option(lbl, lbl));
+  sel.value = state.cam;
+  sel.onchange = () => selectCam(sel.value);
+
+  bindCanvas();
+  document.getElementById('resetBtn').onclick = () => {
+    state.picks = LANDMARKS.map(() => null);
+    state.active = nextEmpty(); state.pose = null;
+    document.getElementById('commitBtn').disabled = true;
+    updateAll();
+  };
+  document.getElementById('solveBtn').onclick = trySolve;
+  document.getElementById('commitBtn').onclick = commitToFile;
+  document.getElementById('copyBtn').onclick = () => {
+    navigator.clipboard.writeText(document.getElementById('exportArea').value);
+    setStatus('copied to clipboard', '');
+  };
+  window.addEventListener('resize', render);
+  await selectCam(state.cam);
+})();
+</script>
+</body>
+</html>

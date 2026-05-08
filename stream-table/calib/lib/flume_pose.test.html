@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>flume_pose.js — synthetic round-trip test</title>
+<style>
+  body { font-family: 'SF Mono', Menlo, monospace; background: #0f0f0f; color: #ddd; padding: 24px; line-height: 1.55; }
+  h1   { font-size: 14px; color: #ffd43b; margin-bottom: 16px; }
+  pre  { background: #1a1a1a; padding: 14px; border-radius: 4px; border: 1px solid #2a2a2a; white-space: pre-wrap; }
+  .ok  { color: #6a9; }
+  .bad { color: #e55; }
+  .label { color: #667; font-size: 11px; }
+</style>
+</head>
+<body>
+<h1>flume_pose.js — synthetic round-trip test</h1>
+<pre id="out">running…</pre>
+<script type="module">
+import {
+  homographyDLT, poseFromHomography, orthonormalize3,
+  projectWorld, cameraCenter, opticalAxis, reprojectionRMSE,
+  solvePoseFromPlanarLandmarks,
+  mulMV, vec3Cross, vec3Norm, vec3Sub,
+} from './flume_pose.js';
+
+const lines = [];
+const log = (...a) => lines.push(a.join(' '));
+
+// =============================================================================
+// Construct a known camera looking down at the flume at a non-trivial pose.
+// Camera center C_world is offset from above the rim center to give a real
+// rotation (not a degenerate top-down). The camera "looks at" a target on
+// the bed plane.
+// =============================================================================
+function makeKnownCamera(C_world, target, worldUp = [0, 0, -1]) {
+  // OpenCV convention: camera +Z points forward (toward the scene).
+  const zc = vec3Norm(vec3Sub(target, C_world));
+  // X_cam = (worldUp × Z_cam) gives a right-pointing horizontal axis.
+  const xc = vec3Norm(vec3Cross(worldUp, zc));
+  // Y_cam = Z_cam × X_cam — completes the right-handed frame, points "down" in image.
+  const yc = vec3Cross(zc, xc);
+  // R rows are X_cam, Y_cam, Z_cam (each row is a basis vector expressed in world).
+  const R = [xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2]];
+  // t = -R · C  (so that X_cam = R·X_world + t puts C at origin in cam frame).
+  const t = mulMV(R, [-C_world[0], -C_world[1], -C_world[2]]);
+  return { R, t };
+}
+
+const C_world_true = [600, -800, 1200];          // 200 mm right of rim_NE, 800 mm before rim, 1200 mm above
+const target_world = [419, 965, 0];              // flume bed center
+const pose_true = makeKnownCamera(C_world_true, target_world);
+
+// Realistic phone-ish K: fx=fy=900 px, principal point at frame center 540×960
+const K = [900, 0, 540, 0, 900, 960, 0, 0, 1];
+
+// 6 coplanar world points on Z=0: 4 rim corners + 2 cross-rib endpoints
+const WORLD_PTS = [
+  [0,   0,    0],
+  [838, 0,    0],
+  [838, 1930, 0],
+  [0,   1930, 0],
+  [0,   343,  0],
+  [838, 343,  0],
+];
+
+// Project each through (pose_true, K) — this is our synthetic ground-truth pixels
+const imageUV = WORLD_PTS.map(P => projectWorld(P, pose_true, K));
+log('=== STAGE 1 — Synthetic round-trip ===');
+log('');
+log('Known camera:');
+log(`  C_world = (${C_world_true.join(', ')}) mm`);
+log(`  target  = (${target_world.join(', ')}) mm`);
+log(`  K       = fx=fy=900, cx=540, cy=960`);
+log('');
+log('Projected pixel coords (6 points):');
+for (let i = 0; i < WORLD_PTS.length; i++) {
+  const p = imageUV[i];
+  log(`  world (${WORLD_PTS[i].join(', ').padStart(15)}) -> px (${p[0].toFixed(1)}, ${p[1].toFixed(1)})`);
+}
+
+// All projected pixels must lie inside the image — bail loudly if not, since a
+// degenerate setup would silently let the recovered pose look "fine".
+const inFrame = imageUV.every(p => p && p[0] >= 0 && p[0] <= 1080 && p[1] >= 0 && p[1] <= 1920);
+log(`  all 6 project inside 1080×1920: ${inFrame ? 'yes' : 'NO — reposition camera'}`);
+log('');
+
+// Recover via the high-level helper
+const worldXY = WORLD_PTS.map(([X, Y]) => [X, Y]);
+const result = solvePoseFromPlanarLandmarks({ worldXY, imageUV, K });
+if (!result) {
+  log('FAIL: solvePoseFromPlanarLandmarks returned null');
+} else {
+  const C_recovered  = cameraCenter(result.pose);
+  // INDEPENDENT axis check: the camera was constructed to look at `target_world`
+  // from C_world_true, so the true look direction is normalize(target - C). If we
+  // compare opticalAxis() against THIS instead of opticalAxis(pose_true), a bug
+  // that's symmetric across both inputs (e.g. extracting the wrong column of R)
+  // will be caught instead of cancelling out.
+  const axis_geometric = vec3Norm(vec3Sub(target_world, C_world_true));
+  const axis_true_via_R = opticalAxis(pose_true);
+  const axis_rec        = opticalAxis(result.pose);
+  const dC = [
+    C_recovered[0] - C_world_true[0],
+    C_recovered[1] - C_world_true[1],
+    C_recovered[2] - C_world_true[2],
+  ];
+  const dCnorm = Math.hypot(...dC);
+  const axisRecDotGeo  = axis_geometric[0] * axis_rec[0]      + axis_geometric[1] * axis_rec[1]      + axis_geometric[2] * axis_rec[2];
+  const axisTrueDotGeo = axis_geometric[0] * axis_true_via_R[0] + axis_geometric[1] * axis_true_via_R[1] + axis_geometric[2] * axis_true_via_R[2];
+  const axisAngleRecDeg  = Math.acos(Math.max(-1, Math.min(1, axisRecDotGeo)))  * 180 / Math.PI;
+  const axisAngleTrueDeg = Math.acos(Math.max(-1, Math.min(1, axisTrueDotGeo))) * 180 / Math.PI;
+
+  log('Recovered pose:');
+  log(`  C_recovered           = (${C_recovered.map(v => v.toFixed(3)).join(', ')}) mm`);
+  log(`  ΔC                    = (${dC.map(v => v.toFixed(4)).join(', ')}) mm   |ΔC| = ${dCnorm.toExponential(2)} mm`);
+  log(`  axis_geometric        = (${axis_geometric.map(v => v.toFixed(4)).join(', ')})`);
+  log(`  axis_true_via_R       = (${axis_true_via_R.map(v => v.toFixed(4)).join(', ')})`);
+  log(`  axis_recovered        = (${axis_rec.map(v => v.toFixed(4)).join(', ')})`);
+  log(`  angle(axis_true,  axis_geometric) = ${axisAngleTrueDeg.toExponential(2)} deg  ← catches R-extraction bug`);
+  log(`  angle(axis_rec,   axis_geometric) = ${axisAngleRecDeg.toExponential(2)} deg`);
+  log(`  reprojection RMS      = ${result.rms_px.toExponential(2)} px (${result.n_points} pts)`);
+  log('');
+
+  const tests = [];
+  tests.push({ name: '|ΔC| < 1 mm',                          pass: dCnorm < 1.0 });
+  tests.push({ name: 'opticalAxis(pose_true) is correct',     pass: axisAngleTrueDeg < 0.01 });
+  tests.push({ name: 'opticalAxis(recovered) matches truth',  pass: axisAngleRecDeg < 0.01 });
+  tests.push({ name: 'reproj RMS < 0.01 px',                  pass: result.rms_px < 0.01 });
+  log('Assertions:');
+  for (const t of tests) {
+    log(`  [${t.pass ? 'OK ' : 'FAIL'}] ${t.name}`);
+  }
+  const allPassed = tests.every(t => t.pass);
+  log('');
+  log(allPassed
+    ? '*** ALL TESTS PASSED ***'
+    : '*** TESTS FAILED — pose math is broken ***');
+
+  // Color the result green if all passed, red otherwise.
+  document.body.style.borderTop = `4px solid ${allPassed ? '#6a9' : '#e55'}`;
+}
+
+document.getElementById('out').textContent = lines.join('\n');
+</script>
+</body>
+</html>

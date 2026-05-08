@@ -11,6 +11,127 @@
 import { sharedState, addListener, SSURGO_ANCHORS } from './sharedState.js';
 import { FIRE } from './fire.js';
 import { PATCH_PARAMS, PATCH_TYPES } from './patches.js';
+import { runBurnFlowComparison } from './burn-flow-comparison.js';
+import { addRun, getRuns, removeRun, provenance as calibProvenance } from './stream-table-calibration.js';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Side-by-side flood renderer
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Draws a depth field over a patch background into a canvas so the pre- and
+// post-fire flood runs can be compared at a glance, not just as Δ numbers.
+// Each grid cell becomes one ImageData pixel; the canvas's CSS width then
+// scales it up via image-rendering: pixelated.
+
+function _hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [
+    parseInt(h.slice(0, 2), 16),
+    parseInt(h.slice(2, 4), 16),
+    parseInt(h.slice(4, 6), 16),
+  ];
+}
+
+// Pre-fire patch map: each cell colored by its land-cover type. Used in the
+// compare view's headline side-by-side maps.
+function renderPatchMap(canvas, patchGrid, patchKeys, cols, rows) {
+  canvas.width = cols;
+  canvas.height = rows;
+  canvas.style.imageRendering = 'pixelated';
+  canvas.style.aspectRatio = `${cols} / ${rows}`;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(cols, rows);
+  for (let i = 0; i < cols * rows; i++) {
+    const params = PATCH_PARAMS[patchKeys[patchGrid[i]]] || PATCH_PARAMS.grass || { color: '#bdbdbd' };
+    const [r, g, b] = _hexToRgb(params.color);
+    const p = i * 4;
+    img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// Post-fire map: patches faded back, with burn-severity overlay (yellow→red
+// gradient) on cells that burned. Black for fully consumed cells.
+function renderBurnMap(canvas, patchGrid, patchKeys, sev, cols, rows) {
+  canvas.width = cols;
+  canvas.height = rows;
+  canvas.style.imageRendering = 'pixelated';
+  canvas.style.aspectRatio = `${cols} / ${rows}`;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(cols, rows);
+  for (let i = 0; i < cols * rows; i++) {
+    const params = PATCH_PARAMS[patchKeys[patchGrid[i]]] || PATCH_PARAMS.grass || { color: '#bdbdbd' };
+    let [r, g, b] = _hexToRgb(params.color);
+    // Desaturate base toward gray so burn signal pops.
+    const lum = Math.round(r * 0.4 + g * 0.4 + b * 0.4);
+    r = Math.round(r * 0.4 + lum * 0.6);
+    g = Math.round(g * 0.4 + lum * 0.6);
+    b = Math.round(b * 0.4 + lum * 0.6);
+    const s = sev[i];
+    if (s > 0) {
+      // Severity colormap: 0..0.33 yellow, 0.33..0.66 orange, 0.66..1 red→dark
+      let cr, cg, cb;
+      if (s < 0.33) {
+        const t = s / 0.33;
+        cr = Math.round(255);                   cg = Math.round(220 - t * 70);  cb = Math.round(60 - t * 60);
+      } else if (s < 0.66) {
+        const t = (s - 0.33) / 0.33;
+        cr = Math.round(255 - t * 30);          cg = Math.round(150 - t * 70);  cb = 0;
+      } else {
+        const t = (s - 0.66) / 0.34;
+        cr = Math.round(225 - t * 165);         cg = Math.round(80 - t * 60);   cb = 0;
+      }
+      const alpha = Math.min(1, 0.5 + s * 0.5);
+      r = Math.round(r * (1 - alpha) + cr * alpha);
+      g = Math.round(g * (1 - alpha) + cg * alpha);
+      b = Math.round(b * (1 - alpha) + cb * alpha);
+    }
+    const p = i * 4;
+    img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function renderFloodComparison(canvas, depths, patchGrid, patchKeys, cols, rows) {
+  // Use the canvas's natural pixel grid (1 cell = 1 pixel) to keep this fast
+  // even on dense grids; the canvas's CSS width scales the bitmap up.
+  canvas.width = cols;
+  canvas.height = rows;
+  canvas.style.imageRendering = 'pixelated';
+  // Match the bed plane's display aspect.
+  canvas.style.aspectRatio = `${cols} / ${rows}`;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(cols, rows);
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+      const patchIdx = patchGrid ? patchGrid[idx] : 0;
+      const params = PATCH_PARAMS[patchKeys[patchIdx]] || PATCH_PARAMS.grass || { color: '#bdbdbd' };
+      let [r, g, b] = _hexToRgb(params.color);
+
+      // Blend a blue water tint over the patch where depth > threshold. Same
+      // log-scaled alpha as sketch.js's main draw loop, so visual tone matches
+      // the live fire/water view in Step 2.
+      const h = depths[idx];
+      if (h > 0.0005) {
+        const alpha = Math.min(1, (120 + Math.log1p(h * 3000) * 42) / 255);
+        const wr = 80, wg = 130, wb = 200;
+        r = Math.round(r * (1 - alpha) + wr * alpha);
+        g = Math.round(g * (1 - alpha) + wg * alpha);
+        b = Math.round(b * (1 - alpha) + wb * alpha);
+      }
+
+      const p = idx * 4;
+      img.data[p]     = r;
+      img.data[p + 1] = g;
+      img.data[p + 2] = b;
+      img.data[p + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — Camp Fire fallback (static reference data)
@@ -103,6 +224,7 @@ let _radarChart = null;
 let _toggleBtns = [];
 let _hasSimData = false;
 let _heatmapLayer = null;
+let _patchLayer = null;
 let _timelineSlider = null;
 let _timelineLabel = null;
 let _timelineLayer = null;
@@ -165,26 +287,17 @@ function buildLayout(container) {
   container.innerHTML = '';
 
   const root = document.createElement('div');
-  root.style.cssText = `
-    display: flex; width: 100%; height: 100%;
-    font-family: system-ui, -apple-system, sans-serif;
-    color: #e0e0e0; background: #0f0f12;
-  `;
+  root.className = 'soil-root';
   container.appendChild(root);
 
   // ── Map wrapper ──
   const mapWrap = document.createElement('div');
-  mapWrap.style.cssText = 'flex: 1; position: relative; min-width: 0;';
+  mapWrap.className = 'soil-map-wrap';
   root.appendChild(mapWrap);
 
   // Toggle bar
   const toggleBar = document.createElement('div');
-  toggleBar.style.cssText = `
-    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-    z-index: 1000; display: flex; gap: 0;
-    background: rgba(16,16,24,0.95); border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.1); overflow: hidden;
-  `;
+  toggleBar.className = 'soil-toggle-bar';
   mapWrap.appendChild(toggleBar);
 
   const states = ['pre', 'post', 'compare'];
@@ -193,13 +306,7 @@ function buildLayout(container) {
     const btn = document.createElement('button');
     btn.textContent = stateLabels[i];
     btn.dataset.state = s;
-    btn.style.cssText = `
-      padding: 6px 16px; border: none; cursor: pointer;
-      font-size: 11px; font-family: inherit; font-weight: 600;
-      letter-spacing: 0.03em; transition: all 0.15s;
-      background: transparent; color: #777;
-    `;
-    if (i < states.length - 1) btn.style.borderRight = '1px solid rgba(255,255,255,0.08)';
+    btn.className = 'soil-toggle-btn';
     btn.addEventListener('click', () => switchState(s));
     toggleBar.appendChild(btn);
     return btn;
@@ -207,45 +314,29 @@ function buildLayout(container) {
 
   // Source badge
   const srcBadge = document.createElement('div');
-  srcBadge.style.cssText = `
-    position: absolute; top: 10px; right: 12px; z-index: 1000;
-    background: ${_hasSimData ? 'rgba(184,224,74,0.15)' : 'rgba(220,170,60,0.15)'};
-    border: 1px solid ${_hasSimData ? 'rgba(184,224,74,0.35)' : 'rgba(220,170,60,0.35)'};
-    border-radius: 4px; padding: 3px 10px; font-size: 10px; font-weight: 600;
-    color: ${_hasSimData ? '#b8e04a' : '#dcaa3c'};
-  `;
+  srcBadge.className = `soil-src-badge ${_hasSimData ? 'live' : 'reference'}`;
   srcBadge.textContent = _hasSimData ? 'LIVE SIMULATION' : 'REFERENCE: Camp Fire 2018';
   mapWrap.appendChild(srcBadge);
 
   // Map container
   const mapEl = document.createElement('div');
   mapEl.id = 'soil-study-map';
-  mapEl.style.cssText = 'width: 100%; height: 100%;';
+  mapEl.style.cssText = 'width:100%;height:100%;';
   mapWrap.appendChild(mapEl);
 
   // Legend
   _legendEl = document.createElement('div');
-  _legendEl.style.cssText = `
-    position: absolute; bottom: 16px; left: 16px; z-index: 1000;
-    background: rgba(16,16,24,0.92); border-radius: 6px;
-    padding: 10px 14px; font-size: 10px; color: #bbb;
-    border: 1px solid rgba(255,255,255,0.08); line-height: 1.7;
-    max-width: 220px;
-  `;
+  _legendEl.className = 'soil-legend';
   mapWrap.appendChild(_legendEl);
 
   // Timeline slider (sim mode only, shown in post/compare)
   if (_hasSimData && sharedState.fireTimeline && sharedState.fireTimeline.length > 0) {
     const sliderWrap = document.createElement('div');
     sliderWrap.id = 'soil-timeline-wrap';
-    sliderWrap.style.cssText = `
-      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
-      z-index: 1000; background: rgba(16,16,24,0.92); border-radius: 6px;
-      border: 1px solid rgba(255,255,255,0.08); padding: 8px 14px;
-      display: none; align-items: center; gap: 10px; min-width: 280px;
-    `;
+    sliderWrap.className = 'soil-timeline-wrap';
+
     _timelineLabel = document.createElement('span');
-    _timelineLabel.style.cssText = 'font-size: 10px; color: #999; min-width: 60px;';
+    _timelineLabel.className = 'soil-timeline-label';
     _timelineLabel.textContent = 'Tick 0';
 
     _timelineSlider = document.createElement('input');
@@ -253,11 +344,11 @@ function buildLayout(container) {
     _timelineSlider.min = '0';
     _timelineSlider.max = String(sharedState.fireTimeline.length - 1);
     _timelineSlider.value = String(sharedState.fireTimeline.length - 1);
-    _timelineSlider.style.cssText = 'flex: 1; accent-color: #dc503c;';
+    _timelineSlider.className = 'soil-timeline-slider';
     _timelineSlider.addEventListener('input', () => onTimelineChange(+_timelineSlider.value));
 
     const timelineTitle = document.createElement('span');
-    timelineTitle.style.cssText = 'font-size: 10px; color: #777; font-weight: 600;';
+    timelineTitle.className = 'soil-timeline-title';
     timelineTitle.textContent = 'Fire spread';
 
     sliderWrap.appendChild(timelineTitle);
@@ -266,56 +357,58 @@ function buildLayout(container) {
     mapWrap.appendChild(sliderWrap);
   }
 
+  // ── Resizer between map and data panel ──
+  // Drag the vertical bar to make the right panel wider — useful when both
+  // pre/post soil tables and the side-by-side flood maps are showing and 340 px
+  // feels cramped. Width is clamped and persisted to localStorage.
+  const resizer = document.createElement('div');
+  resizer.className = 'soil-resizer';
+  resizer.title = 'Drag to resize';
+  root.appendChild(resizer);
+
   // ── Data panel ──
   _dataPanelEl = document.createElement('div');
-  _dataPanelEl.style.cssText = `
-    width: 340px; min-width: 340px; height: 100%;
-    background: rgba(16,16,24,0.98);
-    border-left: 1px solid rgba(255,255,255,0.08);
-    overflow-y: auto; padding: 18px 16px;
-  `;
+  _dataPanelEl.className = 'soil-data-panel';
   root.appendChild(_dataPanelEl);
 
-  // ── Responsive ──
-  const mq = window.matchMedia('(max-width: 720px)');
-  function applyLayout(e) {
-    if (e.matches) {
-      root.style.flexDirection = 'column';
-      _dataPanelEl.style.width = '100%';
-      _dataPanelEl.style.minWidth = '0';
-      _dataPanelEl.style.height = '50%';
-      _dataPanelEl.style.borderLeft = 'none';
-      _dataPanelEl.style.borderTop = '1px solid rgba(255,255,255,0.08)';
-    } else {
-      root.style.flexDirection = 'row';
-      _dataPanelEl.style.width = '340px';
-      _dataPanelEl.style.minWidth = '340px';
-      _dataPanelEl.style.height = '100%';
-      _dataPanelEl.style.borderLeft = '1px solid rgba(255,255,255,0.08)';
-      _dataPanelEl.style.borderTop = 'none';
-    }
+  // Restore previous width if saved.
+  const savedWidth = parseInt(localStorage.getItem('soil-data-panel-width') || '0', 10);
+  if (savedWidth >= 280 && savedWidth <= window.innerWidth * 0.75) {
+    _dataPanelEl.style.width = savedWidth + 'px';
+    _dataPanelEl.style.minWidth = savedWidth + 'px';
   }
-  mq.addEventListener('change', applyLayout);
-  applyLayout(mq);
+
+  // Drag-to-resize. Mousedown on the bar enters drag mode; mousemove updates
+  // the panel width; mouseup leaves drag mode and persists. We invalidate the
+  // Leaflet map size after release so it redraws at the new dimensions.
+  let dragging = false;
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const newWidth = window.innerWidth - e.clientX;
+    const clamped = Math.max(280, Math.min(Math.round(window.innerWidth * 0.75), newWidth));
+    _dataPanelEl.style.width = clamped + 'px';
+    _dataPanelEl.style.minWidth = clamped + 'px';
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    if (_map && _map.invalidateSize) _map.invalidateSize();
+    const w = parseInt(_dataPanelEl.style.width || '0', 10);
+    if (w > 0) localStorage.setItem('soil-data-panel-width', String(w));
+  });
 
   // ── Init Leaflet map ──
   initMap(mapEl);
 
-  // Tooltip marker style
-  if (!document.getElementById('soil-marker-style')) {
-    const style = document.createElement('style');
-    style.id = 'soil-marker-style';
-    style.textContent = `
-      .soil-marker-tip {
-        background: rgba(16,16,24,0.88); color: #ddd;
-        border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;
-        padding: 2px 8px; font-size: 10px; font-family: system-ui, sans-serif;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-      }
-      .soil-marker-tip::before { border-top-color: rgba(16,16,24,0.88) !important; }
-    `;
-    document.head.appendChild(style);
-  }
+  // Tooltip marker styles are in styles.css
 
   // Set initial state
   switchState('pre');
@@ -337,7 +430,7 @@ function initStaticMap(mapEl) {
   _map = L.map(mapEl, { zoomControl: false }).setView(PARADISE, 12);
   L.control.zoom({ position: 'topright' }).addTo(_map);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; OpenStreetMap &copy; CARTO',
     subdomains: 'abcd', maxZoom: 19,
   }).addTo(_map);
@@ -395,7 +488,7 @@ function initSimMap(mapEl) {
   L.control.zoom({ position: 'topright' }).addTo(_map);
 
   if (bounds) {
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
       attribution: '&copy; OpenStreetMap &copy; CARTO',
       subdomains: 'abcd', maxZoom: 19,
     }).addTo(_map);
@@ -409,6 +502,11 @@ function initSimMap(mapEl) {
 
   // Build the burn severity heatmap as a canvas overlay
   buildHeatmapOverlay(sharedState.burnSeverityGrid, cols, rows, bounds);
+
+  // Build the pre-fire patch grid overlay (NLCD-derived patch types)
+  if (sharedState.patchGridSnapshot) {
+    buildPatchOverlay(sharedState.patchGridSnapshot, cols, rows, bounds);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -454,6 +552,56 @@ function buildHeatmapOverlay(severityGrid, cols, rows, geoBounds) {
   } else {
     _map.fitBounds(imageBounds);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Patch overlay — renders pre-fire patch grid (NLCD-derived) on Leaflet
+// ═══════════════════════════════════════════════════════════════════════════
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [
+    parseInt(h.substring(0, 2), 16),
+    parseInt(h.substring(2, 4), 16),
+    parseInt(h.substring(4, 6), 16),
+  ];
+}
+
+function buildPatchOverlay(patchGrid, cols, rows, geoBounds) {
+  if (!patchGrid || !_map) return;
+
+  const patchKeys = Object.keys(PATCH_PARAMS);
+  const colorCache = patchKeys.map(k => hexToRgb(PATCH_PARAMS[k].color));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = cols;
+  canvas.height = rows;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(cols, rows);
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const idx = i * cols + j;
+      const patchIdx = patchGrid[idx];
+      const rgb = colorCache[patchIdx] || [200, 200, 200];
+      const px = idx * 4;
+      imgData.data[px]     = rgb[0];
+      imgData.data[px + 1] = rgb[1];
+      imgData.data[px + 2] = rgb[2];
+      imgData.data[px + 3] = 200;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  const imageBounds = geoBounds
+    ? [[geoBounds.south, geoBounds.west], [geoBounds.north, geoBounds.east]]
+    : [[0, 0], [rows, cols]];
+
+  if (_patchLayer) _map.removeLayer(_patchLayer);
+  _patchLayer = L.imageOverlay(canvas.toDataURL(), imageBounds, {
+    opacity: 0.7,
+    interactive: false,
+  });
 }
 
 function buildTimelineOverlay(tickIdx) {
@@ -514,8 +662,7 @@ function switchState(s) {
 
   _toggleBtns.forEach(btn => {
     const active = btn.dataset.state === s;
-    btn.style.background = active ? 'rgba(184,224,74,0.12)' : 'transparent';
-    btn.style.color = active ? '#b8e04a' : '#777';
+    btn.classList.toggle('active', active);
   });
 
   // Timeline slider visibility
@@ -551,13 +698,15 @@ function switchStaticLayers(s) {
 
 function switchSimLayers(s) {
   if (s === 'pre') {
-    // Hide heatmap, show soil polygons
+    // Hide heatmap, show patch grid + soil polygons
     if (_heatmapLayer) _heatmapLayer.setOpacity(0);
     if (_timelineLayer) _map.removeLayer(_timelineLayer);
+    if (_patchLayer) _patchLayer.addTo(_map);
     if (_soilWmsLayer) _soilWmsLayer.addTo(_map);
   } else {
-    // Show heatmap, hide soil polygons
+    // Show heatmap, hide patch grid + soil polygons
     if (_heatmapLayer) _heatmapLayer.setOpacity(0.75);
+    if (_patchLayer) _map.removeLayer(_patchLayer);
     if (_soilWmsLayer) _map.removeLayer(_soilWmsLayer);
   }
 }
@@ -606,9 +755,13 @@ function renderSimLegend() {
   const hasReal = !!sharedState.ssurgoData;
   let html = '';
   if (_state === 'pre') {
+    const present = patchTypesPresent();
+    const patchSwatches = present.length
+      ? present.map(p => `${swatch(PATCH_PARAMS[p].color, 'solid')} ${PATCH_PARAMS[p].name}`).join('<br>')
+      : `${swatch('#6ebe6e', 'solid')} Unburned terrain`;
     html = `
-      <div style="font-weight:600;margin-bottom:4px;">Pre-fire landscape</div>
-      ${swatch('#6ebe6e', 'solid')} Unburned terrain<br>
+      <div style="font-weight:600;margin-bottom:4px;">Pre-fire landscape (NLCD patches)</div>
+      ${patchSwatches}<br>
       ${sharedState.geoBounds ? swatch('rgba(180,160,120,0.5)', 'solid') + ' SSURGO soil polygons<br>' : ''}
       <span style="color:#888;font-size:9px;">${hasReal ? 'Real SSURGO data from site' : 'SSURGO baseline properties'}</span>
     `;
@@ -623,6 +776,17 @@ function renderSimLegend() {
     }
   }
   _legendEl.innerHTML = html;
+}
+
+function patchTypesPresent() {
+  const grid = sharedState.patchGridSnapshot;
+  if (!grid) return [];
+  const patchKeys = Object.keys(PATCH_PARAMS);
+  const counts = new Array(patchKeys.length).fill(0);
+  for (let i = 0; i < grid.length; i++) counts[grid[i]]++;
+  const indexed = counts.map((c, i) => ({ i, c, key: patchKeys[i] }));
+  indexed.sort((a, b) => b.c - a.c);
+  return indexed.filter(x => x.c > 0).slice(0, 4).map(x => x.key);
 }
 
 function gradientBar() {
@@ -763,6 +927,45 @@ function renderSimDataPanel() {
   } else {
     const postSoil = degradeSoil(pre, stats.meanSeverity);
     let html = panelTitle('Pre/post comparison', `Simulation results \u2014 ${stats.burnedPct.toFixed(0)}% burned`);
+
+    // Side-by-side maps: pre-fire patch composition on the left, the same
+    // parcel with the burn-severity overlay on the right. Renders the same
+    // patchGrid + burnSeverityGrid the rest of the compare uses, so the two
+    // visualizations are guaranteed to be the same parcel.
+    if (sharedState.patchGridSnapshot && sharedState.burnSeverityGrid &&
+        sharedState.cols && sharedState.rows) {
+      html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+        <div>
+          <div style="font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#666;margin-bottom:4px;">Pre-fire \u00b7 land cover</div>
+          <canvas id="ss-map-pre" style="width:100%;display:block;border:1px solid #e5e5e5;border-radius:4px;background:#fafafa;"></canvas>
+        </div>
+        <div>
+          <div style="font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#c05030;margin-bottom:4px;">Post-fire \u00b7 burn severity</div>
+          <canvas id="ss-map-post" style="width:100%;display:block;border:1px solid #f0d0c4;border-radius:4px;background:#fafafa;"></canvas>
+        </div>
+      </div>`;
+    }
+
+    // Side-by-side full soil panels \u2014 pre-fire baseline on the left, the same
+    // soil after burn-severity degradation on the right. This replaces the
+    // previous compare-only metric grid as the headline view, so the user can
+    // read the full property tables in parallel and then run the same flood
+    // model on each below.
+    const preLabel = pre._isReal
+      ? `${pre.compname} \u2014 ${pre.muname}`
+      : 'SSURGO baseline';
+    const postLabel = `Mean severity ${stats.meanSeverity.toFixed(2)}`;
+    html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">`;
+    html += `<div style="border:1px solid #e5e5e5;border-radius:6px;padding:10px;background:#fafafa;">`;
+    html += `<div style="font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#666;margin-bottom:6px;">Pre-fire \u00b7 ${preLabel}</div>`;
+    html += propsTable(buildPreFireProps(pre));
+    html += `</div>`;
+    html += `<div style="border:1px solid #f0d0c4;border-radius:6px;padding:10px;background:#fff5f0;">`;
+    html += `<div style="font-size:9.5px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#c05030;margin-bottom:6px;">Post-fire \u00b7 ${postLabel}</div>`;
+    html += propsTable(buildPostFireProps(pre, stats));
+    html += `</div>`;
+    html += `</div>`;
+
     html += `<canvas id="soil-radar-canvas" width="280" height="240" style="display:block;margin:8px auto 12px;"></canvas>`;
 
     // Dynamic metric cards
@@ -787,13 +990,236 @@ function renderSimDataPanel() {
     html += severityBar(stats.pctHigh, stats.pctModerate, stats.pctLow);
     html += source(pre._isReal ? `${pre.muname} \u2014 SSURGO + fire simulation` : 'SSURGO interpolation from simulated burn severity');
     html += insight(generateCompareInsight(pre, postSoil, stats));
+    html += flowBridgeBlock();
     _dataPanelEl.innerHTML = html;
 
     // Build radar with dynamic values
     const preRadar = soilToRadarFromBaseline(pre, pre);
     const postRadar = soilToRadarFromBaseline(postSoil, pre);
     buildRadarChart(preRadar, postRadar);
+
+    // Render the two side-by-side mini-maps (pre = patch composition, post =
+    // patches faded under a burn-severity overlay). Both share the same grid.
+    const preMap  = document.getElementById('ss-map-pre');
+    const postMap = document.getElementById('ss-map-post');
+    if (preMap && postMap && sharedState.patchGridSnapshot && sharedState.burnSeverityGrid) {
+      const keysList = Object.keys(PATCH_PARAMS);
+      renderPatchMap(preMap, sharedState.patchGridSnapshot, keysList,
+                     sharedState.cols, sharedState.rows);
+      renderBurnMap(postMap, sharedState.patchGridSnapshot, keysList,
+                    sharedState.burnSeverityGrid, sharedState.cols, sharedState.rows);
+    }
+
+    wireFlowBridge();
   }
+}
+
+// \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+// Flow bridge \u2014 pre/post-fire flow comparison
+// \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+
+function flowBridgeBlock() {
+  const have = {
+    patchGrid: !!sharedState.patchGridSnapshot,
+    elevations: !!sharedState.elevationSnapshot,
+    severity: !!sharedState.burnSeverityGrid,
+  };
+  const ready = have.patchGrid && have.elevations && have.severity;
+  const missing = Object.entries(have).filter(([, v]) => !v).map(([k]) => k);
+
+  const status = ready
+    ? `<span style="color:#4a8a4a;">snapshots ready</span>`
+    : `<span style="color:#c05030;">missing: ${missing.join(', ')}</span> \u2014 complete a fire run from Step 2 first`;
+
+  const prov = calibProvenance();
+  const runs = getRuns();
+  const provLine = prov.source === 'literature'
+    ? `<span style="color:#888;">curve: literature constants (no calibration runs yet)</span>`
+    : `<span style="color:#4a8a4a;">curve: calibrated from ${prov.n} stream-table run${prov.n > 1 ? 's' : ''}</span>`;
+
+  const runRows = runs.map(r => `
+    <tr>
+      <td style="padding:2px 6px;font-family:monospace;">${r.label}</td>
+      <td style="padding:2px 6px;text-align:right;">${r.severity.toFixed(2)}</td>
+      <td style="padding:2px 6px;text-align:right;">${r.infiltrationFactor.toFixed(2)}</td>
+      <td style="padding:2px 6px;text-align:right;">${r.roughnessFactor.toFixed(2)}</td>
+      <td style="padding:2px 6px;text-align:right;">${r.d50_mm != null ? r.d50_mm + ' mm' : '\u2014'}</td>
+      <td style="padding:2px 6px;text-align:right;"><button data-rm="${r.ts}" style="border:0;background:transparent;color:#c05030;cursor:pointer;font-size:11px;">\u00d7</button></td>
+    </tr>
+  `).join('');
+
+  const calibrationTable = runs.length ? `
+    <table style="width:100%;font-size:11px;color:#444;margin-top:6px;border-collapse:collapse;">
+      <thead><tr style="border-bottom:1px solid #e5e5e5;color:#888;">
+        <th style="text-align:left;padding:2px 6px;">label</th>
+        <th style="text-align:right;padding:2px 6px;">severity</th>
+        <th style="text-align:right;padding:2px 6px;">infil \u00d7</th>
+        <th style="text-align:right;padding:2px 6px;">rough \u00d7</th>
+        <th style="text-align:right;padding:2px 6px;">d50</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${runRows}</tbody>
+    </table>
+  ` : '';
+
+  return `
+    <div class="ss-bridge" style="margin-top:18px;padding:14px;border:1px solid #e5e5e5;border-radius:6px;background:#fafafa;">
+      <div style="font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#c05030;margin-bottom:6px;">Flow bridge \u2014 pre/post-fire</div>
+      <div style="font-size:12px;color:#555;line-height:1.5;margin-bottom:8px;">
+        Re-runs overland flow under burn perturbation. Per-cell infiltration and Manning's n
+        are scaled by a curve over burn severity. The curve is either literature-grounded
+        (defaults: <strong>1 \u2212 0.70\u00b7s</strong> and <strong>1 \u2212 0.15\u00b7s</strong>) or calibrated
+        from stream-table runs logged below.
+        Reports \u0394 of the water-side percolation order parameter \u03c6<sub>w</sub> after a short storm.
+      </div>
+      <div style="font-size:11px;color:#666;margin-bottom:6px;">${status}</div>
+      <div style="font-size:11px;margin-bottom:10px;">${provLine}</div>
+
+      <button id="ss-bridge-run" ${ready ? '' : 'disabled'} style="padding:6px 12px;font-size:11px;font-weight:500;letter-spacing:0.04em;text-transform:uppercase;background:${ready ? '#1a1a1a' : '#bbb'};color:#fff;border:1px solid ${ready ? '#1a1a1a' : '#bbb'};border-radius:4px;cursor:${ready ? 'pointer' : 'not-allowed'};font-family:inherit;">Run pre/post comparison</button>
+      <div id="ss-bridge-results" style="margin-top:12px;font-size:12px;color:#1a1a1a;"></div>
+
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer;font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:#666;">Stream-table calibration (${runs.length})</summary>
+        <div style="margin-top:8px;font-size:11px;color:#666;line-height:1.5;">
+          Log a stream-table run to anchor the perturbation curve. <em>Severity</em> is the
+          burn-severity-equivalent you assign to the run (0 = unburned analog, 1 = high-severity analog);
+          <em>infil \u00d7</em> and <em>rough \u00d7</em> are the corresponding factors you observed
+          (e.g. relative channel coverage shift). Optional: dominant grain size in mm.
+        </div>
+        ${calibrationTable}
+        <div style="display:grid;grid-template-columns:repeat(4,1fr) auto;gap:6px;margin-top:8px;align-items:end;">
+          <div><label style="font-size:10px;color:#888;display:block;">Label</label><input id="cal-label" type="text" placeholder="run-1" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid #ddd;border-radius:4px;font-family:inherit;"></div>
+          <div><label style="font-size:10px;color:#888;display:block;">Severity (0\u20131)</label><input id="cal-severity" type="number" min="0" max="1" step="0.01" placeholder="0.7" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid #ddd;border-radius:4px;font-family:inherit;"></div>
+          <div><label style="font-size:10px;color:#888;display:block;">Infil \u00d7 (0\u20131)</label><input id="cal-infil" type="number" min="0.05" max="1.5" step="0.01" placeholder="0.35" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid #ddd;border-radius:4px;font-family:inherit;"></div>
+          <div><label style="font-size:10px;color:#888;display:block;">Rough \u00d7 (0\u20131)</label><input id="cal-rough" type="number" min="0.5" max="1.5" step="0.01" placeholder="0.85" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid #ddd;border-radius:4px;font-family:inherit;"></div>
+          <button id="cal-add" style="padding:5px 10px;font-size:11px;font-weight:500;letter-spacing:0.04em;background:#fff;border:1px solid #1a1a1a;color:#1a1a1a;border-radius:4px;cursor:pointer;font-family:inherit;">Add</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:6px;margin-top:6px;align-items:end;">
+          <div><label style="font-size:10px;color:#888;display:block;">d50 mm (optional)</label><input id="cal-d50" type="number" min="0.1" max="5" step="0.1" placeholder="0.7" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid #ddd;border-radius:4px;font-family:inherit;"></div>
+          <div style="font-size:10px;color:#888;line-height:1.4;">Recorded for provenance only;<br>not used by the curve.</div>
+        </div>
+      </details>
+    </div>
+  `;
+}
+
+function wireFlowBridge() {
+  // Calibration: add a run
+  const addBtn = document.getElementById('cal-add');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      const sev = parseFloat(document.getElementById('cal-severity').value);
+      const inf = parseFloat(document.getElementById('cal-infil').value);
+      const rou = parseFloat(document.getElementById('cal-rough').value);
+      if (!Number.isFinite(sev) || !Number.isFinite(inf) || !Number.isFinite(rou)) return;
+      const d50raw = parseFloat(document.getElementById('cal-d50').value);
+      const label = document.getElementById('cal-label').value.trim() || undefined;
+      addRun({
+        severity: sev, infiltrationFactor: inf, roughnessFactor: rou,
+        d50_mm: Number.isFinite(d50raw) ? d50raw : null, label,
+      });
+      renderDataPanel(); // re-render to show the new row + updated provenance
+    });
+  }
+
+  // Calibration: remove a run
+  document.querySelectorAll('[data-rm]').forEach(b => {
+    b.addEventListener('click', () => {
+      const ts = Number(b.dataset.rm);
+      if (Number.isFinite(ts)) { removeRun(ts); renderDataPanel(); }
+    });
+  });
+
+  const btn = document.getElementById('ss-bridge-run');
+  if (!btn || btn.disabled) return;
+  btn.addEventListener('click', async () => {
+    const results = document.getElementById('ss-bridge-results');
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    if (results) results.innerHTML = '';
+    await new Promise(r => setTimeout(r, 30));
+
+    console.log('[burn-bridge] starting comparison', {
+      cols: sharedState.cols,
+      rows: sharedState.rows,
+      patchGrid: sharedState.patchGridSnapshot?.length,
+      elevations: sharedState.elevationSnapshot?.length,
+      severity: sharedState.burnSeverityGrid?.length,
+    });
+
+    try {
+      const out = runBurnFlowComparison({
+        patchGrid: sharedState.patchGridSnapshot,
+        elevations: sharedState.elevationSnapshot,
+        severityGrid: sharedState.burnSeverityGrid,
+        patchParams: PATCH_PARAMS,
+        patchKeys: Object.keys(PATCH_PARAMS),
+        cols: sharedState.cols,
+        rows: sharedState.rows,
+      });
+
+      const dPhi = out.deltaPhi;
+      const ddmm = (out.meanDepthPerturbed - out.meanDepthVanilla) * 1000;
+      const sign = (x) => (x >= 0 ? '+' : '');
+      console.log('[burn-bridge] result', out);
+
+      const verdict = dPhi > 0.02
+        ? 'Burn perturbation pushed water-side connectivity forward \u2014 channels span more of the parcel post-fire.'
+        : dPhi < -0.02
+        ? 'Counter-intuitive: \u03c6_w decreased. Worth checking elevations / rainfall settings.'
+        : 'Marginal \u0394\u03c6_w \u2014 perturbation effect within noise for this run.';
+
+      const provLabel = out.curveProvenance.source === 'literature'
+        ? 'literature constants'
+        : `calibrated from ${out.curveProvenance.n} stream-table run${out.curveProvenance.n > 1 ? 's' : ''}`;
+      if (results) {
+        results.innerHTML = `
+          <!-- Side-by-side depth-field comparison. Each canvas renders patches
+               (NLCD-derived colors) under a blue water-depth overlay so you can
+               see WHERE the post-fire run accumulates more standing water, not
+               just the aggregate \u0394 numbers. -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+            <div>
+              <div style="font-size:10px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#666;margin-bottom:4px;">Pre-fire flood</div>
+              <canvas id="ss-flood-pre" style="width:100%;display:block;border:1px solid #e5e5e5;border-radius:4px;background:#fafafa;"></canvas>
+              <div style="font-size:10.5px;color:#888;margin-top:4px;">\u03c6<sub>w</sub> ${out.phiVanilla.toFixed(3)} \u00b7 mean depth ${(out.meanDepthVanilla*1000).toFixed(2)} mm</div>
+            </div>
+            <div>
+              <div style="font-size:10px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#c05030;margin-bottom:4px;">Post-fire flood</div>
+              <canvas id="ss-flood-post" style="width:100%;display:block;border:1px solid #e5e5e5;border-radius:4px;background:#fafafa;"></canvas>
+              <div style="font-size:10.5px;color:#888;margin-top:4px;">\u03c6<sub>w</sub> ${out.phiPerturbed.toFixed(3)} \u00b7 mean depth ${(out.meanDepthPerturbed*1000).toFixed(2)} mm</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;">
+            <div><strong>\u0394\u03c6<sub>w</sub>:</strong> ${sign(dPhi)}${dPhi.toFixed(3)}</div>
+            <div><strong>\u0394 mean depth:</strong> ${sign(ddmm)}${ddmm.toFixed(2)} mm</div>
+            <div style="grid-column:1/-1;"><strong>New wet cells:</strong> ${out.newWetCells} / ${sharedState.cols * sharedState.rows}</div>
+            <div style="grid-column:1/-1;color:#666;"><strong>Curve:</strong> ${provLabel}</div>
+          </div>
+          <div style="margin-top:8px;font-size:11px;color:#666;font-style:italic;">${verdict}</div>
+        `;
+
+        // Render the two depth fields. Pixel-perfect rendering using ImageData
+        // \u2014 each cell becomes one image pixel, then the canvas CSS scales it up.
+        const cols = sharedState.cols;
+        const rows = sharedState.rows;
+        const patchGrid = sharedState.patchGridSnapshot;
+        const patchKeysList = Object.keys(PATCH_PARAMS);
+        const preCanvas  = document.getElementById('ss-flood-pre');
+        const postCanvas = document.getElementById('ss-flood-post');
+        if (preCanvas && postCanvas) {
+          renderFloodComparison(preCanvas,  out.vanillaDepths,   patchGrid, patchKeysList, cols, rows);
+          renderFloodComparison(postCanvas, out.perturbedDepths, patchGrid, patchKeysList, cols, rows);
+        }
+      }
+    } catch (e) {
+      if (results) results.innerHTML = `<div style="color:#c05030;">Error: ${e.message}</div>`;
+      console.error('[burn-bridge]', e);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Run pre/post comparison';
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -960,13 +1386,84 @@ function patchComposition() {
 
 function burnSummary(stats) {
   const timeline = sharedState.fireTimeline;
-  let html = `<div style="margin:10px 0;padding:8px 10px;background:rgba(220,80,60,0.08);border-radius:4px;border:1px solid rgba(220,80,60,0.15);">`;
-  html += `<div style="font-size:10px;color:#dc503c;font-weight:600;margin-bottom:4px;">Burn summary</div>`;
-  html += `<div style="font-size:11px;color:#ccc;line-height:1.6;">`;
+  let html = `<div style="margin:10px 0;padding:8px 10px;background:rgba(192,80,48,0.05);border-radius:6px;border:1px solid rgba(192,80,48,0.15);">`;
+  html += `<div style="font-size:10px;color:#c05030;font-weight:500;margin-bottom:4px;">Burn summary</div>`;
+  html += `<div style="font-size:11px;color:#555;line-height:1.6;">`;
   html += `Cells burned: <strong>${stats.burned}</strong> / ${stats.total} (${stats.burnedPct.toFixed(1)}%)<br>`;
   html += `Peak severity: <strong>${stats.maxSeverity.toFixed(2)}</strong><br>`;
-  if (timeline) html += `Fire duration: <strong>${timeline.length}</strong> ticks<br>`;
+  if (timeline) {
+    // Each "tick" is one cell-to-cell ignition cycle from the fire-spread
+    // worker (~150 ms of wall-clock at default speed, but the model itself is
+    // unitless — what matters is the relative spread, not the absolute clock).
+    const approxSeconds = (timeline.length * 0.15).toFixed(0);
+    html += `Fire duration: <strong>${timeline.length}</strong> spread steps <span style="color:#888;font-size:10px;">· ~${approxSeconds}s of sim at default speed</span><br>`;
+    html += `<span style="color:#888;font-size:10px;font-style:italic;">A spread step is one cell-to-cell ignition cycle in the percolation model — relative, not real-world seconds.</span>`;
+  }
   html += `</div></div>`;
+  // Per-land-type breakdown: how the fire actually consumed each land cover.
+  // Forest cells with high fuel load typically burn near 100%; grass cells with
+  // partial fuel may only reach ~30% — this reveals the "selectivity" of the
+  // burn over the parcel's composition.
+  html += burnByLandTypeTable();
+  return html;
+}
+
+// Build a table breaking the burn down by land-cover type. For each type:
+//   - cells of that type in the parcel (whole-grid count)
+//   - cells of that type that burned (severity > 0)
+//   - burned % within type
+//   - mean severity over burned cells of that type
+// Reads patchGrid + burnSeverityGrid + PATCH_PARAMS from sharedState/imports.
+function burnByLandTypeTable() {
+  const grid = sharedState.patchGridSnapshot;
+  const sev  = sharedState.burnSeverityGrid;
+  if (!grid || !sev || grid.length !== sev.length) return '';
+
+  const keys = Object.keys(PATCH_PARAMS);
+  const totals     = new Array(keys.length).fill(0);
+  const burnedCnt  = new Array(keys.length).fill(0);
+  const sevSum     = new Array(keys.length).fill(0);
+
+  for (let i = 0; i < grid.length; i++) {
+    const k = grid[i];
+    if (k < 0 || k >= keys.length) continue;
+    totals[k]++;
+    if (sev[i] > 0) {
+      burnedCnt[k]++;
+      sevSum[k] += sev[i];
+    }
+  }
+
+  // Show only patch types that actually exist in the parcel, sorted by count.
+  const rows = keys
+    .map((k, i) => ({ key: k, params: PATCH_PARAMS[k], total: totals[i], burned: burnedCnt[i], sevSum: sevSum[i] }))
+    .filter(r => r.total > 0)
+    .sort((a, b) => b.total - a.total);
+  if (rows.length === 0) return '';
+
+  let html = `<div style="margin:10px 0;padding:8px 10px;background:#fff;border-radius:6px;border:1px solid #e5e5e5;">`;
+  html += `<div style="font-size:10px;color:#666;font-weight:500;margin-bottom:6px;">Burn by land cover</div>`;
+  html += `<div style="font-size:10.5px;color:#555;line-height:1.5;margin-bottom:6px;">For each land type in the parcel: how much of it burned, and the average severity where it did. Reveals which land-cover types carried the fire vs resisted it. Burn probability per cell is set by each type's <em>fuelLoad</em> in the patch model (see Phase 1 patches).</div>`;
+  html += `<table style="width:100%;font-size:11px;border-collapse:collapse;">`;
+  html += `<thead><tr style="color:#888;font-size:9.5px;letter-spacing:0.04em;text-transform:uppercase;border-bottom:1px solid #eee;">`;
+  html += `<th style="text-align:left;padding:3px 4px;">type</th>`;
+  html += `<th style="text-align:right;padding:3px 4px;">cells</th>`;
+  html += `<th style="text-align:right;padding:3px 4px;">% burned</th>`;
+  html += `<th style="text-align:right;padding:3px 4px;">mean sev</th>`;
+  html += `</tr></thead><tbody>`;
+  for (const r of rows) {
+    const pct = r.total > 0 ? (r.burned / r.total) * 100 : 0;
+    const meanSev = r.burned > 0 ? r.sevSum / r.burned : 0;
+    html += `<tr>`;
+    html += `<td style="padding:3px 4px;display:flex;align-items:center;gap:6px;">`;
+    html += `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${r.params.color};border:1px solid rgba(0,0,0,0.12);flex-shrink:0;"></span>`;
+    html += `<span>${r.params.name || r.key}</span></td>`;
+    html += `<td style="text-align:right;padding:3px 4px;font-variant-numeric:tabular-nums;">${r.total}</td>`;
+    html += `<td style="text-align:right;padding:3px 4px;font-variant-numeric:tabular-nums;color:${pct > 50 ? '#c05030' : '#555'};">${pct.toFixed(0)}%</td>`;
+    html += `<td style="text-align:right;padding:3px 4px;font-variant-numeric:tabular-nums;">${meanSev.toFixed(2)}</td>`;
+    html += `</tr>`;
+  }
+  html += `</tbody></table></div>`;
   return html;
 }
 
@@ -988,9 +1485,9 @@ function textureBar(pre) {
 }
 
 function soilDetails(pre) {
-  let html = `<div style="margin:8px 0;padding:8px 10px;background:rgba(110,190,110,0.06);border-radius:4px;border:1px solid rgba(110,190,110,0.12);">`;
-  html += `<div style="font-size:10px;color:#6ebe6e;font-weight:600;margin-bottom:4px;">Site soil details</div>`;
-  html += `<div style="font-size:11px;color:#ccc;line-height:1.6;">`;
+  let html = `<div style="margin:8px 0;padding:8px 10px;background:rgba(74,138,74,0.05);border-radius:6px;border:1px solid rgba(74,138,74,0.15);">`;
+  html += `<div style="font-size:10px;color:#4a8a4a;font-weight:500;margin-bottom:4px;">Site soil details</div>`;
+  html += `<div style="font-size:11px;color:#555;line-height:1.6;">`;
   if (pre.muname) html += `Map unit: <strong>${pre.muname}</strong><br>`;
   if (pre.compname) html += `Component: <strong>${pre.compname}</strong><br>`;
   if (pre.bulkDensity) html += `Bulk density: <strong>${pre.bulkDensity.toFixed(2)} g/cm\u00B3</strong><br>`;
@@ -1033,8 +1530,8 @@ function generateCompareInsight(pre, post, stats) {
 function panelTitle(title, subtitle) {
   return `
     <div style="margin-bottom:14px;">
-      <div style="font-size:14px;font-weight:700;color:#e0e0e0;letter-spacing:0.02em;">${title}</div>
-      <div style="font-size:10px;color:#888;margin-top:2px;">${subtitle}</div>
+      <div style="font-size:14px;font-weight:500;color:#1a1a1a;letter-spacing:0.02em;">${title}</div>
+      <div style="font-size:10px;color:#999;margin-top:2px;">${subtitle}</div>
     </div>
   `;
 }
@@ -1049,7 +1546,7 @@ function propsTable(props) {
       <div style="display:flex;justify-content:space-between;align-items:flex-start;
                   padding:7px 10px;background:${c.bg};border-left:3px solid ${c.border};
                   border-radius:0 4px 4px 0;margin-bottom:4px;">
-        <span style="font-size:11px;color:#bbb;">${p.label}</span>
+        <span style="font-size:11px;color:#666;">${p.label}</span>
         <span style="font-size:11px;font-family:'SF Mono',SFMono-Regular,Menlo,monospace;color:${c.fg};text-align:right;">
           ${p.value}${note}
         </span>
@@ -1074,16 +1571,16 @@ function severityBar(pctHigh, pctMod, pctLow) {
 
 function metricCard(label, pre, post, unit, delta) {
   return `
-    <div style="background:rgba(30,30,42,0.8);border:1px solid rgba(255,255,255,0.06);
-                border-radius:5px;padding:10px;">
-      <div style="font-size:9px;color:#888;margin-bottom:5px;">${label}</div>
+    <div style="background:#f5f5f5;border:1px solid #eee;
+                border-radius:6px;padding:10px;">
+      <div style="font-size:9px;color:#999;margin-bottom:5px;">${label}</div>
       <div style="font-family:'SF Mono',SFMono-Regular,Menlo,monospace;font-size:12px;">
-        <span style="color:#6ebe6e;">${pre}</span>
-        <span style="color:#555;margin:0 4px;">\u2192</span>
-        <span style="color:#dc503c;">${post}</span>
-        <span style="color:#888;font-size:10px;"> ${unit}</span>
+        <span style="color:#4a8a4a;">${pre}</span>
+        <span style="color:#ccc;margin:0 4px;">\u2192</span>
+        <span style="color:#c05030;">${post}</span>
+        <span style="color:#999;font-size:10px;"> ${unit}</span>
       </div>
-      <div style="font-size:10px;color:#dc503c;margin-top:3px;">${delta}</div>
+      <div style="font-size:10px;color:#c05030;margin-top:3px;">${delta}</div>
     </div>
   `;
 }
@@ -1094,9 +1591,9 @@ function source(text) {
 
 function insight(text) {
   return `
-    <div style="border-left:3px solid rgba(220,170,60,0.5);background:rgba(220,170,60,0.06);
+    <div style="border-left:3px solid rgba(192,80,48,0.3);background:rgba(192,80,48,0.04);
                 padding:10px 12px;border-radius:0 5px 5px 0;margin-top:10px;
-                font-size:11px;color:#c0b89a;font-style:italic;line-height:1.55;">
+                font-size:11px;color:#666;font-style:italic;line-height:1.55;">
       ${text}
     </div>
   `;
@@ -1150,17 +1647,17 @@ function buildRadarChart(preData, postData) {
         r: {
           min: 0, max: 10,
           ticks: { display: false, stepSize: 2 },
-          grid: { color: 'rgba(255,255,255,0.08)' },
-          angleLines: { color: 'rgba(255,255,255,0.06)' },
+          grid: { color: 'rgba(0,0,0,0.06)' },
+          angleLines: { color: 'rgba(0,0,0,0.05)' },
           pointLabels: {
-            color: '#999', font: { size: 9, family: 'system-ui, sans-serif' },
+            color: '#666', font: { size: 9, family: "'Inter', system-ui, sans-serif" },
           },
         },
       },
       plugins: {
         legend: {
           labels: {
-            color: '#999', font: { size: 10 }, boxWidth: 12, padding: 10,
+            color: '#666', font: { size: 10 }, boxWidth: 12, padding: 10,
           },
         },
       },

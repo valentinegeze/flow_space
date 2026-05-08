@@ -1,0 +1,57 @@
+{
+  "label": "valentine",
+  "session": 1,
+  "method": "kinect_anchored_pnp_path3_approximate_bed_depth",
+  "K": [
+    [
+      780.0,
+      0,
+      540.0
+    ],
+    [
+      0,
+      780.0,
+      960.0
+    ],
+    [
+      0,
+      0,
+      1
+    ]
+  ],
+  "R": [
+    [
+      0.12677895800710834,
+      -0.985944587695561,
+      0.10881344494345369
+    ],
+    [
+      0.907645597363498,
+      0.15955742310044088,
+      0.38822789482494124
+    ],
+    [
+      -0.4001331845689515,
+      0.04954491626168184,
+      0.9151167881092186
+    ]
+  ],
+  "t_mm": [
+    -82.42998234398215,
+    -425.28858030318025,
+    -15.479072322733714
+  ],
+  "camera_center_kinectFrame_mm": [
+    390.26800428859985,
+    -12.646535666631138,
+    188.24353951655877
+  ],
+  "fx_px": 780.0,
+  "world_frame": "Kinect color camera (NOT flume frame)",
+  "notes": [
+    "Anchored to Kinect via assumed bed depth = 772.0 mm from Kinect camera.",
+    "5 features used. Mean reprojection error: 22.2 px, max 39.7 px.",
+    "This pose is in KINECT CAMERA FRAME, not the flume world frame.",
+    "To convert to flume frame: need a rigid transform from Kinect frame \u2192 flume frame, computed from 3+ known world points (e.g. rim corners) with Kinect depth lookup."
+  ]
+}

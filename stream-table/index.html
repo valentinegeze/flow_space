@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stream Table Analysis</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: #fff;
+      color: #1a1a1a;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 32px;
+      border-bottom: 1px solid #e5e5e5;
+    }
+
+    .site-title {
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: 0.08em;
+      color: #1a1a1a;
+      text-decoration: none;
+    }
+
+    .site-title span { color: #c05030; }
+
+    .page-title {
+      font-size: 13px;
+      font-weight: 300;
+      color: #999;
+      letter-spacing: 0.02em;
+    }
+
+    /* ── Sections ── */
+    section {
+      padding: 40px 32px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #c05030;
+      margin-bottom: 6px;
+    }
+
+    .section-title {
+      font-size: 22px;
+      font-weight: 300;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .section-desc {
+      font-size: 13px;
+      color: #999;
+      font-weight: 300;
+      line-height: 1.6;
+      max-width: 600px;
+      margin-bottom: 24px;
+    }
+
+    /* ── Multi-view grid ── */
+    .video-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 2px;
+      background: #0a0a0a;
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 1200px;
+      aspect-ratio: 3/1;
+    }
+
+    .video-tile {
+      position: relative;
+      background: #0a0a0a;
+      overflow: hidden;
+      cursor: pointer;
+    }
+
+    .video-tile video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    /* Per-view rotation overrides — proxy extraction stripped EXIF rotation
+       so each view comes through with its sensor-native orientation. Rotate
+       individually so all four tiles read with the same up direction. */
+    .video-tile[data-view="kinect"] video {
+      transform: rotate(90deg);
+      transform-origin: 50% 50%;
+    }
+    .video-tile[data-view="anna"] video {
+      transform: rotate(180deg);
+      transform-origin: 50% 50%;
+    }
+
+    .video-tile .tile-name {
+      position: absolute;
+      top: 8px;
+      left: 10px;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.7);
+      background: rgba(0,0,0,0.4);
+      padding: 2px 8px;
+      border-radius: 3px;
+    }
+
+    .video-tile.selected {
+      outline: 2px solid #c05030;
+      outline-offset: -2px;
+    }
+
+    .video-tile .tile-status {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 8px;
+      border-radius: 3px;
+      background: rgba(0,0,0,0.5);
+      color: rgba(255,255,255,0.85);
+    }
+
+    .video-tile .tile-status[data-state="loading"] { background: rgba(80,80,80,0.6); }
+    .video-tile .tile-status[data-state="ready"]    { background: rgba(74,138,74,0.7); }
+    .video-tile .tile-status[data-state="playing"]  { background: rgba(74,138,74,0.85); }
+    .video-tile .tile-status[data-state="buffer"]   { background: rgba(192,80,48,0.85); }
+    .video-tile .tile-status[data-state="error"]    { background: rgba(192,48,48,0.9); }
+
+    .video-tile .tile-center {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 11px;
+      color: #666;
+      pointer-events: none;
+    }
+
+    /* ── Transport controls ── */
+    .transport {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 16px;
+      max-width: 1200px;
+    }
+
+    .transport button {
+      background: transparent;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-family: inherit;
+      color: #666;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .transport button:hover {
+      border-color: #bbb;
+      color: #1a1a1a;
+    }
+
+    .transport button.active {
+      background: #c05030;
+      border-color: #c05030;
+      color: #fff;
+    }
+
+    .transport input[type="range"] {
+      flex: 1;
+      accent-color: #c05030;
+    }
+
+    .timecode {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: #999;
+      min-width: 60px;
+      font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
+    }
+
+    .sync-status {
+      font-size: 10px;
+      color: #999;
+      margin-top: 8px;
+    }
+
+    .sync-status.loaded { color: #4a8a4a; }
+    .sync-status.error { color: #c05030; }
+
+    .buffer-bar {
+      display: flex;
+      gap: 4px;
+      margin-top: 6px;
+      max-width: 1200px;
+      font-size: 9px;
+      font-variant-numeric: tabular-nums;
+      color: #999;
+      font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
+    }
+    .buffer-bar .chip {
+      padding: 1px 6px;
+      background: #f5f5f5;
+      border-radius: 3px;
+    }
+    .buffer-bar .chip.stalled { background: #fceae5; color: #c05030; }
+
+    /* ── Analysis section ── */
+    .analysis-layout {
+      display: flex;
+      gap: 24px;
+      max-width: 1200px;
+    }
+
+    .analysis-controls {
+      width: 260px;
+      flex-shrink: 0;
+    }
+
+    .analysis-results {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .control-group {
+      margin-bottom: 20px;
+    }
+
+    .control-group label {
+      display: block;
+      font-size: 11px;
+      color: #999;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .control-group input[type="range"] {
+      width: 100%;
+      accent-color: #c05030;
+    }
+
+    .control-group .value {
+      font-size: 12px;
+      color: #666;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .control-group select {
+      width: 100%;
+      padding: 6px 10px;
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      color: #1a1a1a;
+      background: #fff;
+    }
+
+    .analyze-btn {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      background: transparent;
+      border: 1px solid #c05030;
+      color: #c05030;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .analyze-btn:hover {
+      background: #c05030;
+      color: #fff;
+    }
+
+    .analyze-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .results-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 300px;
+      border: 1px dashed #e5e5e5;
+      border-radius: 8px;
+      color: #ccc;
+      font-size: 13px;
+      font-weight: 300;
+    }
+
+    .timeline-strip {
+      display: flex;
+      gap: 2px;
+      overflow-x: auto;
+      padding: 8px 0;
+    }
+
+    .timeline-strip canvas {
+      flex-shrink: 0;
+      border-radius: 3px;
+      cursor: pointer;
+      border: 2px solid transparent;
+    }
+
+    .timeline-strip canvas.selected {
+      border-color: #c05030;
+    }
+
+    .metrics-chart {
+      width: 100%;
+      height: 160px;
+      background: #fafafa;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      margin-top: 12px;
+    }
+
+    .analysis-canvas-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .analysis-canvas-row canvas {
+      flex: 1;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      max-width: 50%;
+    }
+
+    /* ── Digital twin stub ── */
+    .twin-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 280px;
+      background: #fafafa;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      max-width: 1200px;
+    }
+
+    .twin-placeholder-inner {
+      text-align: center;
+      padding: 40px;
+    }
+
+    .twin-placeholder-inner .icon {
+      font-size: 32px;
+      margin-bottom: 12px;
+      opacity: 0.3;
+    }
+
+    .twin-placeholder-inner p {
+      font-size: 13px;
+      color: #bbb;
+      font-weight: 300;
+      line-height: 1.6;
+      max-width: 400px;
+    }
+
+    .twin-concepts {
+      display: flex;
+      gap: 16px;
+      margin-top: 24px;
+      max-width: 1200px;
+    }
+
+    .twin-card {
+      flex: 1;
+      padding: 20px;
+      background: #fafafa;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+    }
+
+    .twin-card h4 {
+      font-size: 12px;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: #1a1a1a;
+    }
+
+    .twin-card p {
+      font-size: 12px;
+      color: #999;
+      font-weight: 300;
+      line-height: 1.5;
+    }
+
+    .twin-card .badge {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 2px 8px;
+      border: 1px solid #e5e5e5;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      color: #bbb;
+      text-transform: uppercase;
+    }
+
+    /* ── Progress ── */
+    .progress-bar {
+      width: 100%;
+      height: 3px;
+      background: #eee;
+      border-radius: 2px;
+      margin-top: 12px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .progress-bar .fill {
+      height: 100%;
+      background: #c05030;
+      border-radius: 2px;
+      transition: width 0.2s;
+      width: 0%;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Section 1: Multi-View Player. Header text removed — now lives in the
+       parent shell (final.html, Phase 2 → Capture & Sync panel header). -->
+  <section id="player-section">
+    <div class="video-grid" id="video-grid">
+      <div class="video-tile" data-view="anna">
+        <div class="tile-name">Anna</div>
+        <video muted playsinline preload="auto"></video>
+        <div class="tile-status" data-state="loading">Loading</div>
+      </div>
+      <div class="video-tile" data-view="sophia">
+        <div class="tile-name">Sophia</div>
+        <video muted playsinline preload="auto"></video>
+        <div class="tile-status" data-state="loading">Loading</div>
+      </div>
+      <div class="video-tile" data-view="valentine">
+        <div class="tile-name">Valentine</div>
+        <video muted playsinline preload="auto"></video>
+        <div class="tile-status" data-state="loading">Loading</div>
+      </div>
+      <div class="video-tile" data-view="kinect">
+        <div class="tile-name">Kinect</div>
+        <video muted playsinline preload="auto"></video>
+        <div class="tile-status" data-state="loading">Loading</div>
+      </div>
+    </div>
+
+    <div class="transport" id="transport">
+      <button id="play-btn" disabled>Play</button>
+      <button id="step-back" title="Back 0.1s">&#9664;</button>
+      <input type="range" id="scrubber" min="0" max="1000" value="0" step="1">
+      <button id="step-fwd" title="Forward 0.1s">&#9654;</button>
+      <span class="timecode" id="timecode">0:00.0</span>
+      <button id="resync-btn" title="Re-align all videos to current time">Resync</button>
+    </div>
+    <div class="sync-status" id="sync-status">Loading sync data...</div>
+    <div class="buffer-bar" id="buffer-bar"></div>
+  </section>
+
+  <!-- Sections 02 (Channel Detection) and 03 (Toward Simulation) were removed
+       per project scoping — Capture & Sync is now player-only. The downstream
+       channel-detection workflow has moved into the Solve Poses / Depth & Motion
+       stages of the calibration pipeline (calib/ subviews). -->
+
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+{
+  "label": "sophia",
+  "session": 1,
+  "method": "kinect_anchored_pnp_path3_approximate_bed_depth",
+  "K": [
+    [
+      763.0,
+      0,
+      540.0
+    ],
+    [
+      0,
+      763.0,
+      960.0
+    ],
+    [
+      0,
+      0,
+      1
+    ]
+  ],
+  "R": [
+    [
+      -0.06615800845080824,
+      -0.9977236061268514,
+      0.013066127775819947
+    ],
+    [
+      0.8923277941888529,
+      -0.05329932727647425,
+      0.44823017460890713
+    ],
+    [
+      -0.4465134103651075,
+      0.04131328465647047,
+      0.8938226820097006
+    ]
+  ],
+  "t_mm": [
+    3.224749926752523,
+    -722.5711122197595,
+    -18.53375373415622
+  ],
+  "camera_center_kinectFrame_mm": [
+    636.7080601578448,
+    -34.529454821178014,
+    340.40193027339785
+  ],
+  "fx_px": 763.0,
+  "world_frame": "Kinect color camera (NOT flume frame)",
+  "notes": [
+    "Anchored to Kinect via assumed bed depth = 772.0 mm from Kinect camera.",
+    "5 features used. Mean reprojection error: 14.2 px, max 19.8 px.",
+    "This pose is in KINECT CAMERA FRAME, not the flume world frame.",
+    "To convert to flume frame: need a rigid transform from Kinect frame \u2192 flume frame, computed from 3+ known world points (e.g. rim corners) with Kinect depth lookup."
+  ]
+}

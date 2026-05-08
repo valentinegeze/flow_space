@@ -1,0 +1,12 @@
+{
+  "moment": "clack+60s",
+  "n_features": 6,
+  "features": [
+    {"name": "r2b_1", "clicks_per_phone": {"anna": [343.59, 137.79], "valentine": [567.51, 576.54], "sophia": [642.79, 346.82], "kinect": [605.15, 581.98]}},
+    {"name": "r2b_2", "clicks_per_phone": {"anna": [162.14, 596.49], "valentine": [448.79, 864.82], "sophia": [448.79, 552.14], "kinect": [425.63, 1000.79]}},
+    {"name": "r2c_1", "clicks_per_phone": {"anna": [146.70, 306.40], "valentine": [402.47, 679.89], "sophia": [454.58, 407.86], "kinect": [414.05, 726.12]}},
+    {"name": "r2c_2", "clicks_per_phone": {"anna": [403.43, 788.67], "valentine": [741.23, 979.04], "sophia": [738.34, 679.77]}},
+    {"name": "r2c_3", "clicks_per_phone": {"anna": [79.14, 1133.14], "valentine": [411.15, 1408.73], "sophia": [269.28, 993.29], "kinect": [356.14, 1506.63]}},
+    {"name": "r2c_4", "clicks_per_phone": {"anna": [65.63, 150.48], "valentine": [289.54, 595.58], "sophia": [353.24, 335.72], "kinect": [286.65, 595.58]}}
+  ]
+}

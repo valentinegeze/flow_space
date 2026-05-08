@@ -35,6 +35,11 @@ let _fireReached = false;
 let _fireArrivalTick = 0;
 let _microTick = 0;
 let _microTimer = null;
+let _igniteBtn = null;        // always-visible "Ignite a tree" button
+// Screen-space positions of each node, captured during renderPanel so the
+// click-to-ignite handler can find the nearest node without recomputing the
+// projection. Index-aligned with _microNodes.
+let _nodeScreenPositions = [];
 let _ignitionNodeIdx = -1;
 let _hasSiteFeatures = false;
 
@@ -70,21 +75,11 @@ export function createZoomPanel(mosaicContainer, {
 
   // Divider
   _divider = document.createElement('div');
-  _divider.style.cssText = `
-    width: 0; min-width: 0; background: #1a1a24;
-    display: flex; flex-direction: column; align-items: center;
-    transition: width 200ms ease, min-width 200ms ease;
-    overflow: hidden; z-index: 50;
-  `;
+  _divider.className = 'zoom-divider';
   _closeBtn = document.createElement('button');
   _closeBtn.textContent = '\u00d7';
   _closeBtn.title = 'Close zoom panel';
-  _closeBtn.style.cssText = `
-    background: rgba(40,40,55,0.95); border: 1px solid #333;
-    color: #aaa; font-size: 16px; cursor: pointer;
-    width: 22px; height: 22px; border-radius: 3px;
-    margin-top: 6px; line-height: 1; padding: 0;
-  `;
+  _closeBtn.className = 'zoom-close-btn';
   _closeBtn.addEventListener('click', () => {
     if (_clearSelectionFn) _clearSelectionFn();
     hidePanel();
@@ -94,19 +89,28 @@ export function createZoomPanel(mosaicContainer, {
   // Panel
   _panel = document.createElement('div');
   _panel.id = 'zoom-panel';
-  _panel.style.cssText = `
-    width: 0; min-width: 0; height: 100%;
-    background: #12121a;
-    overflow: hidden;
-    transition: width 200ms ease, min-width 200ms ease;
-    position: relative;
-    flex-shrink: 0;
-  `;
+  _panel.className = 'zoom-panel-body';
 
   _canvas = document.createElement('canvas');
-  _canvas.style.cssText = 'display: block; width: 100%; height: 100%;';
+  // crosshair cursor signals to the user that this canvas accepts clicks —
+  // without it, it's not obvious that the trees are interactive.
+  _canvas.style.cssText = 'display: block; width: 100%; height: 100%; cursor: crosshair;';
   _panel.appendChild(_canvas);
   _ctx = _canvas.getContext('2d');
+
+  // Always-visible "Ignite a tree" floating button. Clicking it ignites the
+  // node closest to the panel center, regardless of where the user clicks —
+  // gives a single-click way to start the micro-sim without needing to aim
+  // for a specific tree, which was apparently the discoverability problem.
+  const igniteBtn = document.createElement('button');
+  igniteBtn.className = 'zoom-ignite-btn';
+  igniteBtn.textContent = 'Ignite a tree';
+  igniteBtn.title = 'Ignite the centermost unburned tree to start the spread';
+  igniteBtn.addEventListener('click', () => {
+    igniteCenterNode();
+  });
+  _panel.appendChild(igniteBtn);
+  _igniteBtn = igniteBtn;
 
   mosaicContainer.appendChild(_divider);
   mosaicContainer.appendChild(_panel);
@@ -147,6 +151,7 @@ function hidePanel() {
   _divider.style.minWidth = '0';
   _panel.style.width = '0';
   _panel.style.minWidth = '0';
+  if (_igniteBtn) _igniteBtn.style.display = 'none';
 
   stopMicroSim();
   stopRenderLoop();
@@ -182,19 +187,31 @@ function setFeatureData(siteFeatureResult, hasSiteFeatures) {
   _microPhiLocal = phiLocal || 0;
   _microStatus = status || '';
 
-  // Deep-copy nodes with micro-sim state
+  // Deep-copy nodes with micro-sim state. Bumped burnDuration so each tree
+  // gets more spread attempts before going BURNED — without enough chances,
+  // a single low-weight edge can kill the whole burn at the seed.
   _microNodes = (nodes || []).map(n => ({
     ...n,
     state: NODE.UNBURNED,
     burnAge: 0,
-    burnDuration: n.type === 'tree' ? 5 : 2,
-    fuelLoad: n.type === 'tree' ? 0.35 : (n.vulnerability || 0.3) * 0.5,
+    burnDuration: n.type === 'tree' ? 8 : 3,
+    fuelLoad: n.type === 'tree' ? 0.55 : (n.vulnerability || 0.3) * 0.7,
   }));
 
   _microEdges = (edges || []).map(e => ({ ...e }));
   _microTick = 0;
   _fireReached = false;
   _ignitionNodeIdx = -1;
+  // Diagnostic — DevTools shows whether the synthetic graph actually
+  // connected the cells you picked. If edges=0, spread can never happen.
+  console.log(
+    `[zoom-panel] setFeatureData: ${_microNodes.length} nodes, ` +
+    `${_microEdges.length} edges, hasSiteFeatures=${hasSiteFeatures}`
+  );
+  // Show the "Ignite a tree" button once the panel has nodes to ignite.
+  // Use 'block' explicitly — empty string falls back to the CSS rule, which
+  // is `display: none` for this class.
+  if (_igniteBtn) _igniteBtn.style.display = _microNodes.length > 0 ? 'block' : 'none';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -206,7 +223,12 @@ function checkFireArrival(fireState, selectedCells, cols, rows, timestep) {
 
   for (const { r, c } of selectedCells) {
     const idx = r * cols + c;
-    if (fireState.cell[idx] === FIRE.BURNING) {
+    // Also accept BURNED — for small selections the main-grid fire can race
+    // through a cell between worker dispatches, leaving the cell already
+    // BURNED by the time we look at it. Without this branch we'd miss the
+    // arrival entirely and the zoom panel would sit "Waiting for fire…"
+    // forever even though the parcel already burned.
+    if (fireState.cell[idx] === FIRE.BURNING || fireState.cell[idx] === FIRE.BURNED) {
       _fireReached = true;
       _fireArrivalTick = timestep;
 
@@ -305,8 +327,12 @@ function stepMicroSim() {
         weight *= 1 + (neighbor.vulnerability || 0.3);
       }
 
-      // Ignition probability = edge weight × node fuelLoad
-      const P = Math.min(1.0, weight * neighbor.fuelLoad * 3.5);
+      // Ignition probability — bumped multiplier and added a 0.15 floor so
+      // even weak edges have some chance per tick. Combined with the longer
+      // burnDuration this guarantees visible spread for any non-degenerate
+      // graph (the model is for visualization, not strict probabilistic
+      // realism — that's what the main grid model is for).
+      const P = Math.max(0.15, Math.min(1.0, weight * neighbor.fuelLoad * 6.0));
       if (Math.random() < P) {
         neighbor.state = NODE.BURNING;
         neighbor.burnAge = 0;
@@ -324,6 +350,8 @@ export function resetMicroSim() {
     n.state = NODE.UNBURNED;
     n.burnAge = 0;
   }
+  // Bring the "Ignite a tree" button back so the user can re-trigger.
+  if (_igniteBtn) _igniteBtn.style.display = _microNodes.length > 0 ? 'block' : 'none';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -373,7 +401,7 @@ function renderPanel() {
   if (w <= 0 || h <= 0) return;
 
   // Clear
-  _ctx.fillStyle = '#12121a';
+  _ctx.fillStyle = '#fafafa';
   _ctx.fillRect(0, 0, w, h);
 
   if (_microNodes.length === 0) {
@@ -441,8 +469,12 @@ function renderPanel() {
 
   // ── Draw nodes ────────────────────────────────────────────────────────
   const tick = _microTick;
-  for (const n of _microNodes) {
+  // Reset cached node screen positions for the click handler.
+  _nodeScreenPositions.length = _microNodes.length;
+  for (let nidx = 0; nidx < _microNodes.length; nidx++) {
+    const n = _microNodes[nidx];
     const s = toScreen(n.lat, n.lon);
+    _nodeScreenPositions[nidx] = s;
 
     if (n.type === 'tree') {
       const baseR = (n.crownRadius || 3) * 1.2;
@@ -501,6 +533,16 @@ function renderPanel() {
     _ctx.fillStyle = '#f08246';
     _ctx.fillText('\u2014 supercritical', 10, 28);
   }
+  // Node-count badge \u2014 answers "why so few/many trees?" by surfacing how many
+  // fuel-bearing cells the synthetic graph builder found in the selected area.
+  _ctx.font = '10px system-ui, sans-serif';
+  _ctx.fillStyle = '#888';
+  const _burningN = _microNodes.filter(n => n.state === NODE.BURNING).length;
+  const _burnedN  = _microNodes.filter(n => n.state === NODE.BURNED).length;
+  _ctx.fillText(
+    `${_microNodes.length} nodes \u00b7 ${_burningN} burning \u00b7 ${_burnedN} burned`,
+    10, _microPhiLocal > SITE_PHI_STAR ? 42 : 30
+  );
 
   // ── HUD: status / waiting ─────────────────────────────────────────────
   if (!_fireReached) {
@@ -510,6 +552,10 @@ function renderPanel() {
     _ctx.font = '13px system-ui, sans-serif';
     _ctx.fillStyle = `rgba(200, 180, 160, ${pulse})`;
     _ctx.fillText('Waiting for fire\u2026', w / 2, 20);
+    // Hint that the user can short-circuit the wait by clicking on a tree.
+    _ctx.font = '10px system-ui, sans-serif';
+    _ctx.fillStyle = `rgba(150, 150, 150, ${pulse})`;
+    _ctx.fillText('click any tree to ignite manually', w / 2, 36);
   } else {
     // Timer since arrival
     _ctx.textAlign = 'right';
@@ -545,18 +591,19 @@ function renderPanel() {
   fillCircle(ax, ay, 2.5);
 
   // ── Reset button (bottom-right, only during active fire) ──────────────
+  // Larger, brighter label so it's obvious how to start over.
   if (_fireReached) {
-    const bw = 90, bh = 22;
-    const bx = w - bw - 8, by = h - bh - 8;
-    _ctx.fillStyle = 'rgba(40, 40, 55, 0.9)';
-    fillRoundRect(bx, by, bw, bh, 4);
-    _ctx.strokeStyle = '#555';
+    const bw = 130, bh = 26;
+    const bx = w - bw - 10, by = h - bh - 10;
+    _ctx.fillStyle = '#c05030';
+    fillRoundRect(bx, by, bw, bh, 5);
+    _ctx.strokeStyle = '#a04020';
     _ctx.lineWidth = 1;
-    strokeRoundRect(bx, by, bw, bh, 4);
-    _ctx.fillStyle = '#bbb';
-    _ctx.font = '10px system-ui, sans-serif';
+    strokeRoundRect(bx, by, bw, bh, 5);
+    _ctx.fillStyle = '#fff';
+    _ctx.font = '11px system-ui, sans-serif';
     _ctx.textAlign = 'center';
-    _ctx.fillText('Reset zoom fire', bx + bw / 2, by + bh / 2 + 3);
+    _ctx.fillText('↻ Restart tree-by-tree', bx + bw / 2, by + bh / 2 + 4);
 
     // Store for click detection
     _resetBtnRect = { x: bx, y: by, w: bw, h: bh };
@@ -589,17 +636,134 @@ let _resetBtnRect = null;
 // Click handling for reset button
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Ignite the closest unburned node to the panel center. Used by both the
+// always-visible "Ignite a tree" button and as a one-click safety net when
+// the user can't aim for individual trees.
+// Haversine distance between two (lat, lon) points in metres. Used to compute
+// the real-world cell size for the parcel currently loaded — answers the
+// "how big is each square?" question with a concrete number.
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Returns "{cellW}×{cellH} m" for a real parcel, "unitless" for the synthetic
+// (randomized) path. cols/rows come from the zoom panel's caller so the same
+// numbers as the main grid are used.
+function cellSizeLabel(cols, rows) {
+  const bounds = _getSelectedBounds?.();
+  if (!bounds || cols <= 0 || rows <= 0) return 'unitless';
+  // East-west span at the parcel's mean latitude:
+  const latMid = (bounds.north + bounds.south) / 2;
+  const widthMeters  = haversineMeters(latMid, bounds.west, latMid, bounds.east);
+  const heightMeters = haversineMeters(bounds.south, bounds.west, bounds.north, bounds.west);
+  const cellW = widthMeters  / cols;
+  const cellH = heightMeters / rows;
+  return `cell ≈ ${cellW.toFixed(0)}×${cellH.toFixed(0)} m`;
+}
+
+// Count edges touching a given node — used for diagnostic logging.
+function edgesTouchingNode(idx) {
+  let c = 0;
+  for (const e of _microEdges) if (e.i === idx || e.j === idx) c++;
+  return c;
+}
+
+function igniteCenterNode() {
+  if (_microNodes.length === 0) return;
+  // Find the geometric center of the node cloud
+  let sumLat = 0, sumLon = 0, n = 0;
+  for (const node of _microNodes) {
+    if (node.state === NODE.UNBURNED) { sumLat += node.lat; sumLon += node.lon; n++; }
+  }
+  if (n === 0) return;   // everything already burning/burned
+  const cLat = sumLat / n, cLon = sumLon / n;
+  let bestI = -1, bestD = Infinity;
+  for (let i = 0; i < _microNodes.length; i++) {
+    if (_microNodes[i].state !== NODE.UNBURNED) continue;
+    const dlat = _microNodes[i].lat - cLat;
+    const dlon = _microNodes[i].lon - cLon;
+    const d = dlat * dlat + dlon * dlon;
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+  if (bestI === -1) return;
+  _microNodes[bestI].state = NODE.BURNING;
+  _microNodes[bestI].burnAge = 0;
+
+  // Diagnostic: log graph stats so the user can see in DevTools whether the
+  // seed is connected. If `edges touching seed` is 0, spread literally cannot
+  // happen — the cell selected is in a sparse area where the synthetic graph
+  // didn't connect this node to any neighbors.
+  const seedEdgeCount = edgesTouchingNode(bestI);
+  console.log(
+    `[zoom-panel] Ignited seed ${bestI} at (lat=${_microNodes[bestI].lat}, ` +
+    `lon=${_microNodes[bestI].lon}). nodes=${_microNodes.length}, ` +
+    `edges=${_microEdges.length}, edges touching seed=${seedEdgeCount}`
+  );
+
+  // Robust fallback: also force-ignite up to TWO directly-connected
+  // neighbors so the user always sees more than one tree burning, even if
+  // probabilistic spread rolls poorly. The model is for visualization, not
+  // strict realism — this guarantees a visibly progressing simulation.
+  let pickedNeighbors = 0;
+  for (const e of _microEdges) {
+    if (pickedNeighbors >= 2) break;
+    let nidx = -1;
+    if (e.i === bestI) nidx = e.j;
+    else if (e.j === bestI) nidx = e.i;
+    else continue;
+    if (_microNodes[nidx] && _microNodes[nidx].state === NODE.UNBURNED) {
+      _microNodes[nidx].state = NODE.BURNING;
+      _microNodes[nidx].burnAge = 0;
+      pickedNeighbors++;
+    }
+  }
+  console.log(`[zoom-panel] Auto-ignited ${pickedNeighbors} neighbor(s) of seed.`);
+
+  _fireReached = true;
+  if (!_microTimer) startMicroSim();
+  if (_igniteBtn) _igniteBtn.style.display = 'none';
+}
+
 function setupClickHandler() {
   if (!_canvas) return;
   _canvas.addEventListener('click', (e) => {
-    if (!_resetBtnRect) return;
     const rect = _canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    if (x >= _resetBtnRect.x && x <= _resetBtnRect.x + _resetBtnRect.w &&
+
+    // Reset button takes priority.
+    if (_resetBtnRect &&
+        x >= _resetBtnRect.x && x <= _resetBtnRect.x + _resetBtnRect.w &&
         y >= _resetBtnRect.y && y <= _resetBtnRect.y + _resetBtnRect.h) {
       resetMicroSim();
+      return;
     }
+
+    // Click-to-ignite the closest unburned node within ~16 px. This lets the
+    // user trigger the tree-to-tree spread directly without waiting for fire
+    // in the main grid to physically arrive at the selected cells — useful
+    // when the selection is in a low-fuel area or far from the ignition.
+    if (_microNodes.length === 0 || _nodeScreenPositions.length !== _microNodes.length) return;
+    let bestI = -1, bestD = 16 * 16;
+    for (let i = 0; i < _microNodes.length; i++) {
+      if (_microNodes[i].state !== NODE.UNBURNED) continue;
+      const p = _nodeScreenPositions[i];
+      if (!p) continue;
+      const dx = p.x - x, dy = p.y - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD) { bestD = d2; bestI = i; }
+    }
+    if (bestI === -1) return;
+    _microNodes[bestI].state = NODE.BURNING;
+    _microNodes[bestI].burnAge = 0;
+    _fireReached = true;
+    if (!_microTimer) startMicroSim();
   });
 }
 

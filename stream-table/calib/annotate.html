@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Stream Table Landmark Annotator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #0f0f0f; color: #eee; }
+    .app { display: flex; flex-direction: column; height: 100vh; }
+
+    .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #333; flex-wrap: wrap; }
+    .topbar strong { color: #c05030; letter-spacing: 0.04em; font-size: 12px; text-transform: uppercase; margin-right: 4px; }
+    .topbar button, .topbar label.button {
+      background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px;
+      padding: 5px 11px; cursor: pointer; font-size: 12px; font-family: inherit; user-select: none;
+    }
+    .topbar button:hover, .topbar label.button:hover { background: #333; border-color: #555; }
+    .topbar button.active { background: #c05030; border-color: #c05030; color: #fff; }
+    .topbar button.active:hover { background: #d0603a; }
+    .topbar .sep { flex: 1; }
+    .topbar .progress { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #6a9; }
+    input[type=file] { display: none; }
+
+    .main { flex: 1; display: flex; min-height: 0; }
+    .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #000; }
+    #cv { position: absolute; top: 0; left: 0; display: block; cursor: crosshair; }
+    #cv.panning { cursor: grab; }
+    #cv.panning.active { cursor: grabbing; }
+
+    .overlay-pill {
+      position: absolute; background: rgba(0,0,0,0.72); color: #bbb;
+      font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+      padding: 4px 8px; border-radius: 4px; pointer-events: none; z-index: 5;
+    }
+    #zoomInfo   { top: 8px;  right: 228px; }
+    #cursorInfo { bottom: 8px; left: 8px; }
+    #activeInfo { top: 8px;  left: 8px; color: #f0b090; }
+
+    #loupe {
+      position: absolute;
+      top: 8px; right: 8px;
+      width: 220px; height: 220px;
+      border: 2px solid #c05030;
+      border-radius: 4px;
+      background: #0a0a0a;
+      pointer-events: none;
+      z-index: 4;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.6);
+    }
+    .zoom-ctrl {
+      display: flex; gap: 4px; align-items: center;
+    }
+    .zoom-ctrl button {
+      padding: 4px 8px; min-width: 40px;
+    }
+
+    .sidebar { width: 380px; background: #151515; border-left: 1px solid #333; overflow-y: auto; padding: 10px; }
+    .sidebar h3 { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: #888; margin: 6px 2px 8px; }
+
+    .lm {
+      display: block; padding: 8px 10px; margin-bottom: 5px;
+      border: 1px solid #333; border-radius: 5px; background: #1a1a1a;
+      cursor: pointer; transition: background 0.1s;
+    }
+    .lm:hover { background: #222; }
+    .lm.active { border-color: #c05030; background: #2a1612; }
+    .lm.placed { border-color: #4a8a4a; background: #182418; }
+    .lm.placed.active { border-color: #c05030; background: #282018; }
+    .lm .name { font-weight: 600; font-size: 12px; color: #ddd; display: flex; align-items: center; justify-content: space-between; }
+    .lm .name .idx { color: #666; font-weight: 400; font-size: 10px; }
+    .lm .world { color: #777; font-size: 10px; font-family: 'SF Mono', Menlo, monospace; margin-top: 2px; }
+    .lm.placed .pixel { color: #7cb; }
+    .lm .pixel { color: #555; font-size: 10px; font-family: 'SF Mono', Menlo, monospace; margin-top: 2px; }
+    .lm .delete { float: right; color: #844; font-size: 10px; padding: 0 4px; margin-left: 6px; display: none; }
+    .lm.placed .delete, .lm.skipped .delete { display: inline; }
+    .lm .delete:hover { color: #e44; }
+
+    .lm.skipped { border-color: #555; background: #1a1a1a; opacity: 0.55; }
+    .lm.skipped.active { border-color: #c05030; opacity: 0.9; }
+    .lm .skip-btn {
+      float: right; color: #888; font-size: 10px; padding: 1px 6px;
+      background: #222; border: 1px solid #444; border-radius: 3px;
+      cursor: pointer; margin-left: 6px;
+    }
+    .lm .skip-btn:hover { background: #2a2a2a; color: #ddd; }
+    .lm.skipped .pixel { color: #666; }
+    .lm .skipped-label { color: #a66; font-size: 10px; font-style: italic; }
+
+    .help { padding: 6px 14px; background: #161616; border-top: 1px solid #2a2a2a; font-size: 10.5px; color: #888; line-height: 1.5; }
+    .help kbd { background: #2a2a2a; padding: 1px 5px; border-radius: 3px; border: 1px solid #444; font-family: 'SF Mono', Menlo, monospace; font-size: 10px; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <strong>Landmark Annotator</strong>
+    <button data-view="anna">Anna</button>
+    <button data-view="sophia">Sophia</button>
+    <button data-view="valentine">Valentine</button>
+    <button data-view="javier">Javier</button>
+    <button data-view="kinect_color">Kinect</button>
+    <span class="sep"></span>
+    <span class="progress" id="progress"></span>
+    <label class="button" for="loadFile">Load JSON</label>
+    <input type="file" id="loadFile" accept=".json">
+    <button id="saveBtn">Save JSON</button>
+    <div class="zoom-ctrl">
+      <button id="fitBtn"  title="Fit image to window">Fit</button>
+      <button id="z100Btn" title="100% (1 screen px = 1 image px)">100%</button>
+      <button id="z200Btn" title="200%">200%</button>
+      <button id="z400Btn" title="400%">400%</button>
+    </div>
+    <button id="loupeToggle" title="Toggle loupe (L)">Loupe ON</button>
+    <button id="resetBtn" style="background:#401515; border-color:#602020;" title="Clear all clicks in current view">Reset view</button>
+  </div>
+  <div class="main">
+    <div class="canvas-wrap" id="wrap">
+      <canvas id="cv" width="800" height="600"></canvas>
+      <div class="overlay-pill" id="activeInfo">—</div>
+      <div class="overlay-pill" id="zoomInfo">zoom 1.00× · fit</div>
+      <div class="overlay-pill" id="cursorInfo">move cursor over image</div>
+      <canvas id="loupe" width="220" height="220"></canvas>
+    </div>
+    <div class="sidebar" id="sidebar"></div>
+  </div>
+  <div class="help">
+    <kbd>Click</kbd> place active landmark (or select existing nearby to move) ·
+    <kbd>Ctrl</kbd>+<kbd>Scroll</kbd> zoom at cursor ·
+    <kbd>Alt</kbd>+<kbd>Drag</kbd> or middle-drag pan ·
+    <kbd>[</kbd> <kbd>]</kbd> prev/next landmark ·
+    <kbd>1–4</kbd> switch view ·
+    <kbd>+</kbd> <kbd>−</kbd> zoom step ·
+    <kbd>0</kbd> 100% ·
+    <kbd>L</kbd> loupe ·
+    saves sub-pixel (u,v) floats.
+  </div>
+</div>
+
+<script>
+// ─── Config ────────────────────────────────────────────────────────────────
+const WORLD_POINTS = [
+  ["rim_NW",         [0,   0,    0],   "Rim NW corner"],
+  ["rim_NE",         [838, 0,    0],   "Rim NE corner"],
+  ["rim_SW",         [0,   1930, 0],   "Rim SW corner"],
+  ["rim_SE",         [838, 1930, 0],   "Rim SE corner"],
+  ["standpipe_base", [419, 1900, 0],   "Standpipe base (rim level)"],
+  ["standpipe_top",  [419, 1900, 60],  "Standpipe top (Z≈60, refined later)"],
+  ["edu_midpoint",   [419, 30,   127], "EDU midpoint"],
+  ["rib_W_upper",    [0,   343,  0],   "Rib W upper attachment"],
+  ["rib_E_upper",    [838, 343,  0],   "Rib E upper attachment"],
+  ["rib_W_lower",    [0,   1588, 0],   "Rib W lower (Y=343+1245)"],
+  // Line-constraint pseudo-landmarks. These share a known 3D line but the specific
+  // (X,Y,Z) is arbitrary — click any 2 points along the named feature.
+  ["rail_pt_A",      [null, null, null, "line:Y_axis"], "Overhead rail — point A (anywhere along the rail)"],
+  ["rail_pt_B",      [null, null, null, "line:Y_axis"], "Overhead rail — point B (same rail as A, farther along)"],
+  ["far_cross_rim_A",[null, null, null, "line:X_axis_at_Y0"], "Far cross-rim top edge — point A (any point along Y=0 rim top)"],
+  ["far_cross_rim_B",[null, null, null, "line:X_axis_at_Y0"], "Far cross-rim top edge — point B (same rim as A)"],
+];
+
+// Reference frames are the "_flow" set — sampled later in the video, after the
+// water has been running long enough that the inlet tube has been moved aside
+// and the upstream rim corners (rim_NW, rim_NE) are no longer occluded. The
+// earlier "calm" frames (anna.jpg, sophia.jpg, etc. without the _flow suffix)
+// remain on disk if you need them — just swap the suffix back here.
+//
+// javier swap also fixes a latent orientation bug: javier.jpg is 1920×1080
+// landscape but the schema and existing javier annotations are in 1080×1920
+// portrait coords. javier_flow.jpg is the matching portrait orientation.
+const VIEWS = {
+  anna:         { file: "reference_frames/anna_flow.jpg",      W: 720,  H: 1280 },
+  sophia:       { file: "reference_frames/sophia_flow.jpg",    W: 1080, H: 1920 },
+  valentine:    { file: "reference_frames/valentine_flow.jpg", W: 1080, H: 1920 },
+  javier:       { file: "reference_frames/javier_flow.jpg",    W: 1080, H: 1920 },
+  kinect_color: { file: "reference_frames/kinect_flow.jpg",    W: 1080, H: 1920 },
+};
+
+// ─── State ─────────────────────────────────────────────────────────────────
+const state = {
+  view: "anna",
+  activeLandmark: "rim_NW",
+  annotations: {
+    anna: {}, sophia: {}, valentine: {}, javier: {}, kinect_color: {}
+  },
+  zoom: 1.0,
+  panX: 0, panY: 0,
+  img: null,
+  cursor: { u: null, v: null, cx: null, cy: null },
+  panning: false,
+  panStart: null,
+};
+
+// ─── Image cache ───────────────────────────────────────────────────────────
+const imageCache = {};
+function loadImage(key) {
+  return new Promise((resolve, reject) => {
+    if (imageCache[key]) return resolve(imageCache[key]);
+    const im = new Image();
+    im.onload = () => { imageCache[key] = im; resolve(im); };
+    im.onerror = reject;
+    im.src = VIEWS[key].file + "?v=" + Date.now();
+  });
+}
+
+// ─── Canvas ops ────────────────────────────────────────────────────────────
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const loupe = document.getElementById("loupe");
+const loupeCtx = loupe.getContext("2d");
+const LOUPE_SIZE = 220;        // canvas size (px)
+const LOUPE_SCALE = 14;        // how many image pixels fit in the loupe
+let loupeEnabled = true;
+
+function resizeCanvas() {
+  const wrap = document.getElementById("wrap");
+  cv.width = wrap.clientWidth;
+  cv.height = wrap.clientHeight;
+  draw();
+}
+window.addEventListener("resize", resizeCanvas);
+
+function fitToWindow() {
+  if (!state.img) return;
+  const view = VIEWS[state.view];
+  const sx = cv.width / view.W;
+  const sy = cv.height / view.H;
+  state.zoom = Math.min(sx, sy) * 0.97;
+  state.panX = (cv.width  - view.W * state.zoom) / 2;
+  state.panY = (cv.height - view.H * state.zoom) / 2;
+  draw();
+}
+
+// screen ↔ image coordinate conversions
+function screenToImage(sx, sy) {
+  return { u: (sx - state.panX) / state.zoom, v: (sy - state.panY) / state.zoom };
+}
+function imageToScreen(u, v) {
+  return { x: state.panX + u * state.zoom, y: state.panY + v * state.zoom };
+}
+
+function drawLoupe() {
+  if (!loupeEnabled || !state.img || state.cursor.u == null) {
+    loupeCtx.fillStyle = "#0a0a0a";
+    loupeCtx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    loupeCtx.fillStyle = "#555";
+    loupeCtx.font = "11px -apple-system";
+    loupeCtx.fillText(loupeEnabled ? "cursor not over image" : "loupe off", 12, LOUPE_SIZE / 2);
+    return;
+  }
+  const view = VIEWS[state.view];
+  const u = state.cursor.u, v = state.cursor.v;
+  if (u < 0 || u >= view.W || v < 0 || v >= view.H) {
+    loupeCtx.fillStyle = "#0a0a0a";
+    loupeCtx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    return;
+  }
+  // Source region of image to show: LOUPE_SIZE/LOUPE_SCALE image pixels wide, centered on cursor.
+  const srcSize = LOUPE_SIZE / LOUPE_SCALE;
+  const sx = u - srcSize / 2;
+  const sy = v - srcSize / 2;
+  loupeCtx.imageSmoothingEnabled = false;
+  loupeCtx.fillStyle = "#0a0a0a";
+  loupeCtx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+  loupeCtx.drawImage(state.img, sx, sy, srcSize, srcSize, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
+
+  // Draw placed landmarks visible within the loupe window
+  const anns = state.annotations[state.view];
+  for (const [id] of WORLD_POINTS) {
+    const pt = anns[id];
+    if (!pt || pt.visible === false || pt.u == null) continue;
+    const lx = (pt.u - sx) * LOUPE_SCALE;
+    const ly = (pt.v - sy) * LOUPE_SCALE;
+    if (lx < 0 || lx > LOUPE_SIZE || ly < 0 || ly > LOUPE_SIZE) continue;
+    loupeCtx.strokeStyle = id === state.activeLandmark ? "#c05030" : "#4aa04a";
+    loupeCtx.lineWidth = 2;
+    loupeCtx.beginPath();
+    loupeCtx.arc(lx, ly, 8, 0, 2 * Math.PI);
+    loupeCtx.stroke();
+  }
+
+  // Crosshair at center (current cursor)
+  const mid = LOUPE_SIZE / 2;
+  loupeCtx.strokeStyle = "rgba(255, 200, 120, 0.9)";
+  loupeCtx.lineWidth = 1;
+  loupeCtx.beginPath();
+  loupeCtx.moveTo(mid, 0);       loupeCtx.lineTo(mid, mid - 6);
+  loupeCtx.moveTo(mid, mid + 6); loupeCtx.lineTo(mid, LOUPE_SIZE);
+  loupeCtx.moveTo(0, mid);       loupeCtx.lineTo(mid - 6, mid);
+  loupeCtx.moveTo(mid + 6, mid); loupeCtx.lineTo(LOUPE_SIZE, mid);
+  loupeCtx.stroke();
+  loupeCtx.fillStyle = "rgba(255, 200, 120, 0.9)";
+  loupeCtx.beginPath();
+  loupeCtx.arc(mid, mid, 1.5, 0, 2 * Math.PI);
+  loupeCtx.fill();
+
+  // Pixel coord label
+  loupeCtx.fillStyle = "rgba(0,0,0,0.7)";
+  loupeCtx.fillRect(4, LOUPE_SIZE - 18, 112, 14);
+  loupeCtx.fillStyle = "#eee";
+  loupeCtx.font = "10px 'SF Mono', Menlo, monospace";
+  loupeCtx.fillText(`${u.toFixed(2)}, ${v.toFixed(2)}`, 8, LOUPE_SIZE - 7);
+  loupeCtx.fillStyle = "rgba(0,0,0,0.7)";
+  loupeCtx.fillRect(LOUPE_SIZE - 52, LOUPE_SIZE - 18, 48, 14);
+  loupeCtx.fillStyle = "#eee";
+  loupeCtx.fillText(`${LOUPE_SCALE}×`, LOUPE_SIZE - 46, LOUPE_SIZE - 7);
+}
+
+function setZoom(newZoom, anchorSx, anchorSy) {
+  // anchor = point in screen coords that stays under cursor
+  if (anchorSx == null) { anchorSx = cv.width / 2; anchorSy = cv.height / 2; }
+  const { u, v } = screenToImage(anchorSx, anchorSy);
+  state.zoom = Math.max(0.05, Math.min(40, newZoom));
+  state.panX = anchorSx - u * state.zoom;
+  state.panY = anchorSy - v * state.zoom;
+  document.getElementById("zoomInfo").textContent = `zoom ${state.zoom.toFixed(2)}×`;
+  draw();
+}
+
+function draw() {
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!state.img) return;
+
+  const view = VIEWS[state.view];
+  ctx.imageSmoothingEnabled = state.zoom < 2;
+  ctx.drawImage(state.img, state.panX, state.panY, view.W * state.zoom, view.H * state.zoom);
+
+  // Draw landmarks
+  const anns = state.annotations[state.view];
+  for (const [id, world, label] of WORLD_POINTS) {
+    const pt = anns[id];
+    if (!pt || pt.visible === false || pt.u == null) continue;
+    const { x, y } = imageToScreen(pt.u, pt.v);
+    const isActive = id === state.activeLandmark;
+    drawCross(x, y, isActive ? "#c05030" : "#4aa04a", id, isActive);
+  }
+
+  // Draw the cursor + zoom loupe guide if active landmark not placed
+  if (state.cursor.cx != null) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(state.cursor.cx, 0); ctx.lineTo(state.cursor.cx, cv.height);
+    ctx.moveTo(0, state.cursor.cy); ctx.lineTo(cv.width, state.cursor.cy);
+    ctx.stroke();
+    ctx.restore();
+  }
+  drawLoupe();
+}
+
+function drawCross(x, y, color, label, bold) {
+  const r = bold ? 9 : 7;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 2 : 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x - r, y); ctx.lineTo(x - 2, y);
+  ctx.moveTo(x + 2, y); ctx.lineTo(x + r, y);
+  ctx.moveTo(x, y - r); ctx.lineTo(x, y - 2);
+  ctx.moveTo(x, y + 2); ctx.lineTo(x, y + r);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x, y, 2, 0, 2 * Math.PI);
+  ctx.fillStyle = color;
+  ctx.fill();
+  // Label
+  ctx.font = "11px -apple-system, sans-serif";
+  ctx.fillStyle = "rgba(0,0,0,0.7)";
+  const short = label.replace(/^rim_|_upper|_lower|_midpoint|_base|_top/g, m => ({
+    rim_: "", _upper: "↑", _lower: "↓", _midpoint: "·", _base: "↓", _top: "↑"
+  }[m] || m));
+  const tx = x + r + 4, ty = y + 4;
+  const metrics = ctx.measureText(short);
+  ctx.fillRect(tx - 2, ty - 10, metrics.width + 4, 12);
+  ctx.fillStyle = color;
+  ctx.fillText(short, tx, ty);
+  ctx.restore();
+}
+
+// ─── Sidebar ───────────────────────────────────────────────────────────────
+function renderSidebar() {
+  const sb = document.getElementById("sidebar");
+  const anns = state.annotations[state.view];
+  let placed = 0, skipped = 0;
+  for (const id in anns) {
+    if (anns[id].visible === false) skipped++;
+    else placed++;
+  }
+  const total = WORLD_POINTS.length;
+  let html = `<h3>Landmarks — ${state.view} (${placed} placed · ${skipped} skipped · ${total - placed - skipped} todo)</h3>`;
+  WORLD_POINTS.forEach(([id, world, label], idx) => {
+    const pt = anns[id];
+    const isSkipped = pt && pt.visible === false;
+    const isPlaced = pt && pt.visible !== false;
+    const classes = ["lm"];
+    if (isSkipped) classes.push("skipped");
+    if (isPlaced) classes.push("placed");
+    if (id === state.activeLandmark) classes.push("active");
+    const wtext = (world[0] === null)
+      ? `line: ${world[3] || "?"}`
+      : `(${world[0]}, ${world[1]}, ${world[2]}) mm`;
+    let ptext;
+    if (isSkipped) ptext = `<span class="skipped-label">not visible in this view</span>`;
+    else if (isPlaced) ptext = `u=${pt.u.toFixed(2)}  v=${pt.v.toFixed(2)}`;
+    else ptext = "not placed";
+    html += `
+      <div class="${classes.join(' ')}" data-id="${id}">
+        <div class="name">
+          <span>${label}</span>
+          <span class="idx">#${idx + 1}</span>
+          <span class="delete" data-del="${id}" title="Remove">✕</span>
+          ${isSkipped ? '' : `<span class="skip-btn" data-skip="${id}" title="Mark as not visible in this view">skip</span>`}
+        </div>
+        <div class="world">${wtext}</div>
+        <div class="pixel">${ptext}</div>
+      </div>`;
+  });
+  sb.innerHTML = html;
+  sb.querySelectorAll(".lm").forEach(el => {
+    el.addEventListener("click", e => {
+      if (e.target.dataset.del) {
+        delete state.annotations[state.view][e.target.dataset.del];
+        renderSidebar();
+        updateProgress();
+        draw();
+        return;
+      }
+      if (e.target.dataset.skip) {
+        state.annotations[state.view][e.target.dataset.skip] = { visible: false };
+        // advance active to next unclassified landmark
+        const order = WORLD_POINTS.map(p => p[0]);
+        const curIdx = order.indexOf(e.target.dataset.skip);
+        for (let i = 1; i <= order.length; i++) {
+          const next = order[(curIdx + i) % order.length];
+          if (!state.annotations[state.view][next]) {
+            state.activeLandmark = next;
+            break;
+          }
+        }
+        renderSidebar();
+        updateProgress();
+        updateActiveInfo();
+        draw();
+        return;
+      }
+      state.activeLandmark = el.dataset.id;
+      renderSidebar();
+      draw();
+      updateActiveInfo();
+    });
+  });
+}
+
+function updateProgress() {
+  const el = document.getElementById("progress");
+  let total = 0, placed = 0, skipped = 0;
+  for (const v of Object.keys(VIEWS)) {
+    total += WORLD_POINTS.length;
+    for (const id in state.annotations[v]) {
+      if (state.annotations[v][id].visible === false) skipped++;
+      else if (state.annotations[v][id].u != null) placed++;
+    }
+  }
+  const anns = state.annotations[state.view];
+  let lp = 0, ls = 0;
+  for (const id in anns) {
+    if (anns[id].visible === false) ls++;
+    else if (anns[id].u != null) lp++;
+  }
+  el.textContent = `${placed}+${skipped}/${total} global · ${lp}+${ls}/${WORLD_POINTS.length} in ${state.view}`;
+}
+
+function updateActiveInfo() {
+  const el = document.getElementById("activeInfo");
+  const lm = WORLD_POINTS.find(p => p[0] === state.activeLandmark);
+  if (!lm) { el.textContent = "—"; return; }
+  const anns = state.annotations[state.view];
+  const placed = anns[state.activeLandmark];
+  el.textContent = `active: ${lm[2]} · world (${lm[1][0]}, ${lm[1][1]}, ${lm[1][2]}) mm${placed ? ` · placed (${placed.u.toFixed(1)}, ${placed.v.toFixed(1)})` : ' · click to place'}`;
+}
+
+// ─── Input ─────────────────────────────────────────────────────────────────
+cv.addEventListener("mousemove", e => {
+  const rect = cv.getBoundingClientRect();
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  state.cursor.cx = cx; state.cursor.cy = cy;
+  const { u, v } = screenToImage(cx, cy);
+  state.cursor.u = u; state.cursor.v = v;
+
+  if (state.panning && state.panStart) {
+    state.panX += cx - state.panStart.cx;
+    state.panY += cy - state.panStart.cy;
+    state.panStart = { cx, cy };
+  }
+
+  const ci = document.getElementById("cursorInfo");
+  const view = VIEWS[state.view];
+  const inBounds = u >= 0 && u < view.W && v >= 0 && v < view.H;
+  ci.textContent = inBounds ? `u = ${u.toFixed(2)} px, v = ${v.toFixed(2)} px` : `(outside image)`;
+
+  draw();
+});
+
+cv.addEventListener("mousedown", e => {
+  if (e.button === 1 || e.altKey) {
+    // Pan
+    state.panning = true;
+    cv.classList.add("panning", "active");
+    const rect = cv.getBoundingClientRect();
+    state.panStart = { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
+    e.preventDefault();
+  }
+});
+
+window.addEventListener("mouseup", e => {
+  if (state.panning) {
+    state.panning = false;
+    cv.classList.remove("active");
+    state.panStart = null;
+  }
+});
+
+cv.addEventListener("click", e => {
+  if (e.altKey || e.button !== 0) return;
+  const rect = cv.getBoundingClientRect();
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  const { u, v } = screenToImage(cx, cy);
+  const view = VIEWS[state.view];
+  if (u < 0 || u >= view.W || v < 0 || v >= view.H) return;
+
+  // If clicking near an existing landmark (within 8 screen-pixels), select that one instead
+  const anns = state.annotations[state.view];
+  for (const [id] of WORLD_POINTS) {
+    const pt = anns[id];
+    if (!pt || pt.visible === false || pt.u == null) continue;
+    const sp = imageToScreen(pt.u, pt.v);
+    const dx = sp.x - cx, dy = sp.y - cy;
+    if (dx * dx + dy * dy < 64) {
+      state.activeLandmark = id;
+      renderSidebar();
+      updateActiveInfo();
+      draw();
+      return;
+    }
+  }
+
+  // Place/move active landmark at cursor (explicitly mark as visible)
+  state.annotations[state.view][state.activeLandmark] = { u, v, visible: true };
+  // Advance to next landmark that has no entry yet (placed or skipped → skip)
+  const order = WORLD_POINTS.map(p => p[0]);
+  const curIdx = order.indexOf(state.activeLandmark);
+  for (let i = 1; i <= order.length; i++) {
+    const next = order[(curIdx + i) % order.length];
+    if (!state.annotations[state.view][next]) {
+      state.activeLandmark = next;
+      break;
+    }
+  }
+  renderSidebar();
+  updateProgress();
+  updateActiveInfo();
+  draw();
+});
+
+cv.addEventListener("wheel", e => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  const { u, v } = screenToImage(cx, cy);
+  const factor = Math.exp(-e.deltaY * 0.002);
+  const newZoom = Math.max(0.05, Math.min(40, state.zoom * factor));
+  state.zoom = newZoom;
+  // Keep (u, v) under cursor
+  state.panX = cx - u * newZoom;
+  state.panY = cy - v * newZoom;
+  document.getElementById("zoomInfo").textContent = `zoom ${newZoom.toFixed(2)}×`;
+  draw();
+}, { passive: false });
+
+// ─── Top bar ───────────────────────────────────────────────────────────────
+document.querySelectorAll("[data-view]").forEach(btn => {
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
+async function switchView(view) {
+  if (!VIEWS[view]) return;
+  state.view = view;
+  state.img = await loadImage(view);
+  // pick first unplaced landmark as active
+  const anns = state.annotations[view];
+  const firstUnplaced = WORLD_POINTS.map(p => p[0]).find(id => !anns[id]);
+  state.activeLandmark = firstUnplaced || WORLD_POINTS[0][0];
+  fitToWindow();
+  document.querySelectorAll("[data-view]").forEach(b => {
+    b.classList.toggle("active", b.dataset.view === view);
+  });
+  renderSidebar();
+  updateProgress();
+  updateActiveInfo();
+  document.getElementById("zoomInfo").textContent = `zoom ${state.zoom.toFixed(2)}× · fit`;
+}
+
+document.getElementById("fitBtn").addEventListener("click", fitToWindow);
+document.getElementById("z100Btn").addEventListener("click", () => setZoom(1.0));
+document.getElementById("z200Btn").addEventListener("click", () => setZoom(2.0));
+document.getElementById("z400Btn").addEventListener("click", () => setZoom(4.0));
+document.getElementById("loupeToggle").addEventListener("click", (e) => {
+  loupeEnabled = !loupeEnabled;
+  e.target.textContent = loupeEnabled ? "Loupe ON" : "Loupe OFF";
+  loupe.style.display = loupeEnabled ? "block" : "none";
+  draw();
+});
+
+document.getElementById("resetBtn").addEventListener("click", () => {
+  if (!confirm(`Clear all ${Object.keys(state.annotations[state.view]).length} clicks in ${state.view}?`)) return;
+  state.annotations[state.view] = {};
+  state.activeLandmark = WORLD_POINTS[0][0];
+  renderSidebar();
+  updateProgress();
+  updateActiveInfo();
+  draw();
+});
+
+document.getElementById("saveBtn").addEventListener("click", () => {
+  const out = {
+    schema_version: "1",
+    world_points_mm: Object.fromEntries(WORLD_POINTS.map(([id, world, label]) => [
+      id, (world[0] === null
+        ? { X: null, Y: null, Z: null, line_tag: world[3], label }
+        : { X: world[0], Y: world[1], Z: world[2], label })
+    ])),
+    views: Object.fromEntries(Object.entries(VIEWS).map(([k, v]) => [k, { file: v.file, W: v.W, H: v.H }])),
+    annotations: state.annotations,
+  };
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "annotations.json";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById("loadFile").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (data.annotations) {
+        state.annotations = { anna: {}, sophia: {}, valentine: {}, kinect_color: {} };
+        for (const v of Object.keys(VIEWS)) {
+          state.annotations[v] = data.annotations[v] || {};
+        }
+        renderSidebar();
+        updateProgress();
+        updateActiveInfo();
+        draw();
+      }
+    } catch (err) { alert("Failed to load JSON: " + err.message); }
+  };
+  reader.readAsText(file);
+});
+
+// ─── Keyboard ──────────────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  const views = Object.keys(VIEWS);
+  if (e.key >= "1" && e.key <= "4") {
+    const idx = parseInt(e.key) - 1;
+    if (idx < views.length) switchView(views[idx]);
+  } else if (e.key === "[" || e.key === "]") {
+    const order = WORLD_POINTS.map(p => p[0]);
+    const curIdx = order.indexOf(state.activeLandmark);
+    const step = e.key === "]" ? 1 : -1;
+    state.activeLandmark = order[(curIdx + step + order.length) % order.length];
+    renderSidebar();
+    updateActiveInfo();
+    draw();
+  } else if (e.key === "+" || e.key === "=") {
+    const cx = state.cursor.cx ?? cv.width / 2;
+    const cy = state.cursor.cy ?? cv.height / 2;
+    setZoom(state.zoom * 1.5, cx, cy);
+  } else if (e.key === "-" || e.key === "_") {
+    const cx = state.cursor.cx ?? cv.width / 2;
+    const cy = state.cursor.cy ?? cv.height / 2;
+    setZoom(state.zoom / 1.5, cx, cy);
+  } else if (e.key === "0") {
+    setZoom(1.0);
+  } else if (e.key.toLowerCase() === "l") {
+    document.getElementById("loupeToggle").click();
+  } else if (e.key === "Escape") {
+    // no-op
+  }
+});
+
+// ─── Boot ──────────────────────────────────────────────────────────────────
+(async function init() {
+  resizeCanvas();
+  await switchView("anna");
+})();
+</script>
+</body>
+</html>

@@ -70,13 +70,21 @@ let _lastWindSpeed = -1;
 const patchKeys = Object.keys(PATCH_PARAMS);
 
 /** Parse a 6-digit hex color string to [r, g, b]. */
+// Memoized: the draw loop calls this 6000+ times per frame on the same handful
+// of patch hex strings, so parsing them on every call was a measurable hot
+// spot in fire mode where Layer 1 + Layer 8 are both full-grid sweeps.
+const _hexCache = new Map();
 function hexToRgb(hex) {
+  let v = _hexCache.get(hex);
+  if (v) return v;
   const h = hex.replace('#', '');
-  return [
+  v = [
     parseInt(h.slice(0, 2), 16),
     parseInt(h.slice(2, 4), 16),
     parseInt(h.slice(4, 6), 16),
   ];
+  _hexCache.set(hex, v);
+  return v;
 }
 
 /** Lerp a color toward its luminance (desaturate). factor=1 full color, 0=grayscale. */
@@ -311,6 +319,8 @@ const sketch = (p) => {
     simState.controls = controls;
     // Keep window.mosaicControls as a backward-compat alias for standalone builds
     window.mosaicControls = controls;
+    // Expose simState so the φ panel can read parcelBounds for the cell-size readout.
+    window.simState = simState;
     updateElevations(); // apply initial DEM from controls
 
     // Phi panel
@@ -464,7 +474,7 @@ const sketch = (p) => {
   };
 
   p.draw = () => {
-    p.background(18, 18, 24);
+    p.background(250, 250, 248);
 
     // ── Network zoom mode ──────────────────────────────────────────────────
     if (networkZoom) {
@@ -535,7 +545,10 @@ const sketch = (p) => {
     }
 
     // ── Layer 1b: Phi cluster overlay (giant cluster = coral, others = muted) ──
-    {
+    // Skipped in fire mode — phi-clustering is a hydrology / connectivity readout,
+    // not relevant once the fire is running, and the full-grid sweep here was
+    // measurably slowing the fire-mode draw loop.
+    if (!fireSim) {
       const overlay = getClusterOverlay();
       if (overlay.clusterMap && viewMode === 'design') {
         p.noStroke();
@@ -1254,12 +1267,23 @@ function onSelectionChanged() {
     }
   }
 
+  // If the user selects cells AFTER the main-grid fire has already finished,
+  // the worker isn't dispatching anymore — so checkFireArrival would never
+  // fire for the new selection. Trigger it manually so the zoom panel picks
+  // up the already-burned state immediately.
+  const triggerArrivalCheck = () => {
+    if (_zoomPanel && selectedCells.length > 0 && fireState && _fireTickCount > 0) {
+      _zoomPanel.checkFireArrival(fireState, selectedCells, COLS, ROWS, _fireTickCount);
+    }
+  };
+
   const bounds = getSelectedBounds();
   if (!bounds) {
     // No parcel bounds — build synthetic grid-based graph for the zoom panel
     if (_zoomPanel && selectedCells.length > 0) {
       const synth = buildSyntheticZoomGraph();
       _zoomPanel.setFeatureData(synth, false);
+      triggerArrivalCheck();
     } else {
       _siteFeatureResult = null;
       if (_zoomPanel) _zoomPanel.setFeatureData(null, false);
@@ -1270,10 +1294,14 @@ function onSelectionChanged() {
   if (key === _lastFetchKey && _siteFeatureResult) {
     // Already fetched — just update zoom panel with existing data
     if (_zoomPanel) _zoomPanel.setFeatureData(_siteFeatureResult, _hasSiteFeatures());
+    triggerArrivalCheck();
     return;
   }
   _lastFetchKey = key;
   triggerFetch(bounds);
+  // Re-check arrival once the fetch resolves; without this, even with a real
+  // parcel + features the panel would miss a completed fire on first load.
+  triggerArrivalCheck();
 }
 
 function _hasSiteFeatures() {

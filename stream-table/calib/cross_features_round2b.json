@@ -1,0 +1,10 @@
+{
+  "exported_at": "2026-04-17T21:15:56.905Z",
+  "timestamp_moment": "clack+60s",
+  "n_features": 2,
+  "note": "Round 2b — first 2 features at clack+60s flow frames, all 4 views clicked. More to follow.",
+  "features": [
+    {"name": "feature_1", "clicks_per_phone": {"anna": [343.59, 137.79], "valentine": [567.51, 576.54], "sophia": [642.79, 346.82], "kinect": [605.15, 581.98]}},
+    {"name": "feature_2", "clicks_per_phone": {"anna": [162.14, 596.49], "valentine": [448.79, 864.82], "sophia": [448.79, 552.14], "kinect": [425.63, 1000.79]}}
+  ]
+}

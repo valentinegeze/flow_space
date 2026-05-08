@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Land Mosaic Flow Model</title>
 
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+
   <!-- p5.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
 
@@ -19,110 +24,60 @@
   <!-- Chart.js (for Soil Study radar chart) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      width: 100%; height: 100%; overflow: hidden;
-      background: #0f0f12;
-      font-family: system-ui, -apple-system, sans-serif;
-    }
-
-    /* ── Tab bar ── */
-    #tab-bar {
-      position: fixed; top: 0; left: 0; right: 0; height: 36px;
-      background: rgba(12, 12, 18, 0.98);
-      border-bottom: 1px solid rgba(255,255,255,0.09);
-      display: flex; align-items: center; gap: 2px; padding: 0 10px;
-      z-index: 10000;
-    }
-    .tab-btn {
-      padding: 4px 15px; background: transparent;
-      border: 1px solid transparent; border-radius: 5px;
-      color: #777; font-size: 12px; cursor: pointer;
-      transition: all 0.15s; font-family: inherit;
-    }
-    .tab-btn:hover { color: #ccc; background: rgba(255,255,255,0.05); }
-    .tab-btn.active {
-      background: rgba(184,224,74,0.1);
-      border-color: rgba(184,224,74,0.35);
-      color: #b8e04a;
-    }
-    .tab-divider {
-      width: 1px; height: 16px; background: rgba(255,255,255,0.1); margin: 0 4px;
-    }
-    #tab-title {
-      margin-left: 8px; font-size: 12px; color: #555;
-      font-style: italic; letter-spacing: 0.02em;
-    }
-
-    /* ── View containers ── */
-    #mosaic-container, #site-analysis-container, #stream-table-container, #soil-study-container {
-      position: fixed;
-      top: 36px; left: 0; right: 0; bottom: 0;
-    }
-
-    /* Existing mosaic layout */
-    #mosaic-container {
-      display: flex;
-      align-items: center;
-      justify-content: flex-start;
-      padding-left: 300px;
-      z-index: 1;
-    }
-    #mosaic-container canvas {
-      display: block; position: relative; z-index: 0;
-    }
-    /* Zoom panel slide-in */
-    #zoom-panel {
-      transition: width 200ms ease, min-width 200ms ease;
-    }
-
-    /* Site analysis fills the pane */
-    #site-analysis-container {
-      display: none;
-      z-index: 1;
-    }
-
-    #stream-table-container {
-      display: none;
-      z-index: 1;
-    }
-
-    #soil-study-container {
-      display: none;
-      z-index: 1;
-    }
-  </style>
+  <!-- Theme -->
+  <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <!-- Tab bar -->
-  <div id="tab-bar">
-    <button class="tab-btn active" data-tab="mosaic">Mosaic</button>
-    <div class="tab-divider"></div>
-    <button class="tab-btn" data-tab="site">&#9672; Site Analysis</button>
-    <div class="tab-divider"></div>
-    <button class="tab-btn" data-tab="stream-table">Stream Table</button>
-    <div class="tab-divider"></div>
-    <button class="tab-btn" data-tab="soil-study">Soil Study</button>
-    <span id="tab-title">Land Mosaic Flow Model</span>
+  <!-- Step navigation -->
+  <div id="step-bar">
+    <button class="step-btn active unlocked" data-step="site">
+      <span class="step-num">1</span>Delineate Site
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="mosaic">
+      <span class="step-num">2</span>Model Fire
+    </button>
+    <div class="step-connector"></div>
+    <button class="step-btn" data-step="soil-study">
+      <span class="step-num">3</span>Analyze Burn Scar
+    </button>
+    <span id="step-title">Land Mosaic Flow Model</span>
   </div>
 
-  <!-- Mosaic simulation view -->
-  <div id="mosaic-container"></div>
+  <!-- Entry fork: pick between delineating a real parcel or jumping straight in
+       with a randomized landscape. Sits above Step 1 and dismisses once the user
+       picks a path. -->
+  <div id="entry-fork" class="entry-fork">
+    <div class="entry-fork-inner">
+      <div class="entry-fork-title">Where do you want to start?</div>
+      <div class="entry-fork-cards">
+        <button class="entry-fork-card" data-fork="delineate">
+          <div class="entry-fork-card-num">A</div>
+          <div class="entry-fork-card-title">Delineate a site</div>
+          <div class="entry-fork-card-body">Draw a parcel on a map, pull NLCD land-cover data, and run the fire model on a real landscape.</div>
+        </button>
+        <button class="entry-fork-card" data-fork="randomize">
+          <div class="entry-fork-card-num">B</div>
+          <div class="entry-fork-card-title">Randomize a landscape</div>
+          <div class="entry-fork-card-body">Skip the map. Generate a synthetic patch mosaic and go straight to the fire model.</div>
+        </button>
+      </div>
+    </div>
+  </div>
 
-  <!-- Site analysis view (Leaflet map + parcel workflow) -->
+  <!-- Step 1: Delineate Site -->
   <div id="site-analysis-container"></div>
 
-  <!-- Stream Table: percolation explorer + empirical upload -->
-  <div id="stream-table-container"></div>
+  <!-- Step 2: Model Fire -->
+  <div id="mosaic-container"></div>
 
-  <!-- Soil Study: Paradise CA / Camp Fire case study -->
+  <!-- Step 3: Analyze Burn Scar -->
   <div id="soil-study-container"></div>
 
   <!-- Main simulation sketch -->
   <script type="module" src="./sketch.js"></script>
 
-  <!-- Tab switching -->
+  <!-- Step switching -->
   <script type="module">
     import { initTabs } from './tabs.js';
     initTabs();

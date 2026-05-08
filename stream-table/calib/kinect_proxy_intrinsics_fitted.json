@@ -1,0 +1,122 @@
+{
+  "fx": 909.3337500000001,
+  "fy": 909.4673437499998,
+  "cx": 544.13625,
+  "cy": 958.4109375000002,
+  "W": 1080,
+  "H": 1920,
+  "rotation_from_native": "ccw",
+  "crop_top_bottom_native_px": 384,
+  "scale_cropped_to_scaled": 0.46875,
+  "mean_residual_px": 7.197080410386973e-14,
+  "max_residual_px": 1.6077746776921858e-13,
+  "per_feature": [
+    {
+      "name": "r2b_1",
+      "proxy_pixel": [
+        605.15,
+        581.98
+      ],
+      "native_pixel": [
+        2854.442666666667,
+        1674.9866666666667
+      ],
+      "depth_mm": 809.4254150390625,
+      "P_native_mm": [
+        335.02331877376,
+        54.31018030161047,
+        809.4254150390625
+      ],
+      "P_proxy_mm": [
+        54.31018030161047,
+        -335.02331877376,
+        809.4254150390625
+      ]
+    },
+    {
+      "name": "r2b_2",
+      "proxy_pixel": [
+        425.63,
+        1000.79
+      ],
+      "native_pixel": [
+        1960.9813333333334,
+        1292.0106666666666
+      ],
+      "depth_mm": 761.7171020507812,
+      "P_native_mm": [
+        -35.49424495224365,
+        -99.26854394759401,
+        761.7171020507812
+      ],
+      "P_proxy_mm": [
+        -99.26854394759401,
+        35.49424495224365,
+        761.7171020507812
+      ]
+    },
+    {
+      "name": "r2c_1",
+      "proxy_pixel": [
+        414.05,
+        726.12
+      ],
+      "native_pixel": [
+        2546.9440000000004,
+        1267.3066666666668
+      ],
+      "depth_mm": 763.2984008789062,
+      "P_native_mm": [
+        194.957303690886,
+        -109.19492056831012,
+        763.2984008789062
+      ],
+      "P_proxy_mm": [
+        -109.19492056831012,
+        -194.957303690886,
+        763.2984008789062
+      ]
+    },
+    {
+      "name": "r2c_3",
+      "proxy_pixel": [
+        356.14,
+        1506.63
+      ],
+      "native_pixel": [
+        881.8559999999998,
+        1143.7653333333333
+      ],
+      "depth_mm": null
+    },
+    {
+      "name": "r2c_4",
+      "proxy_pixel": [
+        286.65,
+        595.58
+      ],
+      "native_pixel": [
+        2825.4293333333335,
+        995.52
+      ],
+      "depth_mm": 742.4222412109375,
+      "P_native_mm": [
+        296.18848840543177,
+        -210.2237146768167,
+        742.4222412109375
+      ],
+      "P_proxy_mm": [
+        -210.2237146768167,
+        -296.18848840543177,
+        742.4222412109375
+      ]
+    }
+  ],
+  "method": "depth_anchored_K_fit",
+  "notes": [
+    "Empirically fitted Kinect color-proxy intrinsic.",
+    "3D anchors come from depth, lifted via factory color<->depth registration.",
+    "This K is for the proxy frame (W x H portrait); load it in pair_tune.html in place of the buggy non-uniform scaling of the factory color intrinsic.",
+    "Used 4/5 cross-features."
+  ]
+}

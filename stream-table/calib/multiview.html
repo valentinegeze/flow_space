@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Multiview — table view + video</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; background: #08080f; color: #ddd;
+               font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; }
+  /* height: 100% (not 100vh) so the layout tracks the iframe's content area
+     when embedded in final.html — 100vh resolves to the outer viewport in
+     some browsers and pushes the #controls row below the visible region. */
+  .app { display: flex; flex-direction: column; height: 100%; }
+  #viewport { flex: 1 1 0; position: relative; min-height: 0; overflow: hidden; }
+  /* Pin the canvas to the viewport's box so its intrinsic bitmap size (set by
+     renderer.setSize) can't push #viewport taller than its flex slot, which
+     would shove #controls below the visible iframe area. */
+  #viewport canvas { display: block; width: 100% !important; height: 100% !important; }
+  #info { position: absolute; top: 12px; left: 16px; font-size: 11px; color: #888;
+          pointer-events: none; }
+  #info strong { color: #ffd43b; letter-spacing: 0.04em; text-transform: uppercase;
+                 margin-right: 8px; }
+  #help { position: absolute; bottom: 12px; left: 16px; font-size: 10px; color: #555;
+          line-height: 1.6; pointer-events: none;
+          font-family: 'SF Mono', Menlo, monospace; }
+  #help kbd { background: #1a1a2a; padding: 0 4px; border-radius: 3px;
+              border: 1px solid #2a2a3a; color: #888; font-family: inherit; }
+  #controls { background: #0d0d14; border-top: 1px solid #1a1a2e;
+              padding: 10px 16px; display: flex; align-items: center; gap: 12px;
+              font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+              flex: 0 0 auto; flex-wrap: wrap; }
+  #controls input[type="range"]#scrubber {
+    flex: 1 1 200px; min-width: 140px; height: 4px; accent-color: #c05030;
+    cursor: pointer;
+  }
+  #controls #timecode { color: #aaa; min-width: 78px; text-align: right;
+                        font-variant-numeric: tabular-nums; }
+  #controls button {
+    background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px;
+    padding: 5px 11px; cursor: pointer; font-size: 11px; font-family: inherit;
+  }
+  #controls button:hover { border-color: #ffd43b; color: #ffd43b; }
+  #controls button.active { background: #c05030; border-color: #c05030; color: #fff; }
+  #controls button.play { background: #c05030; border-color: #c05030; color: #fff; min-width: 36px; }
+  #controls button.play:hover { background: #d86040; border-color: #d86040; }
+  #controls .label { color: #667; }
+  #controls .sep { flex: 1; }
+
+  /* Mount-tuning panel — fixed top-right, collapsible. Sliders live-update
+     KINECT_MOUNT and rebuild the scene-from-kinect transform on each move. */
+  #mountPanel { position: absolute; top: 10px; right: 10px; z-index: 5;
+                background: rgba(13, 13, 20, 0.92); border: 1px solid #2a2a3a;
+                border-radius: 6px; padding: 8px 10px;
+                font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+                color: #ddd; width: 250px; user-select: none;
+                box-shadow: 0 4px 14px rgba(0,0,0,0.4); }
+  #mountPanel .panel-header { display: flex; justify-content: space-between;
+                              align-items: center; padding-bottom: 4px; }
+  #mountPanel .panel-title { color: #ffd43b; font-size: 9px; letter-spacing: 0.08em;
+                             text-transform: uppercase; font-weight: 600; }
+  #mountPanel .toggle-btn { background: none; border: none; color: #888; cursor: pointer;
+                            font-size: 14px; line-height: 1; padding: 0 4px; font-family: inherit; }
+  #mountPanel .toggle-btn:hover { color: #ffd43b; }
+  #mountPanel select { background: #1a1a1a; color: #ddd; border: 1px solid #444;
+                       border-radius: 3px; padding: 2px 6px; font-size: 10.5px;
+                       font-family: inherit; cursor: pointer; flex: 1; margin: 0 6px; }
+  #mountPanel select:hover { border-color: #ffd43b; }
+  #mountPanel.collapsed .panel-body { display: none; }
+  #mountPanel.collapsed { padding: 6px 10px; }
+  .slider-row { display: grid; grid-template-columns: 46px 1fr 56px;
+                gap: 6px; align-items: center; margin-top: 5px; }
+  .slider-row label { color: #888; font-size: 10px; }
+  .slider-row input[type=range] { width: 100%; accent-color: #c05030; }
+  .slider-row .val { color: #9cf; font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+  .slider-group-label { color: #667; font-size: 9px; letter-spacing: 0.06em;
+                        text-transform: uppercase; margin-top: 8px; padding-top: 4px;
+                        border-top: 1px solid #1f1f2a; }
+  #mountPanel .panel-footer { margin-top: 10px; display: flex; gap: 6px; }
+  #mountPanel .panel-footer button { flex: 1; background: #2a2a2a; color: #ddd;
+                                     border: 1px solid #444; border-radius: 4px;
+                                     padding: 5px 8px; cursor: pointer; font-size: 10px;
+                                     font-family: inherit; }
+  #mountPanel .panel-footer button:hover { border-color: #ffd43b; color: #ffd43b; }
+  #mountPanel .panel-footer button.copied { background: #2a4a2a; border-color: #6a9; color: #6a9; }
+  #mountPanel .panel-footer button.reset { background: #401515; border-color: #602020; color: #e88; }
+  #mountPanel .panel-footer button.reset:hover { border-color: #c05030; color: #c05030; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div id="viewport">
+    <div id="info"><strong>Multiview</strong>fly between camera POVs · video on the bed</div>
+    <div id="help">click a cam button → fly to its POV · drag = orbit · scroll = zoom · right-drag = pan · <kbd>[</kbd>/<kbd>]</kbd> rotate bed texture · <kbd>x</kbd>/<kbd>y</kbd> flip · <kbd>\</kbd> reset</div>
+
+    <!-- Mount-tuning panel. Each slider mutates KINECT_MOUNT and rebuilds the
+         scene-from-kinect transform. The Copy button writes a JS literal of
+         the current mount block to the clipboard so it can be pasted back as
+         the new default in the source. -->
+    <div id="mountPanel">
+      <div class="panel-header">
+        <span class="panel-title">tune</span>
+        <select id="tuneTarget" title="pick what these sliders mutate">
+          <option value="KINECT_MOUNT">KINECT_MOUNT</option>
+          <option value="anna">anna · offset</option>
+          <option value="sophia">sophia · offset</option>
+          <option value="valentine">valentine · offset</option>
+        </select>
+        <button class="toggle-btn" id="mountCollapse" title="collapse">−</button>
+      </div>
+      <div class="panel-body">
+        <div class="slider-group-label" id="posGroupLabel">position (mm, flume frame)</div>
+        <div class="slider-row"><label>X</label><input type="range" id="m_x"><span class="val" id="m_x_val"></span></div>
+        <div class="slider-row"><label>Y</label><input type="range" id="m_y"><span class="val" id="m_y_val"></span></div>
+        <div class="slider-row"><label>Z</label><input type="range" id="m_z"><span class="val" id="m_z_val"></span></div>
+        <div class="slider-group-label" id="rotGroupLabel">orientation (deg)</div>
+        <div class="slider-row"><label>yaw</label><input   type="range" id="m_yaw"  ><span class="val" id="m_yaw_val"  ></span></div>
+        <div class="slider-row"><label>pitch</label><input type="range" id="m_pitch"><span class="val" id="m_pitch_val"></span></div>
+        <div class="slider-row"><label>roll</label><input  type="range" id="m_roll" ><span class="val" id="m_roll_val" ></span></div>
+        <div class="panel-footer">
+          <button id="mountReset" class="reset" title="restore defaults for the active target">Reset</button>
+          <button id="mountCopy" title="copy the active target's JS literal to the clipboard">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="controls">
+    <button id="playBtn" class="play">▶</button>
+    <input type="range" id="scrubber" min="0" max="1000" step="1" value="0" title="scrub all videos in sync">
+    <span id="timecode">0:00.0 / 0:00.0</span>
+    <span class="label">fly to POV →</span>
+    <button class="cam-btn" data-cam="kinect">kinect</button>
+    <button class="cam-btn" data-cam="anna">anna</button>
+    <button class="cam-btn" data-cam="sophia">sophia</button>
+    <button class="cam-btn" data-cam="valentine">valentine</button>
+    <span class="sep"></span>
+    <span class="label" id="status">loading…</span>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// =============================================================================
+// Config
+// =============================================================================
+const FLUME_W = 838;
+const FLUME_L = 1930;
+
+// Proxy mp4s extracted from the originals (smaller, browser-friendly). All are rotated
+// −90° on the GPU because the proxies' rotation metadata was stripped during extraction.
+// kinect is the overhead view — probably the most useful first-glance, since its
+// content actually corresponds to a top-down look at the rectangle.
+const VIDEO_PROXIES = {
+  kinect:    '../videos/proxies/kinect_color.mp4',
+  anna:      '../videos/proxies/AM_03-11_01_wide-inlet_no-obstacles.mp4',
+  sophia:    '../videos/proxies/skm_0311_01_wide_no-obs.mp4',
+  valentine: '../videos/proxies/vmg_03-11_01.mp4',
+};
+// Order of preference for the initial active cam if multiple are ready.
+const INITIAL_CAM_PREFERENCE = ['kinect', 'valentine', 'sophia', 'anna'];
+
+// =============================================================================
+// Scene
+// =============================================================================
+const wrap = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x06060c);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+wrap.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 1, 50000);
+camera.position.set(2200, 1800, 2400);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(FLUME_W / 2, 0, -FLUME_L / 2);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(1500, 3000, 1500);
+scene.add(dirLight);
+
+// =============================================================================
+// Flume rim wireframe — gold rectangle on the X-Z plane at Y=0.
+//   rim_NW=(0,0,0) · rim_NE=(838,0,0) · rim_SE=(838,0,-1930) · rim_SW=(0,0,-1930)
+// =============================================================================
+scene.add(new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0,        0, 0),
+    new THREE.Vector3(FLUME_W,  0, 0),
+    new THREE.Vector3(FLUME_W,  0, -FLUME_L),
+    new THREE.Vector3(0,        0, -FLUME_L),
+    new THREE.Vector3(0,        0, 0),
+  ]),
+  new THREE.LineBasicMaterial({ color: 0xffd43b }),
+));
+
+// Faint ground grid stretching past the flume so orbit feels grounded.
+const grid = new THREE.GridHelper(4000, 16, 0x333344, 0x191926);
+grid.position.set(FLUME_W / 2, -1, -FLUME_L / 2);
+scene.add(grid);
+
+// World-origin axes (R=X, G=Y, B=Z), 300 mm long.
+scene.add(new THREE.AxesHelper(300));
+
+// =============================================================================
+// Probe each proxy with a HEAD request before wiring it up. This lets us:
+//   1. Hide / disable buttons whose proxy isn't ready (e.g. kinect_color.mp4 is
+//      still being extracted in the background).
+//   2. Pick the best initial active cam based on what's actually available.
+// We require at least 1 MB of content to call a proxy "ready" — guards against
+// catching ffmpeg mid-write (the file exists but holds only the moov atom header).
+// =============================================================================
+async function probeProxy(src) {
+  try {
+    const r = await fetch(src, { method: 'HEAD' });
+    if (!r.ok) return false;
+    const sz = parseInt(r.headers.get('Content-Length') || '0', 10);
+    return sz > 1_000_000;
+  } catch (e) {
+    return false;
+  }
+}
+
+const ready = {};
+await Promise.all(Object.entries(VIDEO_PROXIES).map(async ([label, src]) => {
+  ready[label] = await probeProxy(src);
+}));
+
+// =============================================================================
+// Per-cam bed-texture transform. Each phone was held in a different physical
+// orientation when capturing, and the proxy extraction strips rotation metadata,
+// so a single global UV rotation makes some videos line up with the rim and
+// others end up rotated/flipped. Each cam now gets its own (rotation + flip)
+// stored here. Press [ / ] to rotate the active cam's bed texture by ±90°,
+// X / Y to toggle the flips. Values persist via localStorage.
+// =============================================================================
+const BED_TEX_DEFAULTS = {
+  kinect:    { rot_deg: -90, flipX: false, flipY: false },
+  anna:      { rot_deg: -90, flipX: false, flipY: false },
+  sophia:    { rot_deg: -90, flipX: false, flipY: false },
+  valentine: { rot_deg: -90, flipX: false, flipY: false },
+};
+const BED_TEX = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem('multiview-bed-tex-v1') || '{}');
+    const out = {};
+    for (const k of Object.keys(BED_TEX_DEFAULTS)) {
+      out[k] = { ...BED_TEX_DEFAULTS[k], ...(saved[k] || {}) };
+    }
+    return out;
+  } catch (e) { return JSON.parse(JSON.stringify(BED_TEX_DEFAULTS)); }
+})();
+function saveBedTex() { localStorage.setItem('multiview-bed-tex-v1', JSON.stringify(BED_TEX)); }
+
+function applyTexTransform(label) {
+  const tex = textures[label];
+  if (!tex) return;
+  const t = BED_TEX[label];
+  tex.center.set(0.5, 0.5);
+  tex.rotation = t.rot_deg * Math.PI / 180;
+  tex.repeat.set(t.flipX ? -1 : 1, t.flipY ? -1 : 1);
+  tex.matrixAutoUpdate = true;
+  tex.needsUpdate = true;
+}
+
+// =============================================================================
+// Video elements + textures, only for cams whose proxy is ready. Only the active
+// one decodes at a time — three+ parallel decodes was the slowness before.
+// =============================================================================
+const videos = {};
+const textures = {};
+for (const [label, src] of Object.entries(VIDEO_PROXIES)) {
+  if (!ready[label]) continue;
+  const v = document.createElement('video');
+  v.src = src;
+  v.crossOrigin = 'anonymous';
+  v.preload = 'auto';
+  v.playsInline = true;
+  v.muted = true;
+  v.loop = true;
+  v.style.display = 'none';
+  // If decoding fails (e.g. partial mp4 with moov atom missing because ffmpeg is still
+  // running), mark the cam unavailable and fall back to the next one in preference.
+  v.addEventListener('error', () => {
+    ready[label] = false;
+    const btn = document.querySelector(`.cam-btn[data-cam="${label}"]`);
+    if (btn) {
+      btn.disabled = true; btn.style.opacity = '0.4'; btn.style.cursor = 'not-allowed';
+      btn.title = 'proxy decoded with errors — likely mid-encode; reload after it completes';
+    }
+    if (activeCam === label) {
+      const fallback = INITIAL_CAM_PREFERENCE.find(l => ready[l]);
+      if (fallback) setActiveCam(fallback);
+    }
+  });
+  document.body.appendChild(v);
+  videos[label] = v;
+
+  const tex = new THREE.VideoTexture(v);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  textures[label] = tex;
+  applyTexTransform(label);    // sets center / rotation / repeat from BED_TEX
+}
+
+// Disable buttons for cams whose proxy isn't ready yet (e.g. kinect mid-encode).
+for (const btn of document.querySelectorAll('.cam-btn')) {
+  if (!ready[btn.dataset.cam]) {
+    btn.disabled = true;
+    btn.style.opacity = '0.4';
+    btn.style.cursor = 'not-allowed';
+    btn.title = `proxy not ready — ../videos/proxies/${VIDEO_PROXIES[btn.dataset.cam].split('/').pop()} missing or still encoding`;
+  }
+}
+
+// =============================================================================
+// Initial active cam: first available from preference list. Kinect first if its
+// proxy is done, else fall back to whichever phone proxy is on disk.
+// =============================================================================
+const initialCam = INITIAL_CAM_PREFERENCE.find(label => ready[label]);
+
+// =============================================================================
+// Video plane — one quad sized to the flume rectangle, laid flat at Y=0.
+//   PlaneGeometry spawns in the X-Y plane facing +Z; rotate −90° about X so it lies
+//   in X-Z facing +Y. Place it 1 mm above the rim line to avoid z-fighting.
+// =============================================================================
+const videoMat = new THREE.MeshBasicMaterial({
+  map: initialCam ? textures[initialCam] : null,
+  color: initialCam ? 0xffffff : 0x202030,   // grey if no proxies ready
+  side: THREE.DoubleSide,
+});
+const videoPlane = new THREE.Mesh(new THREE.PlaneGeometry(FLUME_W, FLUME_L), videoMat);
+videoPlane.rotation.x = -Math.PI / 2;
+videoPlane.position.set(FLUME_W / 2, 1, -FLUME_L / 2);
+scene.add(videoPlane);
+
+// =============================================================================
+// Phone billboards
+//   Each phone with a kinect-anchored pose gets a small frustum + image-plane group
+//   placed at its solved 3D position, with the phone's video texture on the plane.
+//   The poses are in the Kinect's CV frame (X right, Y down, Z forward), so we lift
+//   them into the scene's Three.js frame via an assumed Kinect mount:
+//     - Kinect optical center 770 mm above the rim's centre.
+//     - Kinect optical axis vertical (CV +Z → scene −Y).
+//     - Kinect image-down (CV +Y) toward the rectangle's "north" (rim_NW corner side).
+//     - Kinect image-right (CV +X) toward the rectangle's "east" (rim_NE corner side).
+//   This is a guess — if the phone billboards land in implausible places we'll
+//   correct the mount mapping. The rectangle itself is unaffected.
+// =============================================================================
+const PHONE_LABELS = ['anna', 'sophia', 'valentine'];
+const KINECT_HEIGHT_MM = 770;
+const CAM_COLORS = { anna: 0xff5555, sophia: 0x55aaff, valentine: 0x55ff99 };
+
+// =============================================================================
+// Kinect-to-flume mount.
+// =============================================================================
+// The kinect-anchored phone poses are correct *relative to the Kinect*. To put
+// them in the flume frame, we need exactly one rigid transform: where is the
+// Kinect's optical center in the flume frame, and what's its orientation?
+//
+// Position: derived from the lab-table tape measurements that already live in
+// kinect_align.html's TAPE constants. The flume sits inside a larger lab table;
+// "kinect_along_*" is the Kinect's position on the lab table (inches → mm),
+// and the flume is centered laterally inside the table:
+//
+//     pos_X_flume = kinect_along_wide_mm  -  (table_wide_mm  - FLUME_W) / 2
+//                 = 482.6                 -  (977.9          - 838    ) / 2
+//                 = 412.65 mm
+//     pos_Y_flume = kinect_along_long_mm  -  (table_long_mm  - FLUME_L) / 2
+//                 = 1460.5                -  (3048           - 1930   ) / 2
+//                 = 901.5 mm
+//     pos_Z_flume = 30.25 in × 25.4 mm/in = 768.35 mm  (depth median 772 mm
+//                                                       confirms; using 770)
+//
+// Compare the previous hand-rolled assumption (Kinect at the *rim center*
+// (419, 965, 770)) — the corrected position is 6 mm west and 64 mm upstream.
+//
+// Orientation: defaults below (yaw = pitch = roll = 0) reproduce the exact
+// rotation block from the previous M_scene_from_kinect_cv: image-right is
+// flume +X, image-down is flume -Y (toward the upstream inlet end), optical
+// axis is straight down (-flume_Z). All three angles are perturbations from
+// that base, applied in yaw → pitch → roll order (see buildMountTransform).
+const KINECT_MOUNT = {
+  pos_flume_mm: [412.65, 901.5, 770],   // optical centre in flume coords
+  yaw_deg:   0,    // about flume +Z (vertical, CCW from above)
+  pitch_deg: 0,    // about flume +X after yaw (positive tilts optical axis toward downstream)
+  roll_deg:  0,    // about the optical axis itself (in the cam-local frame)
+};
+
+// Default rotation block: each column is a kinect-CV axis expressed as a
+// flume-frame vector. Stored row-major.
+//   col 0  kinect +X (image right)  -> flume +X (east, along the 838 mm rim)
+//   col 1  kinect +Y (image down)   -> flume -Y (toward the upstream / Y=0 inlet)
+//   col 2  kinect +Z (forward)      -> flume -Z (down, toward the bed)
+// This matches the rotation embedded in the previous M_scene_from_kinect_cv,
+// modulo the M_scene_from_flume coord swap below — so KINECT_MOUNT with all
+// zero perturbations reproduces the previous default rendering, only with a
+// corrected origin.
+const R_DEFAULT_FLUME_FROM_KINECT = [
+   1,  0,  0,
+   0, -1,  0,
+   0,  0, -1,
+];
+
+// PREVIOUS GUESS (deprecated, kept here for diff-ability against this commit):
+//   const M_scene_from_kinect_cv = new THREE.Matrix4().set(
+//     1, 0,  0,  FLUME_W / 2,         // X: rim centre (off by 6 mm)
+//     0, 0, -1,  KINECT_HEIGHT_MM,    // height: same
+//     0, 1,  0, -FLUME_L / 2,         // Y: rim centre (off by 64 mm)
+//     0, 0,  0,  1,
+//   );
+
+// Fixed coordinate-convention swap from the flume world frame (X right, Y forward
+// along the table length, Z up out of the rim plane) to the Three.js scene frame
+// (X right, Y up, Z toward camera). The flume rim wireframe is drawn directly in
+// scene coords with rim_NW at scene origin and rim_SW at scene Z=-FLUME_L, which
+// is exactly this transform applied to (0, 1930, 0).
+const M_scene_from_flume = new THREE.Matrix4().set(
+  1,  0, 0, 0,
+  0,  0, 1, 0,
+  0, -1, 0, 0,
+  0,  0, 0, 1,
+);
+
+// 3×3 row-major rotation helpers, since Three.Matrix4 is overkill for this and
+// composing 3×3 by hand is more legible for the mount-transform derivation.
+function rot3X(rad) {
+  const c = Math.cos(rad), s = Math.sin(rad);
+  return [ 1, 0,  0,
+           0, c, -s,
+           0, s,  c ];
+}
+function rot3Z(rad) {
+  const c = Math.cos(rad), s = Math.sin(rad);
+  return [ c, -s, 0,
+           s,  c, 0,
+           0,  0, 1 ];
+}
+function mul3x3(A, B) {
+  const out = new Array(9).fill(0);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+    let s = 0;
+    for (let k = 0; k < 3; k++) s += A[i*3+k] * B[k*3+j];
+    out[i*3+j] = s;
+  }
+  return out;
+}
+
+// Build the scene-from-kinect-camera 4×4 matrix from a KINECT_MOUNT block.
+//
+// Composition order (yaw-pitch-roll, intrinsic):
+//   R_total_flume_from_kinect = R_yaw_flumeZ · R_pitch_flumeX · R_default · R_roll_camZ
+//
+// Read right-to-left as: first roll about the cam's own +Z (the optical axis),
+// then map cam → flume via R_default, then pitch about flume +X (which is the
+// "east-west" horizontal axis), then yaw about flume +Z (vertical). Each angle
+// thus has a clear physical meaning: roll spins the image, pitch tilts fore/aft,
+// yaw rotates the mount around vertical.
+//
+// Then translate by pos_flume_mm in the flume frame, and finally apply
+// M_scene_from_flume to get a scene-from-kinect 4×4.
+function buildMountTransform(mount) {
+  const yaw   = mount.yaw_deg   * Math.PI / 180;
+  const pitch = mount.pitch_deg * Math.PI / 180;
+  const roll  = mount.roll_deg  * Math.PI / 180;
+  const Rroll  = rot3Z(roll);
+  const Rpitch = rot3X(pitch);
+  const Ryaw   = rot3Z(yaw);
+  const R = mul3x3(Ryaw, mul3x3(Rpitch, mul3x3(R_DEFAULT_FLUME_FROM_KINECT, Rroll)));
+  const [px, py, pz] = mount.pos_flume_mm;
+  const M_flume_from_kinect = new THREE.Matrix4().set(
+    R[0], R[1], R[2], px,
+    R[3], R[4], R[5], py,
+    R[6], R[7], R[8], pz,
+    0, 0, 0, 1,
+  );
+  return M_scene_from_flume.clone().multiply(M_flume_from_kinect);
+}
+
+// =============================================================================
+// kinectFrameGroup — every cam loaded via the kinect-anchored path is added as
+// a CHILD of this group, with its own M_kinect_from_phone applied locally.
+// The group's local transform IS the scene-from-kinect mount; updating it
+// (e.g. from a slider) re-positions every kinect-anchored cam atomically. The
+// group has matrixAutoUpdate left ON so we can use Three.js's standard
+// position/quaternion/scale decomposition.
+// =============================================================================
+const kinectFrameGroup = new THREE.Group();
+kinectFrameGroup.name = 'kinect_frame';
+scene.add(kinectFrameGroup);
+
+// Saved snapshot of the user's tape-derived defaults — used by the "Reset"
+// button to restore the initial mount block after slider tuning.
+const KINECT_MOUNT_DEFAULTS = JSON.parse(JSON.stringify(KINECT_MOUNT));
+
+// Build the mount transform and apply it to kinectFrameGroup. Called once at
+// script load and again on every slider change. Also fires a 'mountchange'
+// CustomEvent so any later UI (e.g. the Stage 3 landmark-pin readout) can
+// re-render its residual without our caring here.
+function applyMountToScene() {
+  const M = buildMountTransform(KINECT_MOUNT);
+  M.decompose(kinectFrameGroup.position, kinectFrameGroup.quaternion, kinectFrameGroup.scale);
+  // Three.js will rebuild kinectFrameGroup.matrix from these on the next render.
+  window.dispatchEvent(new CustomEvent('mountchange', { detail: { ...KINECT_MOUNT } }));
+}
+
+applyMountToScene();
+
+async function loadPhoneIntrinsics() {
+  try {
+    const j = await (await fetch('intrinsics.json')).json();
+    const out = {};
+    for (const p of j.phones || []) {
+      out[p.label] = { fx: p.fx_px, fy: p.fx_px, W: p.W, H: p.H };
+    }
+    return out;
+  } catch (e) { return {}; }
+}
+
+const phoneIntrinsics = await loadPhoneIntrinsics();
+
+// Try a flume-frame pose for `label`. Returns the scene-from-camLocal matrix or
+// null if no pose_<label>_flume.json is on disk / unparseable.
+async function tryLoadFlumePose(label) {
+  let fp;
+  try { fp = await (await fetch(`pose_${label}_flume.json`, { cache: 'no-store' })).json(); }
+  catch (e) { return null; }
+  if (!fp || !fp.R_flume_to_cam || !fp.t_flume_to_cam_mm) return null;
+  const R = fp.R_flume_to_cam, t = fp.t_flume_to_cam_mm;
+  // R is row-major flat-9 in the kinect_align.html schema.
+  const M_cam_from_flume = new THREE.Matrix4().set(
+    R[0], R[1], R[2], t[0],
+    R[3], R[4], R[5], t[1],
+    R[6], R[7], R[8], t[2],
+    0, 0, 0, 1,
+  );
+  const M_flume_from_cam = M_cam_from_flume.clone().invert();
+  return M_scene_from_flume.clone().multiply(M_flume_from_cam);
+}
+
+// Track every cam group we attach so external code (the slider panel, the
+// diagnostic log) can iterate them. Each entry knows whether the cam was
+// placed via the flume-pose path (parented to scene; mount changes don't
+// move it) or the kinect-anchored path (parented to kinectFrameGroup; mount
+// changes drag it along).
+const camRegistry = [];
+
+for (const label of PHONE_LABELS) {
+  if (!ready[label]) continue;
+  const intr = phoneIntrinsics[label];
+  if (!intr) continue;
+
+  // Preferred: a flume-frame pose committed by kinect_align.html. When that's
+  // available the cam is placed directly in scene and is independent of the
+  // mount sliders. Otherwise we use the kinect-anchored pose and parent the
+  // cam to kinectFrameGroup so the sliders move it.
+  let M_scene_from_flume_pose = await tryLoadFlumePose(label);
+  let M_local;            // local transform applied to the cam group
+  let parent;             // scene  OR  kinectFrameGroup
+  let kinectFrameCenter;  // for the diagnostic log; null on the flume path
+
+  if (M_scene_from_flume_pose) {
+    M_local = M_scene_from_flume_pose;
+    parent  = scene;
+    console.info(`multiview pose for "${label}": loaded pose_${label}_flume.json (preferred path)`);
+  } else {
+    let pose;
+    try { pose = await (await fetch(`pose_${label}_kinect_anchored.json`)).json(); }
+    catch (e) { continue; }
+    if (!pose || !pose.R || !pose.t_mm) continue;
+
+    // Pose: X_phone_cv = R · X_kinect_cv + t. The cam group lives in kinect
+    // frame, so we apply M_kinect_from_phone (local) and parent under
+    // kinectFrameGroup (whose matrix IS scene-from-kinect, live-mutable).
+    const R = pose.R, t = pose.t_mm;
+    const M_phone_from_kinect = new THREE.Matrix4().set(
+      R[0][0], R[0][1], R[0][2], t[0],
+      R[1][0], R[1][1], R[1][2], t[1],
+      R[2][0], R[2][1], R[2][2], t[2],
+      0, 0, 0, 1,
+    );
+    M_local = M_phone_from_kinect.clone().invert();   // = M_kinect_from_phone
+    parent  = kinectFrameGroup;
+    kinectFrameCenter = pose.camera_center_kinectFrame_mm;
+  }
+
+  // Per-cam billboard is just a colored sphere + a short direction line along
+  // the cam's +Z axis. The previous textured image-plane was deleted because it
+  // duplicated the bed visually — the bed below shows the active cam's video,
+  // and clicking a cam-btn flies the orbit camera into that cam's POV, so each
+  // cam only needs a marker showing where it physically was.
+  const color = CAM_COLORS[label] || 0xffffff;
+  const group = new THREE.Group();
+  group.name = `cam_${label}`;
+
+  // Optical-center marker.
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(20, 12, 12),
+    new THREE.MeshBasicMaterial({ color }),
+  ));
+
+  // Direction indicator: a short line from the optical center along the cam's
+  // local +Z (forward / look direction), so when orbiting the scene you can
+  // tell which way each cam was pointing.
+  const DIR_LEN_MM = 120;
+  group.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, DIR_LEN_MM),
+    ]),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.7 }),
+  ));
+
+  // Apply the local pose, then add to the chosen parent. World-frame position
+  // = parent.matrixWorld · M_local; for the kinect-anchored path this means
+  // changing kinectFrameGroup's matrix (via sliders) atomically moves every
+  // attached cam, since Three.js recomputes matrixWorld each frame.
+  // Save M_local as the BASE before per-cam offset tuning. applyPhoneOffset
+  // re-derives the cam's matrix from this base every time a slider moves so
+  // tuning is non-destructive.
+  group.applyMatrix4(M_local);
+  parent.add(group);
+  const M_local_base = M_local.clone();
+  // Compute the cam's vertical FOV in degrees from intrinsics. Used by the
+  // fly-around to set THREE.PerspectiveCamera.fov when locking to this cam.
+  const fov_v_deg = 2 * Math.atan(intr.H / (2 * intr.fy)) * 180 / Math.PI;
+  camRegistry.push({ label, group, parent, kinectFrameCenter, fov_v_deg, M_local_base });
+}
+
+// Add a kinect marker too, so all four camera buttons are visualized as
+// colored points. The kinect lives at kinectFrameGroup's local origin; we just
+// drop a yellow sphere there and a short downward direction line. The kinect
+// always sits in kinectFrameGroup, so it tracks the slider tuning.
+{
+  const kColor = 0xffd43b;
+  const kGroup = new THREE.Group();
+  kGroup.name = 'cam_kinect';
+  kGroup.add(new THREE.Mesh(
+    new THREE.SphereGeometry(24, 12, 12),
+    new THREE.MeshBasicMaterial({ color: kColor }),
+  ));
+  // Direction line along kinect-cv +Z (forward, into scene). With the default
+  // mount this lands on flume -Z (downward toward the bed) — i.e. straight down.
+  kGroup.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, 150),
+    ]),
+    new THREE.LineBasicMaterial({ color: kColor, transparent: true, opacity: 0.7 }),
+  ));
+  kinectFrameGroup.add(kGroup);
+
+  // Try to load the fitted kinect-proxy intrinsic for FOV; fall back to a
+  // reasonable default if the file is missing.
+  let kFov = 90;
+  try {
+    const kIntr = await (await fetch('kinect_proxy_intrinsics_fitted.json')).json();
+    if (kIntr && kIntr.fy && kIntr.H) {
+      kFov = 2 * Math.atan(kIntr.H / (2 * kIntr.fy)) * 180 / Math.PI;
+    }
+  } catch (e) { /* keep default */ }
+  camRegistry.push({
+    label: 'kinect', group: kGroup, parent: kinectFrameGroup,
+    kinectFrameCenter: [0, 0, 0], fov_v_deg: kFov,
+    M_local_base: new THREE.Matrix4(),  // identity — kinect IS at kinectFrame origin
+  });
+}
+
+// =============================================================================
+// Per-phone offset blocks. Layered on top of each cam's kinect-anchored pose
+// so the user can nudge each cam's billboard to match what they actually see
+// in the corresponding video without re-solving PnP. Translation is in flume
+// frame (intuitive: matches the rim coords); rotation is in cam-local frame
+// (intuitive: yaw pans the image, pitch tilts, roll spins).
+//
+// Defaults below are NOT zero — they correct for the kinect-anchored PnP's
+// known Y-axis collapse (all three phones converged to mid-length because the
+// Kinect's overhead FOV only had features near the channel middle). Targets
+// come from PROJECT.md §2:
+//   anna       — east rail, upstream end       → flume ≈ (838, 0,    282)
+//   sophia     — downstream end, looking up    → flume ≈ (1049, 1900, 430)
+//   valentine  — downstream end, looking up    → flume ≈ (803, 1900,  582)
+// Each dx/dy is the difference between target and the kinect-anchored solve
+// (which renders at flume (474, 1068, 282) / (1049, 936, 430) / (803, 914, 582)
+// before offsets are applied). Tune further via the panel and copy back here.
+const PHONE_OFFSETS = {
+  anna:      { dx:  360, dy: -1070, dz: 0, dyaw: 0, dpitch: 0, droll: 0 },
+  sophia:    { dx:    0, dy:   965, dz: 0, dyaw: 0, dpitch: 0, droll: 0 },
+  valentine: { dx:    0, dy:   990, dz: 0, dyaw: 0, dpitch: 0, droll: 0 },
+};
+const PHONE_OFFSETS_DEFAULTS = JSON.parse(JSON.stringify(PHONE_OFFSETS));
+
+// 3×3 helpers complementing rot3X / rot3Z / mul3x3 from the mount section.
+function transposeMat3(M) { return [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]]; }
+function applyMat3(M, v)  { return [M[0]*v[0]+M[1]*v[1]+M[2]*v[2],
+                                    M[3]*v[0]+M[4]*v[1]+M[5]*v[2],
+                                    M[6]*v[0]+M[7]*v[1]+M[8]*v[2]]; }
+
+// Live rotation R_total_flume_from_kinect from the current KINECT_MOUNT (same
+// composition as buildMountTransform). R_kinect_from_flume = its transpose.
+function currentRotationFlumeFromKinect() {
+  const yaw   = KINECT_MOUNT.yaw_deg   * Math.PI / 180;
+  const pitch = KINECT_MOUNT.pitch_deg * Math.PI / 180;
+  const roll  = KINECT_MOUNT.roll_deg  * Math.PI / 180;
+  return mul3x3(rot3Z(yaw),
+         mul3x3(rot3X(pitch),
+         mul3x3(R_DEFAULT_FLUME_FROM_KINECT, rot3Z(roll))));
+}
+
+// Re-derive a phone cam's local matrix from its M_local_base + offset block.
+// Composition (right-to-left):
+//   M_local = T_kinect_offset · M_kinect_from_phone_base · R_camlocal_offset
+// where T_kinect_offset is the flume-frame translation expressed in kinect frame
+// (we use the live mount rotation so the flume-frame slider stays "flume-frame"
+// even when the mount has yaw/pitch/roll perturbations), and R_camlocal_offset
+// is intrinsic yaw-pitch-roll about cam +Y / +X / +Z.
+function applyPhoneOffset(camEntry) {
+  if (camEntry.parent !== kinectFrameGroup) return;          // flume-pose path skips
+  if (camEntry.label === 'kinect') return;                   // kinect tunes via KINECT_MOUNT
+  const off = PHONE_OFFSETS[camEntry.label];
+  if (!off || !camEntry.M_local_base) return;
+  const R_kinect_from_flume = transposeMat3(currentRotationFlumeFromKinect());
+  const t_kinect = applyMat3(R_kinect_from_flume, [off.dx, off.dy, off.dz]);
+  const M_R = new THREE.Matrix4()
+    .makeRotationY(off.dyaw  * Math.PI / 180)
+    .multiply(new THREE.Matrix4().makeRotationX(off.dpitch * Math.PI / 180))
+    .multiply(new THREE.Matrix4().makeRotationZ(off.droll  * Math.PI / 180));
+  const M = new THREE.Matrix4().makeTranslation(t_kinect[0], t_kinect[1], t_kinect[2]);
+  M.multiply(camEntry.M_local_base);
+  M.multiply(M_R);
+  M.decompose(camEntry.group.position, camEntry.group.quaternion, camEntry.group.scale);
+}
+
+function applyAllPhoneOffsets() {
+  for (const c of camRegistry) applyPhoneOffset(c);
+}
+
+// Bake PHONE_OFFSETS defaults into the scene at boot so the cams start at the
+// PROJECT.md-derived corrected positions, not the raw kinect-anchored centers.
+applyAllPhoneOffsets();
+
+// Diagnostic helper used at boot and on every slider change. Reads each cam's
+// CURRENT scene-frame and flume-frame center after Three.js has rebuilt
+// matrixWorld, so the printed numbers track the live mount.
+function logCamPositions() {
+  scene.updateMatrixWorld(true);
+  const fmt = v => Array.isArray(v) ? `(${v.map(x => x.toFixed(0)).join(', ')})` : '(?)';
+  for (const { label, group, parent, kinectFrameCenter } of camRegistry) {
+    const sC = new THREE.Vector3();
+    sC.setFromMatrixPosition(group.matrixWorld);
+    const fC = [sC.x, -sC.z, sC.y];   // scene → flume coord swap
+    const path = (parent === scene) ? '_flume.json (preferred)' : 'kinect-anchored × KINECT_MOUNT';
+    const k = kinectFrameCenter ? ` · kinect-frame=${fmt(kinectFrameCenter)} mm` : '';
+    console.info(`multiview "${label}": ${path} · flume center=${fmt(fC)} mm${k}`);
+  }
+}
+logCamPositions();
+
+// =============================================================================
+// Tunable sliders. The same six DOM range inputs serve every "tune target":
+// KINECT_MOUNT (the global Kinect-to-flume rigid transform) or any phone's
+// 6-DOF offset block. Switching the dropdown rebinds get/set/min/max/format
+// on each slider and re-syncs the values shown.
+// =============================================================================
+{
+  const POS_SPAN_MM = 200;
+  // Per-phone offsets need a much wider span than the global mount: the
+  // kinect-anchored PnP collapsed all three phone Y-positions toward mid-length
+  // (where the Kinect's FOV had features to triangulate), so dragging a cam
+  // back to its actual physical end of the table is a ~1 m correction.
+  const PHONE_POS_SPAN_MM = 1500;
+  const PHONE_ROT_SPAN_DEG = 60;        // wider rotation span too; some yaws are clearly off
+
+  // Each tune target is a self-contained config: the six slider bindings,
+  // an onChange (called after the binding mutates the shared state), the
+  // group labels, a reset, and a clipboard literal. The id of each slider
+  // is fixed; we just rebind get/set/min/max/fmt on switch.
+  function mountTarget() {
+    return {
+      label: 'KINECT_MOUNT',
+      posLabel: 'position (mm, flume frame)',
+      rotLabel: 'orientation (deg)',
+      sliders: [
+        { id: 'm_x', get: () => KINECT_MOUNT.pos_flume_mm[0], set: v => KINECT_MOUNT.pos_flume_mm[0] = v,
+          min: KINECT_MOUNT_DEFAULTS.pos_flume_mm[0] - POS_SPAN_MM,
+          max: KINECT_MOUNT_DEFAULTS.pos_flume_mm[0] + POS_SPAN_MM, step: 5, fmt: v => v.toFixed(1) },
+        { id: 'm_y', get: () => KINECT_MOUNT.pos_flume_mm[1], set: v => KINECT_MOUNT.pos_flume_mm[1] = v,
+          min: KINECT_MOUNT_DEFAULTS.pos_flume_mm[1] - POS_SPAN_MM,
+          max: KINECT_MOUNT_DEFAULTS.pos_flume_mm[1] + POS_SPAN_MM, step: 5, fmt: v => v.toFixed(1) },
+        { id: 'm_z', get: () => KINECT_MOUNT.pos_flume_mm[2], set: v => KINECT_MOUNT.pos_flume_mm[2] = v,
+          min: 600, max: 900, step: 5, fmt: v => v.toFixed(1) },
+        { id: 'm_yaw',   get: () => KINECT_MOUNT.yaw_deg,   set: v => KINECT_MOUNT.yaw_deg   = v, min: -30, max: 30, step: 0.5, fmt: v => v.toFixed(1) + '°' },
+        { id: 'm_pitch', get: () => KINECT_MOUNT.pitch_deg, set: v => KINECT_MOUNT.pitch_deg = v, min: -30, max: 30, step: 0.5, fmt: v => v.toFixed(1) + '°' },
+        { id: 'm_roll',  get: () => KINECT_MOUNT.roll_deg,  set: v => KINECT_MOUNT.roll_deg  = v, min: -30, max: 30, step: 0.5, fmt: v => v.toFixed(1) + '°' },
+      ],
+      onChange: () => { applyMountToScene(); applyAllPhoneOffsets(); },
+      reset: () => {
+        KINECT_MOUNT.pos_flume_mm = [...KINECT_MOUNT_DEFAULTS.pos_flume_mm];
+        KINECT_MOUNT.yaw_deg = KINECT_MOUNT_DEFAULTS.yaw_deg;
+        KINECT_MOUNT.pitch_deg = KINECT_MOUNT_DEFAULTS.pitch_deg;
+        KINECT_MOUNT.roll_deg = KINECT_MOUNT_DEFAULTS.roll_deg;
+      },
+      literal: () => {
+        const m = KINECT_MOUNT;
+        return `const KINECT_MOUNT = {\n` +
+          `  pos_flume_mm: [${m.pos_flume_mm.map(v => v.toFixed(2)).join(', ')}],\n` +
+          `  yaw_deg:   ${m.yaw_deg.toFixed(2)},\n` +
+          `  pitch_deg: ${m.pitch_deg.toFixed(2)},\n` +
+          `  roll_deg:  ${m.roll_deg.toFixed(2)},\n` +
+          `};`;
+      },
+    };
+  }
+
+  function phoneTarget(name) {
+    const off = PHONE_OFFSETS[name];
+    const cam = camRegistry.find(c => c.label === name);
+    return {
+      label: `${name} · offset`,
+      posLabel: `translation offset (mm, flume frame)`,
+      rotLabel: `rotation offset (deg, cam-local)`,
+      sliders: [
+        { id: 'm_x', get: () => off.dx, set: v => off.dx = v, min: -PHONE_POS_SPAN_MM, max: PHONE_POS_SPAN_MM, step: 10, fmt: v => (v >= 0 ? '+' : '') + v.toFixed(0) },
+        { id: 'm_y', get: () => off.dy, set: v => off.dy = v, min: -PHONE_POS_SPAN_MM, max: PHONE_POS_SPAN_MM, step: 10, fmt: v => (v >= 0 ? '+' : '') + v.toFixed(0) },
+        { id: 'm_z', get: () => off.dz, set: v => off.dz = v, min: -PHONE_POS_SPAN_MM, max: PHONE_POS_SPAN_MM, step: 10, fmt: v => (v >= 0 ? '+' : '') + v.toFixed(0) },
+        { id: 'm_yaw',   get: () => off.dyaw,   set: v => off.dyaw   = v, min: -PHONE_ROT_SPAN_DEG, max: PHONE_ROT_SPAN_DEG, step: 1, fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+        { id: 'm_pitch', get: () => off.dpitch, set: v => off.dpitch = v, min: -PHONE_ROT_SPAN_DEG, max: PHONE_ROT_SPAN_DEG, step: 1, fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+        { id: 'm_roll',  get: () => off.droll,  set: v => off.droll  = v, min: -PHONE_ROT_SPAN_DEG, max: PHONE_ROT_SPAN_DEG, step: 1, fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+      ],
+      onChange: () => { if (cam) applyPhoneOffset(cam); },
+      reset: () => {
+        const d = PHONE_OFFSETS_DEFAULTS[name];
+        Object.assign(PHONE_OFFSETS[name], d);
+      },
+      literal: () => {
+        const lines = ['const PHONE_OFFSETS = {'];
+        for (const k of Object.keys(PHONE_OFFSETS)) {
+          const o = PHONE_OFFSETS[k];
+          lines.push(`  ${k}: { dx: ${o.dx.toFixed(2)}, dy: ${o.dy.toFixed(2)}, dz: ${o.dz.toFixed(2)}, ` +
+                     `dyaw: ${o.dyaw.toFixed(2)}, dpitch: ${o.dpitch.toFixed(2)}, droll: ${o.droll.toFixed(2)} },`);
+        }
+        lines.push('};');
+        return lines.join('\n');
+      },
+    };
+  }
+
+  function buildTarget(name) {
+    return name === 'KINECT_MOUNT' ? mountTarget() : phoneTarget(name);
+  }
+
+  let activeTarget = buildTarget('KINECT_MOUNT');
+  const handlerRefs = {};   // id -> the currently-bound listener so we can remove it on switch
+
+  function bindTarget(target) {
+    activeTarget = target;
+    document.getElementById('posGroupLabel').textContent = target.posLabel;
+    document.getElementById('rotGroupLabel').textContent = target.rotLabel;
+    for (const s of target.sliders) {
+      const el = document.getElementById(s.id);
+      if (!el) continue;
+      // Remove previous listener if any.
+      if (handlerRefs[s.id]) el.removeEventListener('input', handlerRefs[s.id]);
+      el.min = s.min; el.max = s.max; el.step = s.step;
+      el.value = s.get();
+      document.getElementById(s.id + '_val').textContent = s.fmt(s.get());
+      const handler = () => {
+        const v = parseFloat(el.value);
+        if (Number.isNaN(v)) return;
+        s.set(v);
+        document.getElementById(s.id + '_val').textContent = s.fmt(v);
+        target.onChange();
+      };
+      el.addEventListener('input', handler);
+      handlerRefs[s.id] = handler;
+    }
+  }
+
+  document.getElementById('tuneTarget').addEventListener('change', e => {
+    bindTarget(buildTarget(e.target.value));
+  });
+
+  bindTarget(activeTarget);
+
+  // Reset — restore defaults for the active target only.
+  document.getElementById('mountReset').onclick = () => {
+    activeTarget.reset();
+    bindTarget(activeTarget);
+    activeTarget.onChange();
+  };
+
+  // Copy — write the active target's JS literal to the clipboard.
+  document.getElementById('mountCopy').onclick = async () => {
+    const literal = activeTarget.literal();
+    try {
+      await navigator.clipboard.writeText(literal);
+      const btn = document.getElementById('mountCopy');
+      btn.textContent = 'copied ✓';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+    } catch (e) {
+      console.log(`${activeTarget.label} (clipboard unavailable):\n${literal}`);
+    }
+  };
+
+  // Collapse — small minus/plus on the panel header.
+  document.getElementById('mountCollapse').onclick = () => {
+    const p = document.getElementById('mountPanel');
+    p.classList.toggle('collapsed');
+    document.getElementById('mountCollapse').textContent =
+      p.classList.contains('collapsed') ? '+' : '−';
+  };
+
+  // Optional self-test: append "?selftest=1" to the URL to drive each slider
+  // and log the cam positions. Used by headless verification; harmless in
+  // normal use (it just emits a few console.info lines).
+  if (new URLSearchParams(location.search).get('selftest') === '1') {
+    const snap = () => {
+      scene.updateMatrixWorld(true);
+      return camRegistry.map(c => {
+        const v = new THREE.Vector3();
+        v.setFromMatrixPosition(c.group.matrixWorld);
+        return [c.label, v.x, v.y, v.z];
+      });
+    };
+
+    // Test 1: KINECT_MOUNT X+50 should drag every kinect-anchored cam by +50 in scene X.
+    const before1 = snap();
+    document.getElementById('m_x').value = KINECT_MOUNT.pos_flume_mm[0] + 50;
+    document.getElementById('m_x').dispatchEvent(new Event('input'));
+    const after1 = snap();
+    for (let i = 0; i < before1.length; i++) {
+      const dx = after1[i][1] - before1[i][1];
+      const dy = after1[i][2] - before1[i][2];
+      const dz = after1[i][3] - before1[i][3];
+      console.info(`selftest mount "${before1[i][0]}": Δscene = (${dx.toFixed(1)}, ${dy.toFixed(1)}, ${dz.toFixed(1)})`);
+    }
+    document.getElementById('mountReset').click();
+
+    // Test 2: switching dropdown to "anna" and nudging X should move ONLY anna.
+    const sel = document.getElementById('tuneTarget');
+    sel.value = 'anna';
+    sel.dispatchEvent(new Event('change'));
+    const before2 = snap();
+    document.getElementById('m_x').value = 75;
+    document.getElementById('m_x').dispatchEvent(new Event('input'));
+    const after2 = snap();
+    for (let i = 0; i < before2.length; i++) {
+      const dx = after2[i][1] - before2[i][1];
+      const dy = after2[i][2] - before2[i][2];
+      const dz = after2[i][3] - before2[i][3];
+      const moved = Math.hypot(dx, dy, dz) > 0.5;
+      console.info(`selftest anna-only "${before2[i][0]}": Δscene = (${dx.toFixed(1)}, ${dy.toFixed(1)}, ${dz.toFixed(1)})${moved ? ' MOVED' : ''}`);
+    }
+    document.getElementById('mountReset').click();
+  }
+}
+
+// Optional fly-to selftest: append "?flyto=anna" to land directly on a cam at
+// boot and log the resulting camera state. Used by headless screenshots.
+{
+  const flyto = new URLSearchParams(location.search).get('flyto');
+  if (flyto) {
+    setTimeout(() => {
+      // Wait one frame so deferred init / OrbitControls are settled.
+      const btn = document.querySelector(`.cam-btn[data-cam="${flyto}"]`);
+      if (btn) btn.click();
+      // Force the tween to complete instantly so a one-shot screenshot picks
+      // up the final camera state rather than mid-animation.
+      setTimeout(() => {
+        if (activeTween) {
+          activeTween.t0 = performance.now() - activeTween.duration - 1;
+          stepTween();
+        }
+        const e = camRegistry.find(c => c.label === flyto);
+        const fmt = v => `(${v.toFixed(0)}, ${v.toFixed(0)}, ${v.toFixed(0)})`;
+        console.info(
+          `flyto-selftest "${flyto}": ` +
+          `camera.position=(${camera.position.x.toFixed(0)}, ${camera.position.y.toFixed(0)}, ${camera.position.z.toFixed(0)}) · ` +
+          `controls.target=(${controls.target.x.toFixed(0)}, ${controls.target.y.toFixed(0)}, ${controls.target.z.toFixed(0)}) · ` +
+          `fov=${camera.fov.toFixed(1)}° (cam intr=${e?.fov_v_deg?.toFixed(1)}°)`
+        );
+      }, 50);
+    }, 100);
+  }
+}
+
+// =============================================================================
+// Playback control. Browser autoplay needs a user gesture even with muted=true,
+// so playback starts paused — first ▶ or cam-button click kicks it off.
+// =============================================================================
+let activeCam = initialCam;
+let userStarted = false;
+// Reflect initial-active button state.
+if (activeCam) {
+  for (const btn of document.querySelectorAll('.cam-btn')) {
+    btn.classList.toggle('active', btn.dataset.cam === activeCam);
+  }
+}
+
+function setActiveCam(label) {
+  // Re-fly even if the cam was already "active" — the user may have orbited
+  // away and want to snap back. Only the bed-video swap is a no-op when the
+  // texture doesn't change.
+  flyToCam(label);
+  if (activeCam === label) return;
+  activeCam = label;
+  videoMat.map = textures[label];
+  videoMat.needsUpdate = true;
+  for (const btn of document.querySelectorAll('.cam-btn')) {
+    btn.classList.toggle('active', btn.dataset.cam === label);
+  }
+  document.getElementById('status').textContent = `POV: ${label}`;
+}
+
+// =============================================================================
+// Fly-around. Clicking a cam button tweens the orbit camera's position, target,
+// and FOV from its current values to the selected cam's solved eye position +
+// look direction over ~1.3 s. The tween hands control back to OrbitControls
+// when it finishes — drag to orbit freely from the new viewpoint, or click
+// another cam button to fly elsewhere.
+// =============================================================================
+const LOOK_DISTANCE_MM = 1500;     // target depth along cam optical axis
+const FLY_DURATION_MS  = 1300;
+let activeTween = null;
+
+function flyToCam(label) {
+  const entry = camRegistry.find(c => c.label === label);
+  if (!entry) return;
+  scene.updateMatrixWorld(true);
+  // Optical center in world (= scene) coords.
+  const C = new THREE.Vector3();
+  C.setFromMatrixPosition(entry.group.matrixWorld);
+  // Always aim the orbit camera at the rim centre (flume (FLUME_W/2, FLUME_L/2, 0)
+  // → scene). This deliberately ignores the cam's solved optical axis: many
+  // axes from the kinect-anchored PnP solves point at the feature cluster
+  // near mid-table, which gets visually wrong after PHONE_OFFSETS pushes the
+  // cam to its physical location. Aiming at the rim centre always frames the
+  // bed in the orbit camera's view, even if it doesn't match exactly what
+  // that phone actually recorded.
+  const target = new THREE.Vector3(FLUME_W / 2, 0, -FLUME_L / 2);
+  activeTween = {
+    t0: performance.now(),
+    duration: FLY_DURATION_MS,
+    fromPos:    camera.position.clone(),
+    toPos:      C,
+    fromTarget: controls.target.clone(),
+    toTarget:   target,
+    fromFov:    camera.fov,
+    toFov:      entry.fov_v_deg,
+  };
+}
+
+// Smoothstep — easeInOut in [0,1]. Avoids the abrupt start/stop of linear lerp
+// without needing to import a tween library.
+function ease(u) { return u * u * (3 - 2 * u); }
+
+function stepTween() {
+  if (!activeTween) return;
+  const u = Math.min(1, (performance.now() - activeTween.t0) / activeTween.duration);
+  const e = ease(u);
+  camera.position.lerpVectors(activeTween.fromPos,    activeTween.toPos,    e);
+  controls.target.lerpVectors(activeTween.fromTarget, activeTween.toTarget, e);
+  camera.fov = activeTween.fromFov + (activeTween.toFov - activeTween.fromFov) * e;
+  camera.updateProjectionMatrix();
+  if (u >= 1) activeTween = null;
+}
+
+// Play / pause is now global — every ready video starts/stops together so the rectangle
+// AND the per-cam billboards (added below) animate in sync. Each cam's video is decoded
+// in parallel; modern hardware h264 decode handles 4×720p simultaneously.
+function setPlaying(p) {
+  userStarted = userStarted || p;
+  for (const v of Object.values(videos)) {
+    if (p) v.play().catch(() => {}); else v.pause();
+  }
+  document.getElementById('playBtn').textContent = p ? '❚❚' : '▶';
+}
+
+document.getElementById('playBtn').onclick = () => {
+  const v = videos[activeCam];
+  setPlaying(v ? v.paused : true);
+};
+for (const btn of document.querySelectorAll('.cam-btn')) {
+  btn.onclick = () => setActiveCam(btn.dataset.cam);
+}
+
+// =============================================================================
+// Scrubber: master-time clock. Master t=0 is the moment of the wooden clack.
+// Cam video time = clap_time_s + master_t. (NOT offset_s — that field is
+// "relative to the reference cam" and would put master t=0 at anna's video
+// t=0, which is *before* her clap. Same convention as ../app.js.)
+// =============================================================================
+const scrubber = document.getElementById('scrubber');
+const timecodeEl = document.getElementById('timecode');
+let scrubbing = false;
+let wasPlayingBeforeScrub = false;
+const camClapTimes = { anna: 0, sophia: 0, valentine: 0, kinect: 0 };
+let masterDuration = 0;
+
+(async () => {
+  try {
+    const r = await fetch('../data/sync.json');
+    if (!r.ok) return;
+    const sync = await r.json();
+    for (const [label, info] of Object.entries(sync.videos || {})) {
+      if (label in camClapTimes) camClapTimes[label] = info.clap_time_s || 0;
+    }
+    document.getElementById('status').textContent =
+      `clap @ anna ${camClapTimes.anna.toFixed(1)}s · sophia ${camClapTimes.sophia.toFixed(1)}s · valentine ${camClapTimes.valentine.toFixed(1)}s · kinect ${camClapTimes.kinect.toFixed(1)}s`;
+    recomputeMasterDuration();
+  } catch (e) {
+    console.warn('sync.json load failed; videos will play un-synchronized', e);
+  }
+})();
+
+function recomputeMasterDuration() {
+  // Master t=0 is the clack. Cam plays at clap_time + master_t, so cam runs
+  // out at duration → master max for cam = duration - clap_time. Overall
+  // master duration = MIN across cams so every view still has frames.
+  let minRemain = Infinity;
+  for (const [label, v] of Object.entries(videos)) {
+    if (!v || !isFinite(v.duration) || v.duration <= 0) continue;
+    const remain = v.duration - (camClapTimes[label] || 0);
+    if (remain < minRemain) minRemain = remain;
+  }
+  masterDuration = isFinite(minRemain) && minRemain > 0 ? minRemain : 0;
+}
+
+function camTimeForMaster(label, masterT) {
+  return Math.max(0, masterT + (camClapTimes[label] || 0));
+}
+function masterTimeForCam(label, camT) {
+  return camT - (camClapTimes[label] || 0);
+}
+
+function fmtTime(t) {
+  if (!isFinite(t) || t < 0) t = 0;
+  const m = Math.floor(t / 60);
+  const s = (t % 60).toFixed(1).padStart(4, '0');
+  return `${m}:${s}`;
+}
+
+scrubber.addEventListener('mousedown', () => {
+  scrubbing = true;
+  const v = videos[activeCam];
+  wasPlayingBeforeScrub = !!(v && !v.paused);
+  if (wasPlayingBeforeScrub) setPlaying(false);
+});
+scrubber.addEventListener('input', () => {
+  recomputeMasterDuration();
+  if (masterDuration <= 0) return;
+  const masterT = (parseInt(scrubber.value, 10) / 1000) * masterDuration;
+  for (const [label, v] of Object.entries(videos)) {
+    if (!v) continue;
+    try { v.currentTime = camTimeForMaster(label, masterT); } catch {}
+  }
+  timecodeEl.textContent = `${fmtTime(masterT)} / ${fmtTime(masterDuration)}`;
+});
+scrubber.addEventListener('change', () => {
+  scrubbing = false;
+  if (wasPlayingBeforeScrub) setPlaying(true);
+});
+
+// Drift correction during playback: every animation tick, nudge each non-active
+// video toward (master + offset) so they don't drift apart due to decode jitter.
+const DRIFT_THRESHOLD = 0.20;  // seconds — beyond this, hard-seek
+function refreshScrubber() {
+  recomputeMasterDuration();
+  const v = videos[activeCam];
+  if (!scrubbing && v && masterDuration > 0) {
+    const masterT = masterTimeForCam(activeCam, v.currentTime || 0);
+    scrubber.value = Math.round(Math.max(0, Math.min(1, masterT / masterDuration)) * 1000);
+    timecodeEl.textContent = `${fmtTime(masterT)} / ${fmtTime(masterDuration)}`;
+
+    // Keep other cams aligned — only when actively playing
+    if (!v.paused) {
+      for (const [label, other] of Object.entries(videos)) {
+        if (!other || label === activeCam) continue;
+        const want = camTimeForMaster(label, masterT);
+        if (Math.abs(other.currentTime - want) > DRIFT_THRESHOLD) {
+          try { other.currentTime = want; } catch {}
+        }
+      }
+    }
+  }
+  requestAnimationFrame(refreshScrubber);
+}
+requestAnimationFrame(refreshScrubber);
+
+// =============================================================================
+// Bed-texture rotation / flip keys. Operate on the currently-active cam so the
+// user can flip into a cam with the wrong orientation, hit `]` until it lines
+// up, then continue. Persists to localStorage.
+//   [   rotate the active cam's bed texture by -90°
+//   ]   rotate by +90°
+//   X   toggle horizontal flip
+//   Y   toggle vertical flip
+//   \   reset the active cam to the default texture transform
+// =============================================================================
+function bumpRot(deg) {
+  const t = BED_TEX[activeCam];
+  t.rot_deg = ((t.rot_deg + deg) + 540) % 360 - 180;   // wrap into (-180, 180]
+  saveBedTex();
+  applyTexTransform(activeCam);
+  flashStatus();
+}
+function toggleFlip(axis) {
+  const t = BED_TEX[activeCam];
+  if (axis === 'X') t.flipX = !t.flipX; else t.flipY = !t.flipY;
+  saveBedTex();
+  applyTexTransform(activeCam);
+  flashStatus();
+}
+function flashStatus() {
+  const t = BED_TEX[activeCam];
+  const flips = (t.flipX ? 'X' : '') + (t.flipY ? 'Y' : '');
+  const tag = `tex ${t.rot_deg}°${flips ? ' flip ' + flips : ''}`;
+  document.getElementById('status').textContent = `POV: ${activeCam} · ${tag}`;
+}
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  if (e.key === '[')      bumpRot(-90);
+  else if (e.key === ']') bumpRot(+90);
+  else if (e.key === 'x' || e.key === 'X') toggleFlip('X');
+  else if (e.key === 'y' || e.key === 'Y') toggleFlip('Y');
+  else if (e.key === '\\') {
+    BED_TEX[activeCam] = { ...BED_TEX_DEFAULTS[activeCam] };
+    saveBedTex();
+    applyTexTransform(activeCam);
+    flashStatus();
+  }
+});
+
+// Autoplay attempt. Modern browsers allow autoplay for muted media — every
+// proxy here is created with v.muted = true above, so this should succeed
+// without a user gesture. If a stricter policy blocks it, the play button
+// remains and starts playback on click.
+if (Object.values(videos).length > 0) {
+  setPlaying(true);
+}
+
+// =============================================================================
+// Resize + render
+// =============================================================================
+function resize() {
+  const r = wrap.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / r.height;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+function tick() {
+  requestAnimationFrame(tick);
+  stepTween();
+  controls.update();
+  renderer.render(scene, camera);
+}
+tick();
+
+// Status surfaces what's ready, what isn't.
+const readyList    = Object.keys(VIDEO_PROXIES).filter(l => ready[l]);
+const notReadyList = Object.keys(VIDEO_PROXIES).filter(l => !ready[l]);
+let statusMsg;
+if (readyList.length === 0) {
+  statusMsg = 'no proxies ready — start scripts/make_proxies.sh';
+} else if (notReadyList.length > 0) {
+  statusMsg = `ready: ${readyList.join(', ')} · encoding: ${notReadyList.join(', ')}`;
+} else {
+  statusMsg = `ready · click ▶ to start playback`;
+}
+document.getElementById('status').textContent = statusMsg;
+</script>
+</body>
+</html>

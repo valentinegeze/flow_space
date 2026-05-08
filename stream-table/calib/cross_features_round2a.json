@@ -1,0 +1,10 @@
+{
+  "exported_at": "2026-04-17T21:04:22.008Z",
+  "n_features": 3,
+  "note": "Round 2a clicks at clack+30s; user flagged anna as hard to match at this timestamp.",
+  "features": [
+    {"name": "feature_1", "clicks_per_phone": {"anna": [90.72, 643.63], "valentine": [385.09, 892.01], "sophia": [370.62, 568.79], "kinect": [361.93, 1044.31]}},
+    {"name": "feature_2", "clicks_per_phone": {"valentine": [535.66, 426.97], "sophia": [639.89, 247.48], "kinect": [619.62, 323.63]}},
+    {"name": "feature_3", "clicks_per_phone": {"valentine": [98.45, 494.96], "sophia": [196.89, 214.84], "kinect": [75.28, 315.47]}}
+  ]
+}

@@ -1,0 +1,88 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>Bed-change time series</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #0f0f0f; color: #eee; margin: 0; padding: 24px; max-width: 1400px; margin-inline: auto; }
+h1 { margin: 0 0 10px; color: #c05030; letter-spacing: 0.04em; font-size: 14px; text-transform: uppercase; }
+h2 { margin: 24px 0 10px; color: #eee; font-size: 15px; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 500; }
+.summary { margin: 10px 0 30px; }
+.summary img { max-width: 100%; border: 1px solid #333; border-radius: 4px; background: #fff; }
+.pair-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+.pair-grid .cell { background: #1a1a1a; padding: 10px; border-radius: 4px; border: 1px solid #222; }
+.pair-grid .cell img { width: 100%; display: block; border-radius: 3px; }
+.pair-grid .cell .cap { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #9cf; margin-top: 6px; }
+.tight-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.tight-grid .cell img { width: 100%; display: block; border: 1px solid #333; border-radius: 3px; }
+.tight-grid .cell p { font-family: 'SF Mono', Menlo, monospace; font-size: 10.5px; color: #9cf; margin: 4px 0 0; }
+table { border-collapse: collapse; margin: 10px 0; font-size: 12px; font-family: 'SF Mono', Menlo, monospace; }
+th, td { border: 1px solid #333; padding: 5px 10px; text-align: right; }
+th { background: #222; color: #c05030; text-align: center; }
+tr:nth-child(even) { background: #1a1a1a; }
+tr:hover { background: #252525; }
+.legend-box { background: #1a1a1a; padding: 12px 16px; border: 1px solid #333; border-radius: 4px; font-size: 12px; margin-bottom: 20px; }
+.legend-box .dot { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: middle; margin: 0 4px; border: 1px solid #444; }
+.notes { font-size: 13px; color: #aaa; max-width: 900px; line-height: 1.5; }
+</style></head><body>
+
+<h1>Bed-change time series — Kinect depth differencing</h1>
+<p class='notes'>Each interval compares Kinect depth at t<sub>0</sub> and t<sub>1</sub>. Positive Δ-depth = bed lowered (scour). Negative Δ-depth = bed raised (deposition). Pixels outside the 700–850 mm bed range (cross-bar, hands, tools) are excluded. Pixel area scales with local depth; volumes are sums of per-pixel Δ·area.</p>
+
+<div class='legend-box'>
+  <span class='dot' style='background:#e33'></span>scour (bed dropped)
+  &nbsp;&nbsp;&nbsp;
+  <span class='dot' style='background:#fff'></span>no change
+  &nbsp;&nbsp;&nbsp;
+  <span class='dot' style='background:#3af'></span>deposition (bed rose)
+  &nbsp;&nbsp;&nbsp;
+  <span class='dot' style='background:#777'></span>masked (outside bed depth range)
+</div>
+
+<h2>Rate-vs-time summary</h2>
+<div class=summary><img src='summary.png'></div>
+
+<h2>Per-interval stats</h2>
+<table><tr><th>t₀ (s)</th><th>t₁ (s)</th><th>scour (mL)</th><th>depos (mL)</th><th>net (mL)</th><th>net rate (mL/s)</th><th>max scour (mm)</th><th>max depos (mm)</th></tr>
+<tr><td>27.4</td><td>57.4</td><td>1264.33</td><td>167.52</td><td>+1096.82</td><td>+36.561</td><td>+57.0</td><td>-24.0</td></tr>
+<tr><td>57.4</td><td>87.4</td><td>816.11</td><td>544.31</td><td>+271.79</td><td>+9.060</td><td>+46.0</td><td>-29.0</td></tr>
+<tr><td>87.4</td><td>117.4</td><td>540.08</td><td>551.17</td><td>-11.09</td><td>-0.370</td><td>+43.0</td><td>-47.0</td></tr>
+<tr><td>117.4</td><td>147.4</td><td>602.98</td><td>659.64</td><td>-56.67</td><td>-1.889</td><td>+32.0</td><td>-40.0</td></tr>
+<tr><td>147.4</td><td>177.4</td><td>467.75</td><td>619.87</td><td>-152.12</td><td>-5.071</td><td>+29.0</td><td>-24.0</td></tr>
+<tr><td>177.4</td><td>207.4</td><td>546.35</td><td>497.38</td><td>+48.97</td><td>+1.632</td><td>+22.0</td><td>-26.0</td></tr>
+</table>
+<h2>Overlaid on the sediment bed (from Kinect color frame at t₁)</h2>
+<div class='pair-grid'>
+<div class=cell><img src='overlay_t027_t057.jpg'><div class=cap>t = 27.4 → 57.4 s · net +1096.8 mL · max scour +57 mm</div></div>
+<div class=cell><img src='overlay_t057_t087.jpg'><div class=cap>t = 57.4 → 87.4 s · net +271.8 mL · max scour +46 mm</div></div>
+<div class=cell><img src='overlay_t087_t117.jpg'><div class=cap>t = 87.4 → 117.4 s · net -11.1 mL · max scour +43 mm</div></div>
+<div class=cell><img src='overlay_t117_t147.jpg'><div class=cap>t = 117.4 → 147.4 s · net -56.7 mL · max scour +32 mm</div></div>
+<div class=cell><img src='overlay_t147_t177.jpg'><div class=cap>t = 147.4 → 177.4 s · net -152.1 mL · max scour +29 mm</div></div>
+<div class=cell><img src='overlay_t177_t207.jpg'><div class=cap>t = 177.4 → 207.4 s · net +49.0 mL · max scour +22 mm</div></div>
+</div>
+<h2>Kinect depth topography at each t₁</h2>
+<p class='notes'>Absolute distance from the Kinect to the bed at each frame, colorised with the Turbo colormap. <strong>Red</strong> = bed is closer to Kinect (higher elevation / raised sediment). <strong>Blue</strong> = bed is farther from Kinect (lower elevation / scour holes). Grey = outside the 700-850 mm bed depth range.</p>
+<div class='tight-grid'>
+<div class=cell><img src='depth_t057.png'><p>depth @ t = 57 s</p></div>
+<div class=cell><img src='depth_t087.png'><p>depth @ t = 87 s</p></div>
+<div class=cell><img src='depth_t117.png'><p>depth @ t = 117 s</p></div>
+<div class=cell><img src='depth_t147.png'><p>depth @ t = 147 s</p></div>
+<div class=cell><img src='depth_t177.png'><p>depth @ t = 177 s</p></div>
+<div class=cell><img src='depth_t207.png'><p>depth @ t = 207 s</p></div>
+</div>
+<h2>Topography + change (bed depth with scour/deposition overlay)</h2>
+<p class='notes'>Turbo-colored bed topography at t₁, with change overlay where |Δ| > 3 mm. Shows both the current shape of the bed AND what changed during this interval — read the background color for topography, the red/blue mottling for dynamics.</p>
+<div class='pair-grid'>
+<div class=cell><img src='depth_change_t027_t057.png'><div class=cap>t = 27.4 → 57.4 s</div></div>
+<div class=cell><img src='depth_change_t057_t087.png'><div class=cap>t = 57.4 → 87.4 s</div></div>
+<div class=cell><img src='depth_change_t087_t117.png'><div class=cap>t = 87.4 → 117.4 s</div></div>
+<div class=cell><img src='depth_change_t117_t147.png'><div class=cap>t = 117.4 → 147.4 s</div></div>
+<div class=cell><img src='depth_change_t147_t177.png'><div class=cap>t = 147.4 → 177.4 s</div></div>
+<div class=cell><img src='depth_change_t177_t207.png'><div class=cap>t = 177.4 → 207.4 s</div></div>
+</div>
+<h2>Raw Δ-depth maps</h2><div class='tight-grid'>
+<div class=cell><img src='frame_t027_t057.png'><p>t = 27.4 → 57.4 s · net +1096.8 mL</p></div>
+<div class=cell><img src='frame_t057_t087.png'><p>t = 57.4 → 87.4 s · net +271.8 mL</p></div>
+<div class=cell><img src='frame_t087_t117.png'><p>t = 87.4 → 117.4 s · net -11.1 mL</p></div>
+<div class=cell><img src='frame_t117_t147.png'><p>t = 117.4 → 147.4 s · net -56.7 mL</p></div>
+<div class=cell><img src='frame_t147_t177.png'><p>t = 147.4 → 177.4 s · net -152.1 mL</p></div>
+<div class=cell><img src='frame_t177_t207.png'><p>t = 177.4 → 207.4 s · net +49.0 mL</p></div>
+</div>
+<p class='notes' style='margin-top:30px'>All images are masked to the sediment bed (700-850 mm depth from Kinect). The cross-bar and transient hands/objects are filtered out by depth range.</p>
+</body></html>

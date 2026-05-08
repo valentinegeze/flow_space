@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pair Tuner — epipolar pose</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #0f0f0f; color: #eee; overflow: hidden; }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #333; flex-wrap: wrap; }
+  .topbar strong { color: #ffd43b; letter-spacing: 0.04em; font-size: 12px; text-transform: uppercase; margin-right: 4px; }
+  .topbar button, .topbar select {
+    background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px;
+    padding: 5px 11px; cursor: pointer; font-size: 12px; font-family: inherit;
+  }
+  .topbar button:hover { border-color: #ffd43b; color: #ffd43b; }
+  .topbar button.primary { background: #c05030; border-color: #c05030; color: #fff; }
+  .topbar button.primary:hover { background: #d86040; border-color: #d86040; color: #fff; }
+  .topbar .sep { flex: 1; }
+  .main { flex: 1; display: flex; min-height: 0; }
+  .canvas-col { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #000; border-right: 1px solid #222; }
+  .canvas-col:last-of-type { border-right: none; }
+  .canvas-col-label {
+    font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 2px;
+    padding: 5px 10px; background: #141420; display: flex; gap: 8px; align-items: center;
+  }
+  .canvas-col-label .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .canvas-wrap { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100%; max-height: 100%; display: block; cursor: crosshair; }
+  .sidebar { width: 360px; min-width: 360px; background: #151515; border-left: 1px solid #333; overflow-y: auto; padding: 12px; }
+  .sidebar h3 { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: #888; margin: 12px 0 6px; padding-bottom: 3px; border-bottom: 1px solid #2a2a2a; }
+  .sidebar h3:first-child { margin-top: 0; }
+  .slider-row { display: grid; grid-template-columns: 64px 1fr 72px; gap: 6px; align-items: center; margin-bottom: 4px; }
+  .slider-row label { font-size: 11px; color: #bbb; font-family: 'SF Mono', Menlo, monospace; }
+  .slider-row input[type=range] { width: 100%; accent-color: #ffd43b; }
+  .slider-row input[type=number] {
+    width: 72px; background: #222; color: #ddd; border: 1px solid #333; border-radius: 3px;
+    padding: 3px 6px; font-family: 'SF Mono', Menlo, monospace; font-size: 10px;
+  }
+  .pill { font-family: 'SF Mono', Menlo, monospace; font-size: 10px; color: #6a9; }
+  .pill.bad { color: #e55; }
+  .pill.warn { color: #eb5; }
+  .btn-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .btn-row button { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 5px 11px; cursor: pointer; font-size: 11px; font-family: inherit; flex: 1; }
+  .btn-row button:hover { border-color: #ffd43b; color: #ffd43b; }
+  .btn-row button.primary { background: #c05030; border-color: #c05030; color: #fff; }
+  .btn-row button.primary:hover { background: #d86040; border-color: #d86040; }
+  .residuals { font-family: 'SF Mono', Menlo, monospace; font-size: 10px; color: #9cf; background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px; line-height: 1.5; }
+  .residuals .hdr { color: #667; margin-bottom: 4px; }
+  .residuals .row { display: grid; grid-template-columns: 14px 1fr 40px 40px 40px; gap: 6px; align-items: center; cursor: pointer; padding: 1px 2px; border-radius: 3px; }
+  .residuals .row.hdr-row { cursor: default; color: #667; }
+  .residuals .row:not(.hdr-row):hover { background: #14141c; }
+  .residuals .row.selected { background: #1a1a28; outline: 1px solid #ffd43b; }
+  .residuals .row.total { color: #ffd43b; margin-top: 4px; padding-top: 4px; border-top: 1px solid #2a2a2a; cursor: default; }
+  .residuals .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid #444; }
+  .residuals .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .residuals .anchor-tag { color: #ffd43b; font-size: 8px; margin-left: 4px; }
+  .anchors { font-family: 'SF Mono', Menlo, monospace; font-size: 10px; background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 6px; }
+  .anchors .row { display: grid; grid-template-columns: 10px 1fr 40px 40px 40px 16px; gap: 3px; margin-bottom: 2px; align-items: center; }
+  .anchors .row.hdr-row { color: #667; margin-bottom: 4px; }
+  .anchors .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; border: 1px solid #444; }
+  .anchors .name { color: #bbb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 9.5px; }
+  .anchors input { width: 100%; background: #1a1a1a; color: #ddd; border: 1px solid #2a2a2a; border-radius: 2px; padding: 2px 3px; font-family: inherit; font-size: 9px; }
+  .anchors input.set { border-color: #ffd43b; color: #ffd43b; }
+  .anchors .clr { background: transparent; color: #666; border: none; cursor: pointer; padding: 0; font-size: 11px; }
+  .anchors .clr:hover { color: #e66; }
+  textarea { width: 100%; height: 100px; background: #0a0a0a; color: #9cf; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: 'SF Mono', Menlo, monospace; font-size: 10px; resize: vertical; }
+  .mat-display { font-family: 'SF Mono', Menlo, monospace; font-size: 9.5px; line-height: 1.45; color: #9cf; background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; }
+  .mat-display .mat-label { color: #667; font-size: 9px; letter-spacing: 0.05em; margin-top: 4px; }
+  .mat-display .mat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .mat-display .mat-row.three { grid-template-columns: repeat(3, 1fr); }
+  .optgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px 10px; font-size: 10px; font-family: 'SF Mono', Menlo, monospace; margin-bottom: 6px; color: #bbb; }
+  .optgrid label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+  .optgrid input[type=checkbox] { accent-color: #ffd43b; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <strong>Pair Tuner</strong>
+    <span style="color:#888;font-size:11px">A</span>
+    <select id="camA"></select>
+    <span style="color:#888;font-size:11px">↔ B</span>
+    <select id="camB"></select>
+    <button id="swapBtn">swap</button>
+    <span class="sep"></span>
+    <span id="status" class="pill">loading…</span>
+  </div>
+
+  <div class="main">
+    <div class="canvas-col">
+      <div class="canvas-col-label"><span class="dot" id="dotA"></span><span id="labelA">cam A</span></div>
+      <div class="canvas-wrap"><canvas id="cvA"></canvas></div>
+    </div>
+    <div class="canvas-col">
+      <div class="canvas-col-label"><span class="dot" id="dotB"></span><span id="labelB">cam B</span></div>
+      <div class="canvas-wrap"><canvas id="cvB"></canvas></div>
+    </div>
+
+    <div class="sidebar">
+      <h3>Cam B center in A's frame (mm)</h3>
+      <div class="slider-row"><label>Cx</label><input type="range" id="Cx_r" min="-4000" max="4000" step="10"><input type="number" id="Cx_n" step="10"></div>
+      <div class="slider-row"><label>Cy</label><input type="range" id="Cy_r" min="-4000" max="4000" step="10"><input type="number" id="Cy_n" step="10"></div>
+      <div class="slider-row"><label>Cz</label><input type="range" id="Cz_r" min="-4000" max="4000" step="10"><input type="number" id="Cz_n" step="10"></div>
+
+      <h3>Cam B orientation relative to A (deg)</h3>
+      <div class="slider-row"><label>yaw</label><input type="range" id="yaw_r" min="-180" max="180" step="0.5"><input type="number" id="yaw_n" step="0.5"></div>
+      <div class="slider-row"><label>pitch</label><input type="range" id="pitch_r" min="-90" max="90" step="0.5"><input type="number" id="pitch_n" step="0.5"></div>
+      <div class="slider-row"><label>roll</label><input type="range" id="roll_r" min="-180" max="180" step="0.5"><input type="number" id="roll_n" step="0.5"></div>
+
+      <h3>Intrinsics — camera matrix K (px)</h3>
+      <div class="slider-row"><label>fx_A</label><input type="range" id="fxA_r" min="200" max="3000" step="1"><input type="number" id="fxA_n" step="1"></div>
+      <div class="slider-row"><label>fx_B</label><input type="range" id="fxB_r" min="200" max="3000" step="1"><input type="number" id="fxB_n" step="1"></div>
+
+      <h3>Residuals (px)</h3>
+      <div id="residuals" class="residuals"></div>
+
+      <h3>3D anchors — world frame (mm, cam A origin)</h3>
+      <div id="anchorsPanel" class="anchors"></div>
+      <div style="color:#666; font-size: 10px; margin-top: 4px; line-height: 1.4">
+        Fill X, Y, Z for a feature to turn it into a reprojection anchor. Anchored features contribute 2 px residuals per camera they're visible in (instead of 1 Sampson). Even one anchor resolves the translation-scale ambiguity.
+      </div>
+
+      <h3>Solver — which params are free</h3>
+      <div class="optgrid" id="optGrid"></div>
+      <div class="btn-row">
+        <button id="lmBtn" class="primary">Run LM</button>
+        <button id="resetBtn">Reset</button>
+        <button id="autoInitBtn">Auto-init</button>
+      </div>
+      <div class="btn-row">
+        <button id="undoBtn" title="⌘Z">↶ Undo</button>
+        <button id="redoBtn" title="⌘⇧Z">↷ Redo</button>
+        <span id="historyPill" class="pill" style="align-self:center;margin-left:4px">0/0</span>
+      </div>
+      <div class="btn-row">
+        <button id="copyBtn">Copy JSON</button>
+      </div>
+
+      <h3>View matrices  [R | t]</h3>
+      <div id="viewMatDisplay" class="mat-display"></div>
+
+      <h3>Camera matrices  K</h3>
+      <div id="camMatDisplay" class="mat-display"></div>
+
+      <h3>Export</h3>
+      <textarea id="exportArea" readonly></textarea>
+
+      <div style="color:#666; font-size:10px; margin-top:10px; line-height:1.5">
+        Click a feature dot in either camera to see its epipolar line in the other. The line
+        emanates from the epipole (the other cam's projection, dot in that cam's color) and
+        passes through the corresponding click when pose is correct.
+        "Auto-init" seeds from the kinect-anchored poses. "Run LM" minimizes Sampson distance
+        over the checked parameters (Simek's extrinsic parameterization: t = −R·C).
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// Math utilities (3x3 matrices as 9-element row-major arrays)
+// ============================================================
+const mat = {
+  I: () => [1,0,0, 0,1,0, 0,0,1],
+  mul: (A, B) => {
+    const C = new Array(9);
+    for (let i=0;i<3;i++) for (let j=0;j<3;j++) {
+      let s = 0;
+      for (let k=0;k<3;k++) s += A[i*3+k] * B[k*3+j];
+      C[i*3+j] = s;
+    }
+    return C;
+  },
+  vec: (M, v) => [
+    M[0]*v[0] + M[1]*v[1] + M[2]*v[2],
+    M[3]*v[0] + M[4]*v[1] + M[5]*v[2],
+    M[6]*v[0] + M[7]*v[1] + M[8]*v[2],
+  ],
+  T: (M) => [M[0],M[3],M[6], M[1],M[4],M[7], M[2],M[5],M[8]],
+  inv: (M) => {
+    const a=M[0],b=M[1],c=M[2],d=M[3],e=M[4],f=M[5],g=M[6],h=M[7],i=M[8];
+    const det = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g);
+    if (Math.abs(det) < 1e-15) return null;
+    const inv = 1/det;
+    return [
+      (e*i-f*h)*inv, (c*h-b*i)*inv, (b*f-c*e)*inv,
+      (f*g-d*i)*inv, (a*i-c*g)*inv, (c*d-a*f)*inv,
+      (d*h-e*g)*inv, (b*g-a*h)*inv, (a*e-b*d)*inv,
+    ];
+  },
+  skew: (t) => [0,-t[2],t[1], t[2],0,-t[0], -t[1],t[0],0],
+};
+
+const DEG = Math.PI / 180;
+
+// Rotation from yaw/pitch/roll (ZYX intrinsic: R = Rz(yaw) * Ry(pitch) * Rx(roll))
+// Interpreted as: rotation that takes a vector in cam A's frame to the same physical
+// vector expressed in cam B's frame. So if yaw=pitch=roll=0, R = I.
+function eulerToR(yaw, pitch, roll) {
+  const cy = Math.cos(yaw*DEG), sy = Math.sin(yaw*DEG);
+  const cp = Math.cos(pitch*DEG), sp = Math.sin(pitch*DEG);
+  const cr = Math.cos(roll*DEG), sr = Math.sin(roll*DEG);
+  // R = Rz(yaw) * Ry(pitch) * Rx(roll)
+  return [
+    cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr,
+    sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr,
+    -sp,   cp*sr,             cp*cr,
+  ];
+}
+
+function rToEuler(R) {
+  // Inverse of eulerToR for reasonable pitches (|pitch| < 90).
+  const pitch = Math.asin(-Math.max(-1, Math.min(1, R[6])));
+  let yaw, roll;
+  if (Math.abs(Math.cos(pitch)) > 1e-6) {
+    yaw = Math.atan2(R[3], R[0]);
+    roll = Math.atan2(R[7], R[8]);
+  } else {
+    yaw = 0;
+    roll = Math.atan2(-R[5], R[4]);
+  }
+  return { yaw: yaw/DEG, pitch: pitch/DEG, roll: roll/DEG };
+}
+
+// Sampson distance between correspondence (x1, x2) under fundamental F.
+// F maps rays in cam 1 to epipolar lines in cam 2. Expects homogeneous pixels.
+function sampson(F, x1, x2) {
+  const Fx1 = mat.vec(F, x1);
+  const Ftx2 = mat.vec(mat.T(F), x2);
+  const num = x2[0]*Fx1[0] + x2[1]*Fx1[1] + x2[2]*Fx1[2];
+  const den = Fx1[0]*Fx1[0] + Fx1[1]*Fx1[1] + Ftx2[0]*Ftx2[0] + Ftx2[1]*Ftx2[1];
+  return den > 1e-12 ? (num*num) / den : 0;
+}
+
+// Signed perpendicular distance from pixel to the epipolar line (ax+by+c=0).
+function lineDist(l, p) {
+  const n = Math.sqrt(l[0]*l[0] + l[1]*l[1]);
+  return n > 1e-12 ? (l[0]*p[0] + l[1]*p[1] + l[2]) / n : 0;
+}
+
+// Intersect line a*u + b*v + c = 0 with an image rectangle [0,W] x [0,H].
+function lineRectIntersect(l, W, H) {
+  const a=l[0], b=l[1], c=l[2];
+  const pts = [];
+  const pushIf = (u, v) => {
+    if (u >= -1 && u <= W+1 && v >= -1 && v <= H+1) pts.push([u, v]);
+  };
+  if (Math.abs(b) > 1e-10) { pushIf(0, -c/b); pushIf(W, -(a*W+c)/b); }
+  if (Math.abs(a) > 1e-10) { pushIf(-c/a, 0); pushIf(-(b*H+c)/a, H); }
+  // de-dup
+  const out = [];
+  for (const p of pts) {
+    if (!out.some(q => Math.abs(q[0]-p[0]) < 1 && Math.abs(q[1]-p[1]) < 1)) out.push(p);
+  }
+  return out.slice(0, 2);
+}
+
+// ============================================================
+// Data loading
+// ============================================================
+const PHONE_COLORS = {
+  anna: '#ff5555',
+  sophia: '#55aaff',
+  valentine: '#55ff99',
+  javier: '#ff99ff',
+  kinect: '#ffd43b',
+};
+
+const state = {
+  phones: {},            // label -> { W, H, fx, fy, cx, cy, img, color, fx0 (initial) }
+  features: [],          // [{ name, clicks: {phone: [u,v]} }]
+  camA: 'valentine',
+  camB: 'sophia',
+  // Cam B pose relative to A (Simek "camera" parameterization: C + Euler, t = −R·C):
+  Cx: 500, Cy: 0, Cz: 0,
+  yaw: 0, pitch: 0, roll: 0,
+  // LM free-parameter mask
+  opt: { Cx: true, Cy: true, Cz: true, yaw: true, pitch: true, roll: true, fxA: false, fxB: false },
+  selected: null,        // feature index that is currently clicked
+  selectedFrom: null,    // phone label for the clicked image
+};
+
+// Undo history: array of pose snapshots; historyIdx points at the "current" entry.
+// Edits after an undo truncate the forward tail.
+const POSE_KEYS = ['Cx','Cy','Cz','yaw','pitch','roll'];
+const history = { stack: [], idx: -1 };
+
+function snapshotPose() {
+  const s = {}; for (const k of POSE_KEYS) s[k] = state[k]; s.pair = [state.camA, state.camB];
+  // Capture per-feature anchors so undo/redo restores them along with pose.
+  s.anchors = state.features.map(f => Array.isArray(f.world_xyz) ? f.world_xyz.slice() : null);
+  return s;
+}
+function applySnapshot(s) {
+  for (const k of POSE_KEYS) state[k] = s[k];
+  if (s.pair) { state.camA = s.pair[0]; state.camB = s.pair[1]; }
+  if (Array.isArray(s.anchors)) {
+    state.features.forEach((f, i) => {
+      const a = s.anchors[i];
+      f.world_xyz = Array.isArray(a) ? a.slice() : null;
+    });
+  }
+}
+function pushHistory() {
+  const snap = snapshotPose();
+  const top = history.stack[history.idx];
+  // Skip no-op pushes (pose, pair, and anchors all unchanged)
+  const anchorsMatch = (a, b) => {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i], y = b[i];
+      if (x === null && y === null) continue;
+      if (!Array.isArray(x) || !Array.isArray(y)) return false;
+      if (x[0] !== y[0] || x[1] !== y[1] || x[2] !== y[2]) return false;
+    }
+    return true;
+  };
+  if (top && POSE_KEYS.every(k => top[k] === snap[k]) && top.pair && top.pair[0] === snap.pair[0] && top.pair[1] === snap.pair[1] && anchorsMatch(top.anchors, snap.anchors)) return;
+  // Truncate forward history
+  if (history.idx < history.stack.length - 1) history.stack.length = history.idx + 1;
+  history.stack.push(snap);
+  history.idx = history.stack.length - 1;
+  // Cap history length
+  if (history.stack.length > 200) {
+    const drop = history.stack.length - 200;
+    history.stack.splice(0, drop);
+    history.idx -= drop;
+  }
+  updateHistoryPill();
+}
+function undo() {
+  if (history.idx <= 0) return;
+  history.idx--;
+  applySnapshot(history.stack[history.idx]);
+  // If pair changed as part of this snapshot, the selects must reflect it
+  document.getElementById('camA').value = state.camA;
+  document.getElementById('camB').value = state.camB;
+  refreshLabels(); render(); updateHistoryPill();
+}
+function redo() {
+  if (history.idx >= history.stack.length - 1) return;
+  history.idx++;
+  applySnapshot(history.stack[history.idx]);
+  document.getElementById('camA').value = state.camA;
+  document.getElementById('camB').value = state.camB;
+  refreshLabels(); render(); updateHistoryPill();
+}
+function updateHistoryPill() {
+  const el = document.getElementById('historyPill');
+  if (el) el.textContent = `${history.idx + 1}/${history.stack.length}`;
+}
+
+async function loadData() {
+  const intr = await (await fetch('intrinsics.json')).json();
+  for (const p of intr.phones) {
+    state.phones[p.label] = {
+      W: p.W, H: p.H,
+      fx: p.fx_px, fy: p.fx_px, fx0: p.fx_px,
+      cx: p.cx_px, cy: p.cy_px,
+      color: PHONE_COLORS[p.label] || '#ffffff',
+      img: null,
+    };
+  }
+  // Kinect proxy intrinsic — prefer the empirically-fitted K from
+  // scripts/fit_kinect_proxy_K.py (depth-anchored K-fit, accounts for the proxy's
+  // 90° rotation + 16:9 crop + scale chain off the factory color cam). Fall back to
+  // the buggy non-uniform scaling of the factory blob if the fit hasn't been run.
+  try {
+    const fit = await (await fetch('kinect_proxy_intrinsics_fitted.json')).json();
+    state.phones.kinect = {
+      W: fit.W, H: fit.H,
+      fx: fit.fx, fy: fit.fy, fx0: fit.fx,
+      cx: fit.cx, cy: fit.cy,
+      color: PHONE_COLORS.kinect,
+      img: null,
+    };
+  } catch (e) { /* fitted file missing, fall through */ }
+
+  if (!state.phones.kinect) {
+    try {
+      const kintr = await (await fetch('kinect_intrinsics.json')).json();
+      const color = (kintr.cameras || []).find(c => /PhotoVideo/i.test(c.purpose || ''));
+      if (color) {
+        // KNOWN-BUGGY: this assumes the proxy is an unrotated, anisotropically-scaled
+        // version of the native color frame. It isn't (it's a rotated 16:9 crop), so
+        // fx ends up about 2× too small. Use only as a last-resort fallback.
+        const sx = 1080 / color.W_px, sy = 1920 / color.H_px;
+        state.phones.kinect = {
+          W: 1080, H: 1920,
+          fx: color.fx_px * sx, fy: color.fy_px * sy, fx0: color.fx_px * sx,
+          cx: color.cx_px * sx, cy: color.cy_px * sy,
+          color: PHONE_COLORS.kinect,
+          img: null,
+        };
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  if (!state.phones.kinect) {
+    state.phones.kinect = {
+      W: 1080, H: 1920,
+      fx: 909.3, fy: 909.5, fx0: 909.3,
+      cx: 544.1, cy: 958.4,
+      color: PHONE_COLORS.kinect,
+      img: null,
+    };
+  }
+
+  // Load reference images
+  await Promise.all(Object.entries(state.phones).map(async ([label, p]) => {
+    const src = label === 'kinect' ? 'reference_frames/kinect.jpg' : `reference_frames/${label}.jpg`;
+    p.img = await loadImage(src);
+  }));
+
+  // Load correspondences — merge cross_features_merged.json and cross_features.json.
+  // Each feature optionally carries a 3D anchor (world_xyz, mm in cam A's frame).
+  const featMap = new Map();
+  try {
+    const merged = await (await fetch('cross_features_merged.json')).json();
+    for (const f of merged.features) {
+      featMap.set(f.name, {
+        name: f.name,
+        clicks: { ...f.clicks_per_phone },
+        world_xyz: Array.isArray(f.world_xyz_mm) ? f.world_xyz_mm.slice(0,3) : null,
+      });
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const base = await (await fetch('cross_features.json')).json();
+    for (const f of base.features) {
+      const existing = featMap.get(f.name) || { name: f.name, clicks: {}, world_xyz: null };
+      for (const [ph, xy] of Object.entries(f.clicks_per_phone)) {
+        if (!(ph in existing.clicks)) existing.clicks[ph] = xy;
+      }
+      // Don't pre-populate world_xyz from cross_features.json — those coords came from the
+      // earlier failed bundle-adjust and are known-bad. User supplies anchors via the UI.
+      featMap.set(f.name, existing);
+    }
+  } catch (e) { /* ignore */ }
+  // Ensure every feature has the world_xyz slot (null = unanchored).
+  state.features = Array.from(featMap.values()).map(f => ({ world_xyz: null, ...f }));
+}
+
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => { console.warn('failed to load', src); res(null); };
+    img.src = src;
+  });
+}
+
+// ============================================================
+// Geometry — explicit split between:
+//   • cameraMatrix(phone)  = K    (3×3, intrinsic: fx, fy, cx, cy)
+//   • viewMatrix(cam)      = [R|t] (3×4, extrinsic: world→camera)
+// A 3D world point P projects to pixel u = K · (R·P + t).
+//
+// Convention:
+//   Cam A is the world origin with identity rotation, so viewMatrix_A = [I | 0].
+//   The sliders control cam B's extrinsic:
+//     - R_AtoB = eulerToR(yaw, pitch, roll)     (rotates vectors from A's frame to B's frame)
+//     - C_B_inA = (Cx, Cy, Cz)                  (cam B optical center in A's frame)
+//     - t_BfromA = R_AtoB · (−C_B_inA)          (so in B's frame, cam B is at origin)
+// ============================================================
+
+function cameraMatrix(phone) {
+  return [phone.fx, 0, phone.cx,  0, phone.fy, phone.cy,  0, 0, 1];
+}
+
+function viewMatrixA() {
+  // Cam A at world origin
+  return { R: mat.I(), t: [0, 0, 0] };
+}
+
+function viewMatrixB(st) {
+  const R = eulerToR(st.yaw, st.pitch, st.roll);
+  const C = [st.Cx, st.Cy, st.Cz];
+  const t = mat.vec(R, [-C[0], -C[1], -C[2]]);
+  return { R, t };
+}
+
+// Project a 3D point given in world coords through a (view, K) pair. Returns {u, v, z}.
+function project(P_world, view, K) {
+  const p = mat.vec(view.R, P_world);
+  const pc = [p[0] + view.t[0], p[1] + view.t[1], p[2] + view.t[2]];
+  if (Math.abs(pc[2]) < 1e-9) return null;
+  const u = (K[0] * pc[0] / pc[2]) + K[2];
+  const v = (K[4] * pc[1] / pc[2]) + K[5];
+  return { u, v, z: pc[2] };
+}
+
+// Fundamental matrix built from the two view matrices and the two K's.
+// F maps a pixel in cam 1 to an epipolar line in cam 2 (x2ᵀ F x1 = 0).
+function fundamental(viewA, viewB, KA, KB) {
+  // Relative transform A→B: X_B = R_rel · X_A + t_rel
+  // X_A = R_A · X_w + t_A  =>  X_w = R_Aᵀ · (X_A − t_A)
+  // X_B = R_B · X_w + t_B = R_B R_Aᵀ X_A + (t_B − R_B R_Aᵀ t_A)
+  const R_A_T = mat.T(viewA.R);
+  const R_rel = mat.mul(viewB.R, R_A_T);
+  const RB_RAT_tA = mat.vec(R_rel, viewA.t);
+  const t_rel = [viewB.t[0] - RB_RAT_tA[0], viewB.t[1] - RB_RAT_tA[1], viewB.t[2] - RB_RAT_tA[2]];
+  const E = mat.mul(mat.skew(t_rel), R_rel);
+  const KB_invT = mat.T(mat.inv(KB));
+  const KA_inv = mat.inv(KA);
+  return mat.mul(mat.mul(KB_invT, E), KA_inv);
+}
+
+// Back-compat wrappers (older callers)
+function buildK(p) { return cameraMatrix(p); }
+function poseToRelative(st) {
+  const v = viewMatrixB(st); return { R: v.R, t: v.t };
+}
+function buildF(phA, phB, st) {
+  return fundamental(viewMatrixA(), viewMatrixB(st), cameraMatrix(phA), cameraMatrix(phB));
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+function renderCanvas(cvId, label, phone, otherLabel, otherPhone, F_thisFromOther, otherCamCenter_inThis, drawLine) {
+  const cv = document.getElementById(cvId);
+  const ctx = cv.getContext('2d');
+  // Fit canvas to its parent preserving image aspect
+  const wrap = cv.parentElement;
+  const ww = wrap.clientWidth, wh = wrap.clientHeight;
+  const ar = phone.W / phone.H;
+  let cw, ch;
+  if (ww / wh > ar) { ch = wh; cw = ch * ar; } else { cw = ww; ch = cw / ar; }
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
+  cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+  const s = cv.width / phone.W;
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (phone.img) ctx.drawImage(phone.img, 0, 0, cv.width, cv.height);
+
+  // Epipolar line + epipole marker — only drawn in the camera you DIDN'T click in.
+  // The line physically represents the back-projected ray from the other camera's optical
+  // center, through its clicked pixel, projected into this image. By construction every
+  // epipolar line passes through the epipole (= the other camera's projection here).
+  if (state.selected !== null && drawLine) {
+    const feat = state.features[state.selected];
+    const otherClick = feat.clicks[otherLabel];
+    if (otherClick) {
+      const l = mat.vec(F_thisFromOther, [otherClick[0], otherClick[1], 1]);
+      const pts = lineRectIntersect(l, phone.W, phone.H);
+
+      // Compute epipole (projection of the other camera's optical center into this image).
+      // Require ez > 0 — the other camera must be in front, otherwise the "epipole" is a
+      // virtual mirror point and drawing it would be misleading.
+      let ePx = null;
+      if (otherCamCenter_inThis && otherCamCenter_inThis[2] > 1e-6) {
+        const ez = otherCamCenter_inThis[2];
+        ePx = [
+          (phone.fx * otherCamCenter_inThis[0] / ez) + phone.cx,
+          (phone.fy * otherCamCenter_inThis[1] / ez) + phone.cy,
+        ];
+      }
+
+      if (pts.length === 2) {
+        ctx.strokeStyle = '#ffd43b';
+        ctx.lineWidth = 2 * dpr;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0]*s, pts[0][1]*s);
+        ctx.lineTo(pts[1][0]*s, pts[1][1]*s);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      // Epipole dot — shows where the "ray from the other camera" enters this image.
+      if (ePx) {
+        const ex = ePx[0] * s, ey = ePx[1] * s;
+        const inFrame = ePx[0] >= -40 && ePx[0] <= phone.W + 40 && ePx[1] >= -40 && ePx[1] <= phone.H + 40;
+        if (inFrame) {
+          ctx.save();
+          ctx.fillStyle = otherPhone.color;
+          ctx.strokeStyle = '#ffd43b';
+          ctx.lineWidth = 2 * dpr;
+          ctx.beginPath(); ctx.arc(ex, ey, 10*dpr, 0, Math.PI*2);
+          ctx.fill(); ctx.stroke();
+          ctx.font = `bold ${Math.round(10*dpr)}px 'SF Mono', Menlo, monospace`;
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'left';
+          ctx.fillText(`← cam ${otherLabel}`, ex + 14*dpr, ey + 4*dpr);
+          ctx.restore();
+        } else if (pts.length === 2) {
+          // Epipole off-frame — arrowhead at the image-edge closest to the epipole,
+          // pointing outward toward where the other camera lives.
+          const d0 = Math.hypot(pts[0][0] - ePx[0], pts[0][1] - ePx[1]);
+          const d1 = Math.hypot(pts[1][0] - ePx[0], pts[1][1] - ePx[1]);
+          const edge = d0 < d1 ? pts[0] : pts[1];
+          const far  = d0 < d1 ? pts[1] : pts[0];
+          const dx = edge[0] - far[0], dy = edge[1] - far[1];
+          const len = Math.hypot(dx, dy) || 1;
+          const ux = dx / len, uy = dy / len;
+          const tipX = edge[0] * s, tipY = edge[1] * s;
+          ctx.save();
+          ctx.fillStyle = otherPhone.color;
+          ctx.strokeStyle = '#ffd43b';
+          ctx.lineWidth = 1.5 * dpr;
+          ctx.beginPath();
+          ctx.moveTo(tipX, tipY);
+          ctx.lineTo(tipX - 16*dpr*ux - 7*dpr*uy, tipY - 16*dpr*uy + 7*dpr*ux);
+          ctx.lineTo(tipX - 16*dpr*ux + 7*dpr*uy, tipY - 16*dpr*uy - 7*dpr*ux);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          const fs = Math.round(10 * dpr);
+          ctx.font = `bold ${fs}px 'SF Mono', Menlo, monospace`;
+          const label = `→ ${otherLabel}`;
+          const tw = ctx.measureText(label).width;
+          // Place label just inside the image, behind the arrowhead.
+          const lx = tipX - 26*dpr*ux - tw/2;
+          const ly = tipY - 26*dpr*uy;
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(lx - 4*dpr, ly - fs*0.75, tw + 8*dpr, fs * 1.3);
+          ctx.fillStyle = otherPhone.color;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillText(label, lx, ly + fs*0.25);
+          ctx.restore();
+        }
+      }
+    }
+  }
+
+  // Draw feature dots visible in this phone
+  cv._hitTargets = [];
+  state.features.forEach((feat, fi) => {
+    const click = feat.clicks[label];
+    if (!click) return;
+    const [u, v] = click;
+    const px = u * s, py = v * s;
+    const isSel = (fi === state.selected);
+    const col = palette(fi);
+    // residual distance: if selected feature's clicked point in THIS cam — show offset to line
+    const r = isSel ? 9 * dpr : 6 * dpr;
+    ctx.beginPath(); ctx.arc(px, py, r + 3*dpr, 0, Math.PI*2);
+    ctx.fillStyle = col + '33'; ctx.fill();
+    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI*2);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.strokeStyle = isSel ? '#ffd43b' : '#fff';
+    ctx.lineWidth = isSel ? 2*dpr : 1*dpr;
+    ctx.stroke();
+
+    // Feature name — drawn in the feature's colour with a dark backing plate for legibility
+    const fontPx = Math.round((isSel ? 12 : 11) * dpr);
+    ctx.font = `${isSel ? 'bold ' : ''}${fontPx}px 'SF Mono', Menlo, monospace`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const tx = px + r + 5*dpr;
+    const ty = py - r - 3*dpr;
+    const tw = ctx.measureText(feat.name).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(tx - 3*dpr, ty - fontPx*0.65, tw + 6*dpr, fontPx * 1.3);
+    ctx.fillStyle = col;
+    ctx.fillText(feat.name, tx, ty);
+
+    cv._hitTargets.push({ fi, px, py, r: r + 4*dpr });
+  });
+}
+
+function palette(i) {
+  const hues = [0, 30, 60, 120, 180, 210, 270, 320];
+  return `hsl(${hues[i % hues.length]}, 85%, 60%)`;
+}
+
+function fmtNum(n, w=8) {
+  if (!isFinite(n)) return '   nan   ';
+  const s = Math.abs(n) < 1e-4 ? '0.0000' : n.toFixed(4);
+  return (n >= 0 ? ' ' : '') + s;
+}
+
+function renderMatrixDisplays(phA, phB) {
+  const vA = viewMatrixA();
+  const vB = viewMatrixB(state);
+  const KA = cameraMatrix(phA);
+  const KB = cameraMatrix(phB);
+
+  const rowOfView = (R, t, i) => `[ ${fmtNum(R[i*3+0])}  ${fmtNum(R[i*3+1])}  ${fmtNum(R[i*3+2])} | ${fmtNum(t[i])} ]`;
+  const rowOfK = (K, i) => `[ ${fmtNum(K[i*3+0])}  ${fmtNum(K[i*3+1])}  ${fmtNum(K[i*3+2])} ]`;
+
+  const view = document.getElementById('viewMatDisplay');
+  view.innerHTML = `
+    <div class="mat-label">cam A (${state.camA}) — world → camA</div>
+    <div>${rowOfView(vA.R, vA.t, 0)}</div>
+    <div>${rowOfView(vA.R, vA.t, 1)}</div>
+    <div>${rowOfView(vA.R, vA.t, 2)}</div>
+    <div class="mat-label">cam B (${state.camB}) — world(A-frame) → camB</div>
+    <div>${rowOfView(vB.R, vB.t, 0)}</div>
+    <div>${rowOfView(vB.R, vB.t, 1)}</div>
+    <div>${rowOfView(vB.R, vB.t, 2)}</div>
+  `;
+  const cam = document.getElementById('camMatDisplay');
+  cam.innerHTML = `
+    <div class="mat-label">K_A — cam A intrinsic</div>
+    <div>${rowOfK(KA, 0)}</div>
+    <div>${rowOfK(KA, 1)}</div>
+    <div>${rowOfK(KA, 2)}</div>
+    <div class="mat-label">K_B — cam B intrinsic</div>
+    <div>${rowOfK(KB, 0)}</div>
+    <div>${rowOfK(KB, 1)}</div>
+    <div>${rowOfK(KB, 2)}</div>
+  `;
+}
+
+function render(_skipHistory) {
+  const phA = state.phones[state.camA];
+  const phB = state.phones[state.camB];
+  if (!phA || !phB) return;
+  // F_BfromA: maps pt in A -> line in B
+  const F_BfromA = buildF(phA, phB, state);
+  // F_AfromB = F_BfromA^T  (this is the line-in-A from a point-in-B relation for fundamental matrices)
+  const F_AfromB = mat.T(F_BfromA);
+
+  // Camera centers expressed in the OTHER camera's frame — used to draw the epipole marker.
+  // Cam B optical center in A's frame = [Cx, Cy, Cz] (this is exactly what the sliders expose).
+  // Cam A optical center in B's frame = R·0 + t = t (since A is the origin of A's frame, and
+  // the transform taking A-frame points into B-frame points is X_B = R·X_A + t).
+  const { R, t } = poseToRelative(state);
+  const camBcenter_inA = [state.Cx, state.Cy, state.Cz];
+  const camAcenter_inB = t;
+
+  // Draw the epipolar line in the SAME image you clicked in. The line represents the other
+  // camera's view of the same feature projected into this image, so you adjust sliders
+  // until the line passes through your clicked dot. When the feature was selected from
+  // the residuals panel (selectedFrom is null), show the line in both images as a fallback.
+  const fromResiduals = state.selected !== null && state.selectedFrom === null;
+  const drawInA = state.selected !== null && (fromResiduals || state.selectedFrom === state.camA);
+  const drawInB = state.selected !== null && (fromResiduals || state.selectedFrom === state.camB);
+  renderCanvas('cvA', state.camA, phA, state.camB, phB, F_AfromB, camBcenter_inA, drawInA);
+  renderCanvas('cvB', state.camB, phB, state.camA, phA, F_BfromA, camAcenter_inB, drawInB);
+
+  renderMatrixDisplays(phA, phB);
+
+  // Residuals display
+  renderResiduals(phA, phB, F_BfromA);
+  renderAnchors();
+  syncSliders();
+  exportJSON();
+}
+
+// ============================================================
+// 3D anchors panel — one row per feature with XYZ inputs.
+// World frame = cam A's frame (since cam A is fixed at the world origin).
+// ============================================================
+let _anchorsBuilt = false;
+function renderAnchors() {
+  const el = document.getElementById('anchorsPanel');
+  if (!el) return;
+  // Rebuild full HTML when feature count changes; otherwise just update values
+  // to preserve focus inside an input that's being edited.
+  if (!_anchorsBuilt || el.querySelectorAll('.row[data-fi]').length !== state.features.length) {
+    const parts = ['<div class="row hdr-row"><span></span><span>feature</span><span>X</span><span>Y</span><span>Z</span><span></span></div>'];
+    state.features.forEach((feat, fi) => {
+      const col = palette(fi);
+      parts.push(
+        `<div class="row" data-fi="${fi}">` +
+        `<span class="dot" style="background:${col}"></span>` +
+        `<span class="name">${feat.name}</span>` +
+        `<input data-ax="0" placeholder="X">` +
+        `<input data-ax="1" placeholder="Y">` +
+        `<input data-ax="2" placeholder="Z">` +
+        `<button class="clr" title="clear">×</button>` +
+        `</div>`
+      );
+    });
+    el.innerHTML = parts.join('');
+    for (const row of el.querySelectorAll('.row[data-fi]')) {
+      const fi = +row.dataset.fi;
+      const inputs = row.querySelectorAll('input');
+      const update = () => {
+        const vals = Array.from(inputs).map(i => i.value.trim());
+        if (vals.every(v => v === '')) {
+          state.features[fi].world_xyz = null;
+        } else if (vals.some(v => v === '' || !isFinite(+v))) {
+          // partial — keep whatever's set locally but don't anchor yet
+          state.features[fi].world_xyz = null;
+        } else {
+          state.features[fi].world_xyz = vals.map(Number);
+        }
+        inputs.forEach(i => i.classList.toggle('set', i.value.trim() !== ''));
+        render(); pushHistory();
+      };
+      inputs.forEach(i => i.addEventListener('change', update));
+      row.querySelector('.clr').addEventListener('click', () => {
+        inputs.forEach(i => { i.value = ''; i.classList.remove('set'); });
+        state.features[fi].world_xyz = null;
+        render(); pushHistory();
+      });
+    }
+    _anchorsBuilt = true;
+  }
+  // Sync input values + highlight from current state (keeps displayed values in lockstep
+  // with history undo/redo or programmatic changes).
+  for (const row of el.querySelectorAll('.row[data-fi]')) {
+    const fi = +row.dataset.fi;
+    const wxyz = state.features[fi].world_xyz;
+    const inputs = row.querySelectorAll('input');
+    inputs.forEach((inp, ax) => {
+      const newVal = (wxyz && isFinite(wxyz[ax])) ? String(wxyz[ax]) : '';
+      if (document.activeElement !== inp) inp.value = newVal;
+      inp.classList.toggle('set', inp.value.trim() !== '');
+    });
+  }
+}
+
+// ============================================================
+// Residuals panel
+// ============================================================
+function renderResiduals(phA, phB, F_BfromA) {
+  const el = document.getElementById('residuals');
+  const viewA = viewMatrixA(), viewB = viewMatrixB(state);
+  const KA = cameraMatrix(phA), KB = cameraMatrix(phB);
+  const rows = [];
+  let sumSq = 0, nRes = 0, nAnchored = 0, nPair = 0;
+  const fmt = (x) => (x === null ? '—' : x.toFixed(1));
+
+  state.features.forEach((feat, fi) => {
+    const a = feat.clicks[state.camA], b = feat.clicks[state.camB];
+    const anchored = Array.isArray(feat.world_xyz);
+    let sA = null, sB = null, sym = null, type = 'sampson';
+
+    if (anchored) {
+      type = 'reproj';
+      nAnchored++;
+      if (a) {
+        const p = project(feat.world_xyz, viewA, KA);
+        if (p) { sA = Math.hypot(p.u - a[0], p.v - a[1]); sumSq += sA*sA; nRes += 2; }
+      }
+      if (b) {
+        const p = project(feat.world_xyz, viewB, KB);
+        if (p) { sB = Math.hypot(p.u - b[0], p.v - b[1]); sumSq += sB*sB; nRes += 2; }
+      }
+      let sq = 0, k = 0;
+      if (sA !== null) { sq += sA*sA; k++; }
+      if (sB !== null) { sq += sB*sB; k++; }
+      if (k) sym = Math.sqrt(sq / k);
+    } else {
+      if (!a || !b) return;
+      const x1 = [a[0], a[1], 1], x2 = [b[0], b[1], 1];
+      const lB = mat.vec(F_BfromA, x1);
+      const lA = mat.vec(mat.T(F_BfromA), x2);
+      sA = Math.abs(lineDist(lA, x1));
+      sB = Math.abs(lineDist(lB, x2));
+      const s2 = sampson(F_BfromA, x1, x2);
+      sym = Math.sqrt(Math.max(0, s2));
+      sumSq += s2; nRes++; nPair++;
+    }
+    rows.push({ fi, name: feat.name, color: palette(fi), sA, sB, sym, type });
+  });
+
+  if (rows.length === 0) {
+    el.innerHTML = '<div class="row hdr-row"><span></span><span>No correspondences in both cameras.</span><span></span><span></span><span></span></div>';
+    return;
+  }
+  const rms = nRes > 0 ? Math.sqrt(sumSq / nRes) : 0;
+  const parts = [];
+  parts.push('<div class="row hdr-row"><span></span><span>feature</span><span>A</span><span>B</span><span>Σ</span></div>');
+  for (const r of rows) {
+    const selCls = (r.fi === state.selected) ? ' selected' : '';
+    const tag = r.type === 'reproj' ? '<span class="anchor-tag">⚓</span>' : '';
+    parts.push(
+      `<div class="row${selCls}" data-fi="${r.fi}">` +
+      `<span class="dot" style="background:${r.color}"></span>` +
+      `<span class="name">${r.name}${tag}</span>` +
+      `<span>${fmt(r.sA)}</span>` +
+      `<span>${fmt(r.sB)}</span>` +
+      `<span>${fmt(r.sym)}</span>` +
+      `</div>`
+    );
+  }
+  const summary = `RMS (${nPair}pair${nAnchored ? ' / '+nAnchored+'⚓' : ''})`;
+  parts.push(`<div class="row total"><span></span><span>${summary}</span><span></span><span></span><span>${rms.toFixed(2)}</span></div>`);
+  el.innerHTML = parts.join('');
+
+  // Clickable rows — select that feature (same behavior as clicking a dot in the canvas)
+  for (const rowEl of el.querySelectorAll('.row[data-fi]')) {
+    rowEl.addEventListener('click', () => {
+      const fi = +rowEl.dataset.fi;
+      if (state.selected === fi) { state.selected = null; state.selectedFrom = null; }
+      else { state.selected = fi; state.selectedFrom = null; }  // null ⇒ show line in both cams
+      render();
+    });
+  }
+
+  const st = document.getElementById('status');
+  st.textContent = `RMS ${rms.toFixed(1)} px · ${nPair}p + ${nAnchored}⚓`;
+  st.className = 'pill ' + (rms < 3 ? '' : rms < 20 ? 'warn' : 'bad');
+}
+
+// ============================================================
+// Levenberg–Marquardt (6 params, N residuals)
+// ============================================================
+// Collect residuals using arbitrary view matrices + K's.
+// Feature policy:
+//   - world_xyz set  → 2 scalar reprojection residuals per camera it's visible in
+//                      (in pixel units, matches Sampson magnitude).
+//   - world_xyz null → 1 scalar √Sampson, needs visibility in BOTH cameras.
+function collectResidualsFromMatrices(viewA, viewB, KA, KB) {
+  const F = fundamental(viewA, viewB, KA, KB);
+  const res = [];
+  for (const feat of state.features) {
+    const a = feat.clicks[state.camA], b = feat.clicks[state.camB];
+    if (Array.isArray(feat.world_xyz)) {
+      if (a) {
+        const p = project(feat.world_xyz, viewA, KA);
+        if (p) { res.push(p.u - a[0]); res.push(p.v - a[1]); }
+      }
+      if (b) {
+        const p = project(feat.world_xyz, viewB, KB);
+        if (p) { res.push(p.u - b[0]); res.push(p.v - b[1]); }
+      }
+    } else {
+      if (!a || !b) continue;
+      const x1 = [a[0], a[1], 1], x2 = [b[0], b[1], 1];
+      res.push(Math.sqrt(Math.max(0, sampson(F, x1, x2))));
+    }
+  }
+  return res;
+}
+
+// Build the list of free parameters (per state.opt). Each entry: {key, get, set, eps, clamp}.
+function buildParamVector(phA, phB) {
+  const items = [];
+  const mkPose = (k, eps) => ({
+    key: k,
+    get: () => state[k],
+    set: (v) => { state[k] = v; },
+    eps,
+  });
+  const mkFx = (phone, label) => ({
+    key: 'fx_' + label,
+    get: () => phone.fx,
+    set: (v) => { phone.fx = v; phone.fy = v; },   // keep square-pixel (fy == fx)
+    eps: Math.max(2, phone.fx0 * 0.005),
+    clamp: (v) => Math.max(50, v),
+  });
+  if (state.opt.Cx)    items.push(mkPose('Cx', 10));
+  if (state.opt.Cy)    items.push(mkPose('Cy', 10));
+  if (state.opt.Cz)    items.push(mkPose('Cz', 10));
+  if (state.opt.yaw)   items.push(mkPose('yaw', 0.1));
+  if (state.opt.pitch) items.push(mkPose('pitch', 0.1));
+  if (state.opt.roll)  items.push(mkPose('roll', 0.1));
+  if (state.opt.fxA)   items.push(mkFx(phA, 'A'));
+  if (state.opt.fxB)   items.push(mkFx(phB, 'B'));
+  return items;
+}
+
+function runLM() {
+  const phA = state.phones[state.camA], phB = state.phones[state.camB];
+  const params = buildParamVector(phA, phB);
+  if (params.length === 0) { document.getElementById('status').textContent = 'LM: nothing to optimize'; return; }
+
+  const resFn = () => collectResidualsFromMatrices(viewMatrixA(), viewMatrixB(state), cameraMatrix(phA), cameraMatrix(phB));
+  const getAll = () => params.map(p => p.get());
+  const setAll = (vs) => params.forEach((p, i) => p.set(p.clamp ? p.clamp(vs[i]) : vs[i]));
+
+  let p = getAll();
+  let r = resFn();
+  let chi2 = r.reduce((s,x)=>s+x*x, 0);
+  let lambda = 1e-3;
+  const eps = params.map(x => x.eps);
+
+  for (let iter = 0; iter < 80; iter++) {
+    const nR = r.length, nP = p.length;
+    if (nR < nP) break;  // under-determined — can't invert normal equations reliably
+    // Numerical Jacobian (forward diff). For each param, perturb, evaluate, restore.
+    const J = new Array(nR); for (let i=0;i<nR;i++) J[i] = new Array(nP).fill(0);
+    for (let j = 0; j < nP; j++) {
+      const old = p[j];
+      setAll(p.map((x, k) => k === j ? x + eps[j] : x));
+      const rp = resFn();
+      for (let i = 0; i < nR; i++) J[i][j] = (rp[i] - r[i]) / eps[j];
+      setAll(p);  // restore
+    }
+    // Normal equations JᵀJ·dp = −Jᵀr with Marquardt damping
+    const JtJ = new Array(nP); for (let a=0;a<nP;a++) JtJ[a] = new Array(nP).fill(0);
+    const Jtr = new Array(nP).fill(0);
+    for (let a = 0; a < nP; a++) {
+      for (let b = 0; b < nP; b++) {
+        for (let i = 0; i < nR; i++) JtJ[a][b] += J[i][a] * J[i][b];
+      }
+      for (let i = 0; i < nR; i++) Jtr[a] += J[i][a] * r[i];
+    }
+    const H = JtJ.map(row => row.slice());
+    for (let a = 0; a < nP; a++) H[a][a] *= (1 + lambda);
+    const dp = solveLinear(H, Jtr.map(x => -x));
+    if (!dp) break;
+    const pNew = p.map((x, i) => x + dp[i]);
+    setAll(pNew);
+    const rNew = resFn();
+    const chi2New = rNew.reduce((s,x)=>s+x*x, 0);
+    if (chi2New < chi2) {
+      const improvement = chi2 - chi2New;
+      p = pNew; r = rNew; chi2 = chi2New;
+      lambda = Math.max(lambda * 0.5, 1e-8);
+      if (improvement < 1e-6) break;
+    } else {
+      setAll(p);  // reject step
+      lambda = Math.min(lambda * 3, 1e7);
+      if (lambda > 1e6) break;
+    }
+  }
+  render(); pushHistory();
+}
+
+function solveLinear(A, b) {
+  const n = b.length;
+  const M = A.map(row => row.slice());
+  const x = b.slice();
+  for (let i = 0; i < n; i++) {
+    let maxRow = i, maxVal = Math.abs(M[i][i]);
+    for (let k = i+1; k < n; k++) if (Math.abs(M[k][i]) > maxVal) { maxRow = k; maxVal = Math.abs(M[k][i]); }
+    if (maxVal < 1e-15) return null;
+    if (maxRow !== i) { [M[i], M[maxRow]] = [M[maxRow], M[i]]; [x[i], x[maxRow]] = [x[maxRow], x[i]]; }
+    const piv = M[i][i];
+    for (let k = i+1; k < n; k++) {
+      const f = M[k][i] / piv;
+      for (let j = i; j < n; j++) M[k][j] -= f * M[i][j];
+      x[k] -= f * x[i];
+    }
+  }
+  const out = new Array(n).fill(0);
+  for (let i = n-1; i >= 0; i--) {
+    let s = x[i];
+    for (let j = i+1; j < n; j++) s -= M[i][j] * out[j];
+    out[i] = s / M[i][i];
+  }
+  return out;
+}
+
+// ============================================================
+// Auto-init: seed from pose_*_kinect_anchored.json if available
+// ============================================================
+async function autoInit() {
+  // If both cams have kinect-anchored poses, compute relative pose directly.
+  // Pose stored as R (world→cam in Kinect frame) and t_mm. Then:
+  //   R_rel = R_B @ R_A^T,  t_rel = t_B - R_rel @ t_A.
+  // Cam B center in A's frame: C_A = R_A @ C_world_B + t_A_of_world ... wait, simpler:
+  // Each pose satisfies p_cam = R * P_world + t, so P_world = R^T @ (p_cam - t).
+  // For point at B's center (p_cam_B = 0): P_world_B = -R_B^T @ t_B.
+  // In A's frame: p_cam_A = R_A @ P_world_B + t_A = R_A @ (-R_B^T @ t_B) + t_A.
+  const labels = [state.camA, state.camB];
+  const poses = {};
+  for (const lbl of labels) {
+    try {
+      const p = await (await fetch(`pose_${lbl}_kinect_anchored.json`)).json();
+      poses[lbl] = { R: flattenR(p.R), t: p.t_mm };
+    } catch (e) { /* not available */ }
+  }
+  if (poses[state.camA] && poses[state.camB]) {
+    const RA = poses[state.camA].R, tA = poses[state.camA].t;
+    const RB = poses[state.camB].R, tB = poses[state.camB].t;
+    const RA_T = mat.T(RA);
+    const R_rel = mat.mul(RB, RA_T);  // world(A frame)->B
+    // cam B center in world: C_w = -R_B^T @ t_B
+    const Cw = mat.vec(mat.T(RB), [-tB[0], -tB[1], -tB[2]]);
+    // Express in A frame: C_A = R_A @ C_w + t_A
+    const C_A_full = mat.vec(RA, Cw);
+    const C_A = [C_A_full[0]+tA[0], C_A_full[1]+tA[1], C_A_full[2]+tA[2]];
+    const euler = rToEuler(R_rel);
+    state.Cx = C_A[0]; state.Cy = C_A[1]; state.Cz = C_A[2];
+    state.yaw = euler.yaw; state.pitch = euler.pitch; state.roll = euler.roll;
+    render(); pushHistory();
+    document.getElementById('status').textContent = 'auto-init: from kinect-anchored poses';
+  } else {
+    // Fallback: centre B at a plausible 1 m offset along A's +X
+    state.Cx = 1000; state.Cy = 0; state.Cz = 0;
+    state.yaw = 0; state.pitch = 0; state.roll = 0;
+    render(); pushHistory();
+    document.getElementById('status').textContent = 'auto-init: no anchored poses; using default 1 m +X';
+  }
+}
+
+function flattenR(R) { return [R[0][0],R[0][1],R[0][2], R[1][0],R[1][1],R[1][2], R[2][0],R[2][1],R[2][2]]; }
+
+// ============================================================
+// UI wiring
+// ============================================================
+function syncSliders() {
+  for (const k of ['Cx','Cy','Cz','yaw','pitch','roll']) {
+    document.getElementById(k+'_r').value = state[k];
+    document.getElementById(k+'_n').value = +state[k].toFixed(2);
+  }
+  const phA = state.phones[state.camA], phB = state.phones[state.camB];
+  if (phA) { document.getElementById('fxA_r').value = phA.fx; document.getElementById('fxA_n').value = +phA.fx.toFixed(1); }
+  if (phB) { document.getElementById('fxB_r').value = phB.fx; document.getElementById('fxB_n').value = +phB.fx.toFixed(1); }
+}
+
+function bindSlider(key) {
+  const r = document.getElementById(key+'_r');
+  const n = document.getElementById(key+'_n');
+  r.addEventListener('input', () => { state[key] = +r.value; render(true); });
+  r.addEventListener('change', () => { state[key] = +r.value; render(); pushHistory(); });
+  n.addEventListener('change', () => { state[key] = +n.value; render(); pushHistory(); });
+}
+
+// fx sliders edit the active phone intrinsic in-place (cam A or cam B in the pair).
+function bindFxSlider(suffix, getPhone) {
+  const r = document.getElementById('fx' + suffix + '_r');
+  const n = document.getElementById('fx' + suffix + '_n');
+  const apply = (v, withHistory) => {
+    const ph = getPhone();
+    if (!ph) return;
+    ph.fx = +v; ph.fy = +v;
+    render(!withHistory);
+    if (withHistory) pushHistory();
+  };
+  r.addEventListener('input', () => apply(r.value, false));
+  r.addEventListener('change', () => apply(r.value, true));
+  n.addEventListener('change', () => apply(n.value, true));
+}
+
+function buildOptGrid() {
+  const grid = document.getElementById('optGrid');
+  const spec = [
+    ['Cx', 'Cx'], ['Cy', 'Cy'], ['Cz', 'Cz'],
+    ['yaw', 'yaw'], ['pitch', 'pitch'], ['roll', 'roll'],
+    ['fxA', 'fx_A'], ['fxB', 'fx_B'],
+  ];
+  grid.innerHTML = spec.map(([k, lbl]) =>
+    `<label><input type="checkbox" data-opt="${k}"${state.opt[k] ? ' checked' : ''}>${lbl}</label>`
+  ).join('');
+  for (const cb of grid.querySelectorAll('input[data-opt]')) {
+    cb.addEventListener('change', () => {
+      state.opt[cb.dataset.opt] = cb.checked;
+    });
+  }
+}
+
+function populateSelects() {
+  const selA = document.getElementById('camA'), selB = document.getElementById('camB');
+  selA.innerHTML = ''; selB.innerHTML = '';
+  for (const lbl of Object.keys(state.phones)) {
+    selA.add(new Option(lbl, lbl));
+    selB.add(new Option(lbl, lbl));
+  }
+  selA.value = state.camA; selB.value = state.camB;
+  selA.onchange = () => { state.camA = selA.value; refreshLabels(); render(); pushHistory(); };
+  selB.onchange = () => { state.camB = selB.value; refreshLabels(); render(); pushHistory(); };
+}
+
+function refreshLabels() {
+  const phA = state.phones[state.camA], phB = state.phones[state.camB];
+  document.getElementById('labelA').textContent = `cam A · ${state.camA} (${phA.W}×${phA.H})`;
+  document.getElementById('labelB').textContent = `cam B · ${state.camB} (${phB.W}×${phB.H})`;
+  document.getElementById('dotA').style.background = phA.color;
+  document.getElementById('dotB').style.background = phB.color;
+}
+
+function bindCanvasClick(cvId, label) {
+  const cv = document.getElementById(cvId);
+  cv.addEventListener('click', (e) => {
+    const rect = cv.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) * (cv.width / rect.width);
+    const cy = (e.clientY - rect.top) * (cv.height / rect.height);
+    const targets = cv._hitTargets || [];
+    let best = null, bestD = Infinity;
+    for (const t of targets) {
+      const d = Math.hypot(t.px - cx, t.py - cy);
+      if (d < t.r * 2 && d < bestD) { best = t; bestD = d; }
+    }
+    if (best) {
+      state.selected = (state.selected === best.fi) ? null : best.fi;
+      state.selectedFrom = label;
+    } else {
+      state.selected = null;
+    }
+    render();
+  });
+}
+
+function exportJSON() {
+  const phA = state.phones[state.camA], phB = state.phones[state.camB];
+  const { R, t } = poseToRelative(state);
+  const anchors = state.features
+    .filter(f => Array.isArray(f.world_xyz))
+    .map(f => ({ name: f.name, world_xyz_mm: f.world_xyz }));
+  const pack = {
+    pair: [state.camA, state.camB],
+    cam_A_intrinsics: { fx: phA.fx, fy: phA.fy, cx: phA.cx, cy: phA.cy, W: phA.W, H: phA.H },
+    cam_B_intrinsics: { fx: phB.fx, fy: phB.fy, cx: phB.cx, cy: phB.cy, W: phB.W, H: phB.H },
+    cam_B_center_in_A_frame_mm: [state.Cx, state.Cy, state.Cz],
+    cam_B_euler_deg: { yaw: state.yaw, pitch: state.pitch, roll: state.roll },
+    R_AtoB: [[R[0],R[1],R[2]], [R[3],R[4],R[5]], [R[6],R[7],R[8]]],
+    t_BfromA: t,
+    anchors,
+    notes: [
+      'R and t satisfy:  X_B = R_AtoB @ X_A + t_BfromA  (points expressed in each cam frame).',
+      anchors.length ? 'Scale is resolved by the 3D anchors listed above.' : 'Scale of (R,t) is arbitrary; epipolar geometry only constrains t up to a positive scalar.',
+    ],
+  };
+  document.getElementById('exportArea').value = JSON.stringify(pack, null, 2);
+  return pack;
+}
+
+// ============================================================
+// Boot
+// ============================================================
+(async () => {
+  document.getElementById('status').textContent = 'loading…';
+  await loadData();
+  populateSelects();
+  refreshLabels();
+
+  for (const k of ['Cx','Cy','Cz','yaw','pitch','roll']) bindSlider(k);
+  bindFxSlider('A', () => state.phones[state.camA]);
+  bindFxSlider('B', () => state.phones[state.camB]);
+  buildOptGrid();
+  bindCanvasClick('cvA', state.camA);
+  bindCanvasClick('cvB', state.camB);
+  document.getElementById('swapBtn').onclick = () => {
+    [state.camA, state.camB] = [state.camB, state.camA];
+    document.getElementById('camA').value = state.camA;
+    document.getElementById('camB').value = state.camB;
+    refreshLabels(); render(); pushHistory();
+  };
+  document.getElementById('lmBtn').onclick = runLM;
+  document.getElementById('resetBtn').onclick = () => {
+    state.Cx = 500; state.Cy = 0; state.Cz = 0;
+    state.yaw = 0; state.pitch = 0; state.roll = 0;
+    render(); pushHistory();
+  };
+  document.getElementById('autoInitBtn').onclick = autoInit;
+  document.getElementById('copyBtn').onclick = () => {
+    navigator.clipboard.writeText(document.getElementById('exportArea').value);
+    document.getElementById('status').textContent = 'copied to clipboard';
+  };
+  document.getElementById('undoBtn').onclick = undo;
+  document.getElementById('redoBtn').onclick = redo;
+
+  // Keyboard shortcuts: Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redo
+  window.addEventListener('keydown', (e) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;  // don't swallow edits in fields
+    if (e.key === 'z' || e.key === 'Z') {
+      e.preventDefault();
+      if (e.shiftKey) redo(); else undo();
+    } else if (e.key === 'y') {
+      e.preventDefault(); redo();
+    }
+  });
+
+  window.addEventListener('resize', () => render(true));
+
+  await autoInit();  // seed from anchored poses if available
+})();
+</script>
+</body>
+</html>

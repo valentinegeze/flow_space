@@ -1,0 +1,28 @@
+# OS junk
+.DS_Store
+**/.DS_Store
+
+# IDE / agent state
+.claude/
+.vscode/
+
+# Build output
+mosaic-flow/build/
+
+# Source video footage (too large for git — 22GB)
+stream-table/videos/
+
+# Large intermediate / overlay videos
+stream-table/calib/*.mp4
+stream-table/calib/optical_flow/flow_overlay.mp4
+stream-table/sync/review_grid.mp4
+
+# Plotly standalone bundles with data baked in (regenerated from source)
+stream-table/calib/*standalone*.html
+stream-table/calib/kinect_3d_bed.html
+stream-table/calib/optical_flow/index_standalone.html
+stream-table/calib/bed_timeseries/standalone.html
+
+# Point clouds (regenerable)
+stream-table/calib/*.ply
+stream-table/calib/*.xyz

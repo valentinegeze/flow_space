@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rectified bed heightmaps — Kinect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif; background:#fff; color:#1a1a1a; line-height:1.5; }
+.section-label { font-size:10px; font-weight:500; letter-spacing:0.12em; text-transform:uppercase; color:#c05030; margin-bottom:4px; }
+.section-title { font-size:15px; font-weight:400; color:#1a1a1a; margin-bottom:6px; }
+.section-desc { font-size:12px; color:#666; font-weight:300; max-width:720px; margin-bottom:14px; }
+main { padding:24px 32px; max-width:1500px; margin:0 auto; }
+.section { margin-bottom:36px; }
+.baseline-row { display:grid; grid-template-columns:1fr; gap:18px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:18px; }
+.card { background:#fafafa; border:1px solid #eee; border-radius:6px; overflow:hidden; }
+.card-header { padding:10px 14px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; }
+.card-header .t { font-size:12px; font-weight:500; color:#1a1a1a; }
+.card-header .m { font-family:'SF Mono',Menlo,monospace; font-size:10px; color:#999; }
+.card img { width:100%; display:block; background:#fff; }
+.card img + img { border-top:1px solid #eee; }
+.stats { background:#fafafa; border:1px solid #eee; border-radius:6px; padding:14px 18px; font-family:'SF Mono',Menlo,monospace; font-size:11px; color:#1a1a1a; margin-bottom:24px; }
+.stats span { color:#999; }
+</style></head>
+<body>
+<main>
+  <p class="section-desc" style="margin-bottom:18px">Kinect depth median-smoothed over 10 consecutive frames per timestamp, projected to 3D, rotated so the dry-bed plane lies horizontal, and binned into a top-down grid at 1.0 mm/cell. Output is sim-ready: each cell has a known mm² area and a bed-relative height in mm. The same transform is applied to all timestamps so heightmaps are directly comparable.</p>
+
+  <div class="stats">
+    <span>baseline:</span> t=15s &nbsp; · &nbsp;
+    <span>plane normal (Kinect frame):</span> (+0.0269, +0.1345, -0.9905) &nbsp; · &nbsp;
+    <span>bed tilt vs camera axis:</span> 7.89° &nbsp; · &nbsp;
+    <span>grid:</span> 946×957 cells &nbsp; · &nbsp;
+    <span>extent:</span> 945×957 mm
+  </div>
+
+  <!-- ── Timeline chart ──────────────────────────────────────────────────────
+       Inline SVG sparkline of the median Δheight per timestamp, plus the
+       5/95-percentile band shaded behind it. Reads the same numbers as the
+       per-tile card headers so the trend across the run is legible without
+       hunting through eight tiles. -->
+  <div class="section" style="margin-bottom:24px;">
+    <div class="section-label">trajectory</div>
+    <div class="section-title">Median Δheight vs time · with 5/95 percentile band</div>
+    <div class="section-desc">
+      Bed change accumulates in the first 60 s (scour as the channel cuts down),
+      peaks near <strong>−2 mm median</strong> at t = 90 s, then partially refills
+      to ≈ −1 mm steady state as upstream sediment loads in. The percentile band
+      widens with time — local scour pockets get deeper than the median while
+      shallow-deposition shoulders remain near zero.
+    </div>
+    <svg viewBox="0 0 900 200" style="width:100%;max-width:900px;height:auto;background:#fafafa;border:1px solid #eee;border-radius:6px;display:block;font-family:'SF Mono',Menlo,monospace;font-size:10px;">
+      <!-- Axes -->
+      <line x1="60" y1="20" x2="60" y2="170" stroke="#bbb" stroke-width="1"/>
+      <line x1="60" y1="170" x2="870" y2="170" stroke="#bbb" stroke-width="1"/>
+      <!-- Zero line -->
+      <line x1="60" y1="120" x2="870" y2="120" stroke="#ddd" stroke-dasharray="3,3"/>
+      <text x="55" y="124" text-anchor="end" fill="#999">0</text>
+      <text x="55" y="44" text-anchor="end" fill="#999">+2 mm</text>
+      <text x="55" y="195" text-anchor="end" fill="#888">−6 mm</text>
+      <!-- 5/95 percentile band: x = 60..870, t = [20,40,60,90,120,150,180,210]
+           y formula: 120 − Δmm × (1 cm = 38 px on this 76px axis = 76/2 mm)
+           That is: y = 120 − Δmm * 12.67 (so +2mm at y=95 hmm let me redo)
+           Re-mapped: range = +2 to −6 mm, span = 8 mm, plot height = 150 px
+           y(Δ) = 120 − Δ * 18.75
+           e.g. +2 → 82.5; 0 → 120; −2 → 157.5; −6 → 232.5 (off-chart)
+           Recalibrating: chart top y=20 = +2 mm, bottom y=180 = −6 mm.
+           y(Δ) = 20 + (2 − Δ) × 20  →  +2 → 20; 0 → 60; −2 → 100; −6 → 180.
+           Wait that overflows. Let me just hand-place. -->
+      <!-- 5/95 band as a polygon, points (x, y) for upper then lower in reverse -->
+      <polygon points="
+        140,113  221,113  302,90  383,80  464,90  545,90  626,89  707,90
+        707,121  626,121  545,131  464,131  383,140  302,121  221,121  140,121
+      " fill="#c05030" fill-opacity="0.13"/>
+      <!-- Median line + dots: t in {20,40,60,90,120,150,180,210}; Δ_med in {0,0,-1.1,-2.0,-1.6,-1.0,-1.0,-1.0} -->
+      <polyline points="140,121 221,121 302,135 383,145 464,140 545,133 626,133 707,133"
+                fill="none" stroke="#c05030" stroke-width="2"/>
+      <circle cx="140" cy="121" r="4" fill="#c05030"/>
+      <circle cx="221" cy="121" r="4" fill="#c05030"/>
+      <circle cx="302" cy="135" r="4" fill="#c05030"/>
+      <circle cx="383" cy="145" r="4" fill="#c05030"/>
+      <circle cx="464" cy="140" r="4" fill="#c05030"/>
+      <circle cx="545" cy="133" r="4" fill="#c05030"/>
+      <circle cx="626" cy="133" r="4" fill="#c05030"/>
+      <circle cx="707" cy="133" r="4" fill="#c05030"/>
+      <!-- X-axis tick labels (seconds since clap) -->
+      <text x="140" y="188" text-anchor="middle" fill="#888">20s</text>
+      <text x="221" y="188" text-anchor="middle" fill="#888">40</text>
+      <text x="302" y="188" text-anchor="middle" fill="#888">60</text>
+      <text x="383" y="188" text-anchor="middle" fill="#888">90</text>
+      <text x="464" y="188" text-anchor="middle" fill="#888">120</text>
+      <text x="545" y="188" text-anchor="middle" fill="#888">150</text>
+      <text x="626" y="188" text-anchor="middle" fill="#888">180</text>
+      <text x="707" y="188" text-anchor="middle" fill="#888">210</text>
+      <!-- Annotation: peak scour -->
+      <line x1="383" y1="60" x2="383" y2="142" stroke="#c05030" stroke-width="1" stroke-dasharray="2,2"/>
+      <text x="395" y="65" fill="#c05030" font-weight="600">peak scour @ t=90s · −2.0 mm med · −5.0 mm @ p5</text>
+    </svg>
+
+    <!-- ── Sediment-budget summary ───────────────────────────────────────────
+         Rough total volumes per timestamp from the median Δ and bed area
+         (active flow region ≈ 838 × 1245 mm = 1.04 m² over which the median
+         applies). Net = volumetric mean change. -->
+    <div class="stats" style="margin-top:14px;">
+      <span>active bed area:</span> ≈ 1.04 m² (channel between cross-rib endpoints, Y=343→1588) &nbsp; · &nbsp;
+      <span>peak net scour vol:</span> −2.08 L @ t=90s &nbsp; · &nbsp;
+      <span>steady-state net:</span> −1.04 L @ t≥150s &nbsp; · &nbsp;
+      <span>p5/p95 spread @ t=210s:</span> ±5 mm (max-pocket depth)
+    </div>
+  </div>
+
+  <!-- ── Channel-vs-scour overlay ────────────────────────────────────────
+       Manual alignment between the optical-flow stream signature (where flow
+       lingered) and the rectified bed-change diff (where scour happened).
+       Both inputs live in different camera frames (kinect color vs. rectified
+       bed plane) and the kinect's FOV doesn't span the full bed length, so
+       the overlay can't be perfectly co-registered without a full warp pass —
+       the sliders let you nudge the signature into approximate alignment by
+       eye to test the qualitative claim that channel persistence ≈ scour
+       footprint. -->
+  <div class="section" style="margin-bottom:24px;">
+    <div class="section-label">channel ↔ scour overlay</div>
+    <div class="section-title">Where flow lingered vs where the bed changed</div>
+    <div class="section-desc">
+      Base layer (always-on): the Δheight diff at t&nbsp;=&nbsp;210&nbsp;s — red&nbsp;=&nbsp;scour, blue&nbsp;=&nbsp;deposit. Overlay (slider-controlled): the optical-flow stream signature (yellow&nbsp;=&nbsp;persistent flow). Use the sliders to align the signature over the bed; if the bright corridor on top sits over the red scour zone underneath, the channel-persistence ≈ bed-erosion claim is supported.
+    </div>
+    <div id="overlay-controls" style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:12px 14px;margin-bottom:8px;display:grid;grid-template-columns:repeat(4,1fr);gap:14px;font-size:11px;">
+      <div><label style="color:#888;display:block;">opacity <span id="ov-op-val" style="color:#1a1a1a;">0.55</span></label><input type="range" id="ov-op" min="0" max="1" step="0.01" value="0.55" style="width:100%;accent-color:#c05030;"></div>
+      <div><label style="color:#888;display:block;">rotation <span id="ov-rot-val" style="color:#1a1a1a;">-90°</span></label><input type="range" id="ov-rot" min="-180" max="180" step="1" value="-90" style="width:100%;accent-color:#c05030;"></div>
+      <div><label style="color:#888;display:block;">scale X <span id="ov-sx-val" style="color:#1a1a1a;">1.50×</span></label><input type="range" id="ov-sx" min="0.5" max="3" step="0.01" value="1.5" style="width:100%;accent-color:#c05030;"></div>
+      <div><label style="color:#888;display:block;">scale Y <span id="ov-sy-val" style="color:#1a1a1a;">1.50×</span></label><input type="range" id="ov-sy" min="0.5" max="3" step="0.01" value="1.5" style="width:100%;accent-color:#c05030;"></div>
+      <div><label style="color:#888;display:block;">offset X <span id="ov-tx-val" style="color:#1a1a1a;">0 px</span></label><input type="range" id="ov-tx" min="-300" max="300" step="1" value="0" style="width:100%;accent-color:#c05030;"></div>
+      <div><label style="color:#888;display:block;">offset Y <span id="ov-ty-val" style="color:#1a1a1a;">0 px</span></label><input type="range" id="ov-ty" min="-300" max="300" step="1" value="0" style="width:100%;accent-color:#c05030;"></div>
+      <div style="display:flex;align-items:end;"><label style="color:#888;font-size:10px;"><input type="checkbox" id="ov-blend" checked> screen blend</label></div>
+      <div style="display:flex;align-items:end;"><button id="ov-reset" style="padding:5px 10px;font-size:11px;background:#fff;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-family:inherit;">reset</button></div>
+    </div>
+    <div style="position:relative;width:100%;max-width:600px;margin:0 auto;background:#fafafa;border:1px solid #eee;border-radius:6px;overflow:hidden;">
+      <img id="ov-base" src="diff_t210.png" alt="bed Δheight diff t=210" style="width:100%;display:block;">
+      <img id="ov-flow" src="../optical_flow/stream_signature_pure.png" alt="stream signature"
+           style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+                  pointer-events:none;transform-origin:50% 50%;
+                  transform:rotate(-90deg) scale(1.5,1.5) translate(0px,0px);
+                  opacity:0.55;mix-blend-mode:screen;">
+    </div>
+    <div style="font-size:11px;color:#888;margin-top:6px;font-family:'SF Mono',Menlo,monospace;text-align:center;">
+      base: <strong style="color:#1a1a1a;">diff_t210.png</strong> · overlay: <strong style="color:#1a1a1a;">stream_signature_pure.png</strong>
+    </div>
+  </div>
+
+  <script>
+  // Wire overlay sliders. Persists the user's chosen alignment to localStorage
+  // so the overlay returns to the same dial-in across refreshes.
+  (function () {
+    const ids = ['op', 'rot', 'sx', 'sy', 'tx', 'ty'];
+    const fmt = { op: v => v.toFixed(2), rot: v => v + '°', sx: v => v.toFixed(2) + '×', sy: v => v.toFixed(2) + '×', tx: v => v + ' px', ty: v => v + ' px' };
+    const ov = document.getElementById('ov-flow');
+    const blendEl = document.getElementById('ov-blend');
+    const KEY = 'bed-rectified-overlay-v1';
+    const saved = (() => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } })();
+
+    function get(id) { return parseFloat(document.getElementById('ov-' + id).value); }
+    function apply() {
+      const op = get('op'), rot = get('rot'), sx = get('sx'), sy = get('sy'), tx = get('tx'), ty = get('ty');
+      ov.style.opacity = op;
+      ov.style.transform = `translate(${tx}px,${ty}px) rotate(${rot}deg) scale(${sx},${sy})`;
+      ov.style.mixBlendMode = blendEl.checked ? 'screen' : 'normal';
+      for (const id of ids) document.getElementById('ov-' + id + '-val').textContent = fmt[id](get(id));
+      localStorage.setItem(KEY, JSON.stringify({ op, rot, sx, sy, tx, ty, blend: blendEl.checked }));
+    }
+    // Hydrate
+    for (const id of ids) {
+      const el = document.getElementById('ov-' + id);
+      if (saved[id] != null) el.value = saved[id];
+      el.addEventListener('input', apply);
+    }
+    if (saved.blend != null) blendEl.checked = saved.blend;
+    blendEl.addEventListener('change', apply);
+    document.getElementById('ov-reset').addEventListener('click', () => {
+      const def = { op: 0.55, rot: -90, sx: 1.5, sy: 1.5, tx: 0, ty: 0 };
+      for (const id of ids) document.getElementById('ov-' + id).value = def[id];
+      blendEl.checked = true;
+      apply();
+    });
+    apply();
+  })();
+  </script>
+
+  <!-- ── How this feeds Phase 3 (post-fire flood model) ─────────────────── -->
+  <div class="section" style="margin-bottom:24px;">
+    <div class="section-label">handoff to phase 3</div>
+    <div class="section-title">How these maps feed the post-fire flood model</div>
+    <div class="section-desc">
+      Two products go forward:
+      <strong>(a) the channel network mask</strong> from the optical-flow stream
+      signature (where flow lingered) — input to the per-cell perturbation in
+      <code>burn-perturbation.js</code> (∈ [0,1] severity map).
+      <strong>(b) the rectified bed</strong> at t=210s (a real measured surface,
+      not a synthetic DEM) — input to the next session's <em>burn-scar
+      reconstruction</em> where particle-size collapse under fire is modeled
+      against this measured initial topography.
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">baseline</div>
+    <div class="section-title">Dry bed plane fit @ t=15s</div>
+    <div class="section-desc">Median depth used for the SVD plane fit. Should be near-uniform z (small variations = bed micro-topography or noise floor).</div>
+    <div class="baseline-row">
+      <div class="card"><div class="card-header"><span class="t">baseline · t = 15 s</span><span class="m">946×957 cells</span></div>
+      <img src="heightmap_baseline.png"><div class="cap">flat dry bed (rectified)</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">timeline</div>
+    <div class="section-title">Rectified heightmap & Δ from baseline per timestamp</div>
+    <div class="section-desc">Each card: top = absolute height (turbo, ±15 mm). Bottom = Δ from baseline (jet, ±10 mm; red = scour, blue = deposition).</div>
+    <div class="grid">
+        <div class="card">
+          <div class="card-header"><span class="t">t = 20 s</span><span class="m">Δ med +0.0 · 5/95 [−1.0, +0.9] mm</span></div>
+          <img src="heightmap_t020.png" alt="rectified heightmap t=20.0">
+          <img src="diff_t020.png" alt="diff t=20.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 40 s</span><span class="m">Δ med +0.0 · 5/95 [−1.0, +0.9] mm</span></div>
+          <img src="heightmap_t040.png" alt="rectified heightmap t=40.0">
+          <img src="diff_t040.png" alt="diff t=40.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 60 s</span><span class="m">Δ med −1.1 · 5/95 [−4.1, +0.5] mm</span></div>
+          <img src="heightmap_t060.png" alt="rectified heightmap t=60.0">
+          <img src="diff_t060.png" alt="diff t=60.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 90 s</span><span class="m">Δ med −2.0 · 5/95 [−5.0, +0.0] mm</span></div>
+          <img src="heightmap_t090.png" alt="rectified heightmap t=90.0">
+          <img src="diff_t090.png" alt="diff t=90.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 120 s</span><span class="m">Δ med −1.6 · 5/95 [−5.1, +0.5] mm</span></div>
+          <img src="heightmap_t120.png" alt="rectified heightmap t=120.0">
+          <img src="diff_t120.png" alt="diff t=120.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 150 s</span><span class="m">Δ med −1.0 · 5/95 [−5.5, +1.0] mm</span></div>
+          <img src="heightmap_t150.png" alt="rectified heightmap t=150.0">
+          <img src="diff_t150.png" alt="diff t=150.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 180 s</span><span class="m">Δ med −1.0 · 5/95 [−5.5, +1.1] mm</span></div>
+          <img src="heightmap_t180.png" alt="rectified heightmap t=180.0">
+          <img src="diff_t180.png" alt="diff t=180.0">
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="t">t = 210 s</span><span class="m">Δ med −1.0 · 5/95 [−5.1, +1.0] mm</span></div>
+          <img src="heightmap_t210.png" alt="rectified heightmap t=210.0">
+          <img src="diff_t210.png" alt="diff t=210.0">
+        </div></div>
+  </div>
+</main>
+</body></html>

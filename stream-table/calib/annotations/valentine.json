@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "notes": "Interpreted: the wooden cross-bar visible at top of frame is the schema's UPPER cross-rib (Y=343). The two blue clamps holding it at the ends are rib_W_upper and rib_E_upper. The true rim corners at Y=0 are occluded by the water-inlet tube. rail_pt_A/B are 2 points on the X=838 long rim (right silver edge of image).",
+  "annotations": {
+    "valentine": {
+      "rib_W_upper": {
+        "u": 35.42453376578248,
+        "v": 189.93165759295724,
+        "visible": true,
+        "_origin": "user click labeled far_cross_rim_A; reinterpreted as west end of upper cross-rib at world (0, 343, 0)"
+      },
+      "rib_E_upper": {
+        "u": 797.1527858218464,
+        "v": 106.53075408316921,
+        "visible": true,
+        "_origin": "user click labeled far_cross_rim_B; reinterpreted as east end of upper cross-rib at world (838, 343, 0)"
+      },
+      "rail_pt_A": {
+        "u": 844.4132978107262,
+        "v": 123.21093478512681,
+        "visible": true
+      },
+      "rail_pt_B": {
+        "u": 1041.7954361172247,
+        "v": 520.7552415151164,
+        "visible": true
+      }
+    }
+  }
+}

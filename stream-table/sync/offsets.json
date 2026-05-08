@@ -1,0 +1,42 @@
+{
+  "entries": [
+    {
+      "filename": "AM_03-11_01_wide-inlet_no-obstacles.mp4",
+      "label": "anna",
+      "method": "manual",
+      "clack_timestamp_seconds": 0.8,
+      "confidence": "high",
+      "notes": "user-identified pipe contact at t=0.800s (100ms frame sampling)"
+    },
+    {
+      "filename": "skm_0311_01_wide_no-obs.mp4",
+      "label": "sophia",
+      "method": "manual",
+      "clack_timestamp_seconds": 1.5,
+      "confidence": "high",
+      "notes": "user-identified pipe contact at t=1.500s (100ms frame sampling)"
+    },
+    {
+      "filename": "vmg_03-11_01.mp4",
+      "label": "valentine",
+      "method": "manual",
+      "clack_timestamp_seconds": 23.333,
+      "confidence": "high",
+      "notes": "user-identified pipe contact at t=23.333s (frame-level 33ms sampling)"
+    },
+    {
+      "filename": "depth_20260311_105209.mkv",
+      "label": "kinect",
+      "method": "manual",
+      "clack_timestamp_seconds": 27.4,
+      "confidence": "high",
+      "notes": "user-identified pipe contact on Kinect COLOR at t=27.400s; no audio track in MKV"
+    }
+  ],
+  "reference_label": "anna",
+  "method_summary": {
+    "audio": 0,
+    "visual": 0,
+    "manual": 4
+  }
+}

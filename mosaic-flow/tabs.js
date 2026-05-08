@@ -1,118 +1,182 @@
 /**
- * tabs.js — Shared tab-switching logic.
+ * tabs.js — Sequential step navigation.
  *
- * Four tabs: Mosaic, Site Analysis, Stream Table, Soil Study.
- * Stream Table and Soil Study lazy-initialize their modules on first activation.
+ * Three steps: Delineate Site → Model Fire → Analyze Burn Scar.
+ * Steps unlock progressively but completed steps remain freely navigable.
  */
 
 import { initParcelAnalysis, onTabActivated, stopSimOverlay } from './parcel-analysis.js';
 import { simState } from './state.js';
 import { sharedState, addListener } from './sharedState.js';
 
-let _streamTableInited = false;
-let _soilStudyInited = false;
-let _soilBadge = null;
+let _currentStep = 'site';
+let _unlockedSteps = new Set(['site']);
+let _completedSteps = new Set();
 
 /**
- * Wire up tab buttons and initialize the parcel-analysis module.
+ * Wire up step buttons and initialize the parcel-analysis module.
  */
 export function initTabs() {
-  const mosaicEl      = document.getElementById('mosaic-container');
-  const siteEl        = document.getElementById('site-analysis-container');
-  const streamTableEl = document.getElementById('stream-table-container');
-  const soilStudyEl   = document.getElementById('soil-study-container');
-  const tabBtns       = document.querySelectorAll('.tab-btn[data-tab]');
+  const siteEl      = document.getElementById('site-analysis-container');
+  const mosaicEl    = document.getElementById('mosaic-container');
+  const soilStudyEl = document.getElementById('soil-study-container');
+  const stepBtns    = document.querySelectorAll('.step-btn[data-step]');
+
+  let _soilStudyInited = false;
+
+  const panes = { site: siteEl, mosaic: mosaicEl, 'soil-study': soilStudyEl };
 
   function hideAllPanes() {
-    if (mosaicEl)      mosaicEl.style.display = 'none';
-    if (siteEl)        siteEl.style.display = 'none';
-    if (streamTableEl) streamTableEl.style.display = 'none';
-    if (soilStudyEl)   soilStudyEl.style.display = 'none';
+    Object.values(panes).forEach(el => {
+      if (el) el.classList.remove('step-active');
+    });
   }
 
-  tabBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      tabBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+  function refreshStepBtns() {
+    stepBtns.forEach(btn => {
+      const step = btn.dataset.step;
+      btn.classList.toggle('unlocked', _unlockedSteps.has(step));
+      btn.classList.toggle('active', step === _currentStep);
+      btn.classList.toggle('completed', _completedSteps.has(step));
+    });
+  }
 
-      const tab = btn.dataset.tab;
-      hideAllPanes();
+  function switchToStep(step) {
+    if (!_unlockedSteps.has(step)) return;
+    _currentStep = step;
+    sharedState.currentStep = step;
+    hideAllPanes();
+    refreshStepBtns();
 
-      if (tab === 'mosaic') {
-        if (mosaicEl) mosaicEl.style.display = 'flex';
-        stopSimOverlay();
-      } else if (tab === 'site') {
-        if (siteEl) siteEl.style.display = 'block';
-        onTabActivated();
-      } else if (tab === 'stream-table') {
-        if (streamTableEl) streamTableEl.style.display = 'block';
-        if (!_streamTableInited) {
-          _streamTableInited = true;
-          import('./stream-table-tab.js').then(mod => {
-            mod.initStreamTableTab('stream-table-container');
-          });
-        } else {
-          import('./stream-table-tab.js').then(mod => {
-            if (mod.onStreamTableActivated) mod.onStreamTableActivated();
-          });
-        }
-      } else if (tab === 'soil-study') {
-        if (soilStudyEl) soilStudyEl.style.display = 'block';
-        if (!_soilStudyInited) {
-          _soilStudyInited = true;
-          import('./soil-study.js').then(mod => {
-            mod.initSoilStudy('soil-study-container');
-          });
-        } else {
-          import('./soil-study.js').then(mod => {
-            if (mod.onSoilStudyActivated) mod.onSoilStudyActivated();
-          });
-        }
+    if (step === 'site') {
+      if (siteEl) siteEl.classList.add('step-active');
+      onTabActivated();
+    } else if (step === 'mosaic') {
+      if (mosaicEl) mosaicEl.classList.add('step-active');
+      stopSimOverlay();
+    } else if (step === 'soil-study') {
+      if (soilStudyEl) soilStudyEl.classList.add('step-active');
+      if (!_soilStudyInited) {
+        _soilStudyInited = true;
+        import('./soil-study.js').then(mod => {
+          mod.initSoilStudy('soil-study-container');
+        });
+      } else {
+        import('./soil-study.js').then(mod => {
+          if (mod.onSoilStudyActivated) mod.onSoilStudyActivated();
+        });
       }
+    }
+  }
+
+  function unlockStep(step) {
+    _unlockedSteps.add(step);
+    refreshStepBtns();
+  }
+
+  function completeStep(step) {
+    _completedSteps.add(step);
+    refreshStepBtns();
+  }
+
+  // Wire click handlers
+  stepBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const step = btn.dataset.step;
+      if (_unlockedSteps.has(step)) switchToStep(step);
     });
   });
 
-  // Initialize parcel analysis (Site Analysis tab)
+  // Initialize parcel analysis (Step 1)
   initParcelAnalysis('site-analysis-container', {
     onGridReady: (patchGrid) => {
       if (simState.loadParcelGrid) simState.loadParcelGrid(patchGrid);
+      // Step 1 complete, unlock step 2
+      completeStep('site');
+      unlockStep('mosaic');
     },
     onRunSim: () => {
-      document.querySelector('[data-tab="mosaic"]')?.click();
+      // Advance to step 2
+      switchToStep('mosaic');
       requestAnimationFrame(() => {
         if (simState.controls) simState.controls.running = true;
       });
     },
   });
 
-  // ── Soil Study notification badge ──
-  const soilBtn = document.querySelector('[data-tab="soil-study"]');
-  if (soilBtn) {
-    _soilBadge = document.createElement('span');
-    _soilBadge.style.cssText = `
-      display: none; width: 8px; height: 8px; border-radius: 50%;
-      background: #dc503c; margin-left: 6px;
-      animation: soil-badge-pulse 1.5s ease-in-out infinite;
-    `;
-    soilBtn.appendChild(_soilBadge);
+  // Fire-complete prompt — floating arrow that points the user toward Step 3
+  // when the burn finishes. Lives inside the mosaic container so it overlays
+  // the fire visualization rather than stealing screen real estate up-front.
+  const continuePrompt = document.createElement('button');
+  continuePrompt.className = 'fire-continue-prompt';
+  continuePrompt.style.display = 'none';
+  continuePrompt.innerHTML = `
+    <span class="fire-continue-cta">Analyze burn scar <span class="fire-continue-arrow">→</span></span>
+  `;
+  continuePrompt.addEventListener('click', () => {
+    continuePrompt.style.display = 'none';
+    switchToStep('soil-study');
+  });
+  if (mosaicEl) mosaicEl.appendChild(continuePrompt);
 
-    // Inject pulse animation if not present
-    if (!document.getElementById('soil-badge-anim')) {
-      const style = document.createElement('style');
-      style.id = 'soil-badge-anim';
-      style.textContent = `@keyframes soil-badge-pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`;
-      document.head.appendChild(style);
+  // Watch for fire completion → unlock step 3 + reveal the prompt.
+  addListener(() => {
+    if (sharedState.scenarioPhase === 'fire-complete') {
+      completeStep('mosaic');
+      unlockStep('soil-study');
+      if (_currentStep === 'mosaic') continuePrompt.style.display = '';
+    } else if (sharedState.scenarioPhase === 'pre-fire' || sharedState.scenarioPhase === 'fire-running') {
+      // Fire reset / restart — hide the prompt again until the next completion.
+      continuePrompt.style.display = 'none';
     }
+  });
 
-    // Show badge when fire completes, hide when soil study tab is clicked
-    addListener(() => {
-      if (sharedState.scenarioPhase === 'fire-complete' && _soilBadge) {
-        _soilBadge.style.display = 'inline-block';
-      }
-    });
+  // Entry fork: shown above everything until the user picks a path. Clicking
+  // "Delineate a site" hides the fork and reveals the existing parcel-analysis
+  // tool (Step 1). Clicking "Randomize a landscape" hides the fork, triggers
+  // a randomize action on the simulation, unlocks Step 2, and jumps there.
+  const forkEl = document.getElementById('entry-fork');
 
-    soilBtn.addEventListener('click', () => {
-      if (_soilBadge) _soilBadge.style.display = 'none';
+  function dismissFork() {
+    if (forkEl) forkEl.classList.add('hidden');
+  }
+
+  function startWithRandomize() {
+    dismissFork();
+    // Mark Step 1 as completed so it appears in the step bar as a freely-
+    // navigable past step; unlock Step 2 and switch to it.
+    completeStep('site');
+    unlockStep('mosaic');
+    switchToStep('mosaic');
+    // Trigger the randomize action via the same dispatcher the in-tool
+    // "Randomize" button uses. Wait one frame so simState.controls is ready
+    // even when boot order varies.
+    requestAnimationFrame(() => {
+      simState.controls?.onUpdate?.('randomize');
+      if (simState.controls) simState.controls.running = true;
     });
+  }
+
+  function startWithDelineate() {
+    dismissFork();
+    switchToStep('site');
+    // Real-parcel path: synthetic Terrain presets are irrelevant since DEM
+    // is loaded from the parcel itself. Hide the whole Terrain section in the
+    // mosaic panel. The element is created during sketch.js boot so it's
+    // present by the time we reach here.
+    const terrain = document.getElementById('mosaic-terrain-section');
+    if (terrain) terrain.style.display = 'none';
+  }
+
+  if (forkEl) {
+    for (const btn of forkEl.querySelectorAll('[data-fork]')) {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.fork === 'delineate') startWithDelineate();
+        else if (btn.dataset.fork === 'randomize') startWithRandomize();
+      });
+    }
+  } else {
+    // Fork element missing — fall back to the original behavior.
+    switchToStep('site');
   }
 }

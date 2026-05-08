@@ -1,5 +1,6 @@
 /**
  * UI controls: Fire / Flood mode selector with focused panels per mode.
+ * Light editorial theme — styles defined in styles.css.
  */
 
 import { PATCH_TYPES, PATCH_PARAMS } from './patches.js';
@@ -19,10 +20,10 @@ function getPatchBehavior(key, p) {
 
 // ── Shared builder helpers ────────────────────────────────────────────────────
 
-function makeBtn(text, css, title) {
+function makeBtn(text, className, title) {
   const b = document.createElement('button');
   b.textContent = text;
-  b.style.cssText = css;
+  if (className) b.className = className;
   if (title) b.title = title;
   return b;
 }
@@ -37,17 +38,16 @@ function makeSlider({ min, max, step, value, width = '100%' }) {
   return s;
 }
 
-function makeLabel(html, css = '') {
+function makeLabel(html) {
   const l = document.createElement('label');
   l.innerHTML = html;
-  l.style.cssText = `display:block;${css}`;
   return l;
 }
 
 function sectionHead(text) {
   const d = document.createElement('div');
-  d.style.cssText = 'margin-top:14px;margin-bottom:6px;border-top:1px solid #2a2a36;padding-top:10px;';
-  d.innerHTML = `<strong style="color:#c8c8d8;font-size:12px;letter-spacing:.05em">${text}</strong>`;
+  d.className = 'mosaic-section-head';
+  d.innerHTML = `<strong>${text}</strong>`;
   return d;
 }
 
@@ -55,9 +55,9 @@ function buildPatchSection(controls, onUpdate) {
   const div = document.createElement('div');
 
   const brushLabel = makeLabel(
-    `Brush size: <span id="brush-size-val">${controls.brushSize}</span>`,
-    'margin-bottom:4px;font-size:12px;'
+    `Brush size: <span id="brush-size-val">${controls.brushSize}</span>`
   );
+  brushLabel.style.marginBottom = '4px';
   const brushSlider = makeSlider({ min: 1, max: 10, value: controls.brushSize });
   brushSlider.addEventListener('input', () => {
     controls.brushSize = Number(brushSlider.value);
@@ -67,35 +67,38 @@ function buildPatchSection(controls, onUpdate) {
   div.appendChild(brushLabel);
   div.appendChild(brushSlider);
 
-  const grid = document.createElement('div');
-  grid.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;margin-top:6px;';
+  // One row per land-cover type. Each row is a button with a colored square
+  // followed by the type name — replaces the previous wrap-grid of bordered
+  // pill-buttons because at small panel widths the names were getting cropped
+  // and it was unclear which pill mapped to which color in the canvas.
+  const list = document.createElement('div');
+  list.className = 'mosaic-patch-list';
   const patchButtons = Object.entries(PATCH_PARAMS).map(([key, params]) => {
-    const btn = makeBtn(params.name, `
-      padding:5px 9px; border:2px solid ${params.color};
-      background:${controls.activePatch === key ? params.color + '40' : 'transparent'};
-      color:${params.color}; border-radius:4px; cursor:pointer; font-size:11px;
-    `);
+    const btn = document.createElement('button');
+    btn.className = 'mosaic-patch-row';
     btn.dataset.key = key;
+    btn.innerHTML = `
+      <span class="mosaic-patch-swatch" style="background:${params.color};"></span>
+      <span class="mosaic-patch-name">${params.name}</span>
+    `;
+    const refreshPatchBtn = () => {
+      btn.classList.toggle('active', controls.activePatch === key);
+    };
+    refreshPatchBtn();
     btn.addEventListener('click', () => {
       controls.activePatch = key;
       controls.activeTool = 'paint';
-      patchButtons.forEach(b => {
-        const k = b.dataset.key;
-        const p = PATCH_PARAMS[k];
-        b.style.background = controls.activePatch === k ? p.color + '40' : 'transparent';
-      });
+      patchButtons.forEach(b => b.classList.toggle('active', b.dataset.key === controls.activePatch));
       onUpdate?.();
     });
     return btn;
   });
-  patchButtons.forEach(b => grid.appendChild(b));
-  div.appendChild(grid);
+  patchButtons.forEach(b => list.appendChild(b));
+  div.appendChild(list);
 
-  const randomBtn = makeBtn('Randomize', `
-    margin-top:8px; padding:6px 12px; background:#4a4a6a;
-    color:white; border:none; border-radius:4px; cursor:pointer;
-    font-size:12px; width:100%;
-  `, 'Generate random patch landscape');
+  const randomBtn = makeBtn('Randomize', 'mosaic-action-btn', 'Generate random patch landscape');
+  randomBtn.style.marginTop = '8px';
+  randomBtn.style.width = '100%';
   randomBtn.addEventListener('click', () => onUpdate?.('randomize'));
   div.appendChild(randomBtn);
 
@@ -163,12 +166,9 @@ function buildTopoSection(controls, onUpdate) {
   if (!controls.demElevations) controls.demElevations = sampleDems['Simple Slope'](64);
 
   const demBtnsDiv = document.createElement('div');
-  demBtnsDiv.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;margin-top:4px;';
+  demBtnsDiv.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;';
   Object.keys(sampleDems).forEach(name => {
-    const btn = makeBtn(name, `
-      padding:3px 7px; background:#4a6a5a; color:white;
-      border:none; border-radius:3px; cursor:pointer; font-size:10px;
-    `, `Sample ${name} terrain`);
+    const btn = makeBtn(name, 'mosaic-dem-btn', `Sample ${name} terrain`);
     btn.addEventListener('click', () => {
       controls.demElevations = sampleDems[name](64);
       onUpdate?.();
@@ -189,14 +189,13 @@ function buildTopoSection(controls, onUpdate) {
     else alert('Could not parse DEM file. Try ASCII Grid (.asc), CSV, or JSON.');
     demInput.value = '';
   });
-  const loadDemBtn = makeBtn('Load DEM', `
-    padding:4px 10px; background:#3a5a7a; color:white;
-    border:none; border-radius:3px; cursor:pointer; font-size:11px; margin-top:6px;
-  `);
+  const loadDemBtn = makeBtn('Load DEM', 'mosaic-action-btn');
+  loadDemBtn.style.marginTop = '6px';
   loadDemBtn.addEventListener('click', () => demInput.click());
 
   const elevLinesLabel = document.createElement('label');
-  elevLinesLabel.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;font-size:12px;';
+  elevLinesLabel.className = 'mosaic-flag-label';
+  elevLinesLabel.style.marginTop = '8px';
   const elevCheck = document.createElement('input');
   elevCheck.type = 'checkbox';
   elevCheck.checked = controls.showElevationLines;
@@ -215,25 +214,19 @@ function buildRunButtons(controls, onUpdate, resetMsg, resetLabel) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'display:flex;gap:6px;margin-top:14px;';
 
-  const runBtn = makeBtn('Run', `
-    flex:1; padding:8px 0; background:#4a7c59; color:white;
-    border:none; border-radius:4px; cursor:pointer; font-size:13px;
-  `);
+  const runBtn = makeBtn('Run', 'mosaic-action-btn run');
   runBtn.addEventListener('click', () => {
     controls.running = !controls.running;
     runBtn.textContent = controls.running ? 'Pause' : 'Run';
-    runBtn.style.background = controls.running ? '#c75a3a' : '#4a7c59';
+    runBtn.classList.toggle('running', controls.running);
     onUpdate?.();
   });
 
-  const resetBtn = makeBtn(resetLabel, `
-    flex:1; padding:8px 0; background:#555; color:white;
-    border:none; border-radius:4px; cursor:pointer; font-size:12px;
-  `);
+  const resetBtn = makeBtn(resetLabel, 'mosaic-action-btn');
   resetBtn.addEventListener('click', () => {
     controls.running = false;
     runBtn.textContent = 'Run';
-    runBtn.style.background = '#4a7c59';
+    runBtn.classList.remove('running');
     onUpdate?.(resetMsg);
   });
 
@@ -248,10 +241,7 @@ function buildExportImport(onUpdate) {
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;gap:6px;margin-top:10px;';
 
-  const exportBtn = makeBtn('Export', `
-    flex:1; padding:6px 0; background:#3d5a7d; color:white;
-    border:none; border-radius:4px; cursor:pointer; font-size:12px;
-  `, 'Export patch config as JSON');
+  const exportBtn = makeBtn('Export', 'mosaic-action-btn', 'Export patch config as JSON');
   exportBtn.addEventListener('click', () => onUpdate?.('export'));
 
   const fileInput = document.createElement('input');
@@ -269,10 +259,7 @@ function buildExportImport(onUpdate) {
     r.readAsText(f);
     fileInput.value = '';
   });
-  const importBtn = makeBtn('Import', `
-    flex:1; padding:6px 0; background:#3d5a7d; color:white;
-    border:none; border-radius:4px; cursor:pointer; font-size:12px;
-  `, 'Import patch config from JSON');
+  const importBtn = makeBtn('Import', 'mosaic-action-btn', 'Import patch config from JSON');
   importBtn.addEventListener('click', () => fileInput.click());
 
   row.appendChild(exportBtn);
@@ -280,11 +267,8 @@ function buildExportImport(onUpdate) {
   row.appendChild(fileInput);
   outer.appendChild(row);
 
-  const resetAllBtn = makeBtn('Reset All', `
-    display:block; width:100%; margin-top:6px; padding:6px 0;
-    background:#4a2020; color:#cc8888; border:1px solid #7a3030;
-    border-radius:4px; cursor:pointer; font-size:12px;
-  `, 'Reload page — clears everything');
+  const resetAllBtn = makeBtn('Reset All', 'mosaic-action-btn danger', 'Reload page — clears everything');
+  resetAllBtn.style.cssText = 'display:block;width:100%;margin-top:6px;';
   resetAllBtn.addEventListener('click', () => onUpdate?.('resetAll'));
   outer.appendChild(resetAllBtn);
 
@@ -320,66 +304,42 @@ export function createUI(onUpdate) {
   const mosaicContainer = document.getElementById('mosaic-container');
   if (!mosaicContainer) return { controls: {}, updateMetrics: () => {} };
 
-  // ── Outer panel container ─────────────────────────────────────────────────
+  // ── Outer panel container (styled via #mosaic-controls in CSS) ────────────
   const container = document.createElement('div');
   container.id = 'mosaic-controls';
-  container.style.cssText = `
-    position: absolute; top: 10px; left: 10px;
-    background: rgba(22, 22, 32, 0.98);
-    padding: 0; border-radius: 8px;
-    font-family: system-ui, sans-serif; font-size: 13px; color: #e0e0e0;
-    z-index: 100; max-width: 270px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-    overflow: hidden; pointer-events: auto;
-  `;
   mosaicContainer.appendChild(container);
 
   // ── Mode selector bar ─────────────────────────────────────────────────────
   const modeBar = document.createElement('div');
-  modeBar.style.cssText = `
-    display: flex; gap: 0;
-    background: rgba(16, 16, 24, 0.98);
-    border-bottom: 1px solid #2a2a40;
-  `;
+  modeBar.className = 'mosaic-mode-bar';
 
+  // Step 2 (Model Fire) is fire-only now — the user-facing Flood toggle was
+  // removed. Pre/post-fire flood comparison happens in Step 3 via the soil-
+  // study runner. fireModeBtn is kept (as a label) so the existing event-
+  // wiring further down still has a target without breaking; floodModeBtn is
+  // never rendered.
   const fireModeBtn  = document.createElement('button');
-  const floodModeBtn = document.createElement('button');
-  const modeBtnBase = `
-    flex:1; padding:9px 0; border:none; cursor:pointer;
-    font-size:13px; font-weight:600; letter-spacing:.03em;
-    transition: background 0.15s, color 0.15s;
-  `;
+  const floodModeBtn = document.createElement('button');   // not appended; kept for handler wiring
+  fireModeBtn.className  = 'mosaic-mode-btn fire-active';
   fireModeBtn.textContent  = 'Fire';
-  floodModeBtn.textContent = 'Flood';
-  fireModeBtn.style.cssText  = modeBtnBase;
-  floodModeBtn.style.cssText = modeBtnBase;
 
   const arrowBtn = document.createElement('button');
+  arrowBtn.className = 'mosaic-collapse-btn';
   arrowBtn.innerHTML = '&#9664;';
   arrowBtn.title = 'Collapse panel';
-  arrowBtn.style.cssText = `
-    background:transparent; border:none; color:#888;
-    font-size:13px; cursor:pointer; padding:9px 10px;
-  `;
 
   const refreshModeBtns = () => {
-    const isFire = controls.simMode === 'fire';
-    fireModeBtn.style.background  = isFire  ? 'rgba(200,80,30,0.25)' : 'transparent';
-    fireModeBtn.style.color        = isFire  ? '#ff8c42' : '#666';
-    fireModeBtn.style.borderRight  = isFire  ? 'none' : '1px solid #2a2a40';
-    floodModeBtn.style.background  = !isFire ? 'rgba(40,100,200,0.25)' : 'transparent';
-    floodModeBtn.style.color       = !isFire ? '#4a9eff' : '#666';
-    floodModeBtn.style.borderRight = 'none';
+    // Fire-only — keep the badge active styling.
+    fireModeBtn.className = 'mosaic-mode-btn fire-active';
   };
 
   modeBar.appendChild(fireModeBtn);
-  modeBar.appendChild(floodModeBtn);
   modeBar.appendChild(arrowBtn);
   container.appendChild(modeBar);
 
   // ── Collapsible menu content ──────────────────────────────────────────────
   const menuContent = document.createElement('div');
-  menuContent.style.cssText = 'padding:10px 14px 14px;';
+  menuContent.className = 'mosaic-menu-content';
   container.appendChild(menuContent);
 
   const toggleMenu = () => {
@@ -397,23 +357,23 @@ export function createUI(onUpdate) {
   firePanelDiv.appendChild(sectionHead('Landscape'));
   firePanelDiv.appendChild(buildPatchSection(controls, onUpdate));
 
-  // Topography
-  firePanelDiv.appendChild(sectionHead('Terrain'));
-  firePanelDiv.appendChild(buildTopoSection(controls, onUpdate));
+  // Topography. Wrapped so the entry-fork "Delineate a site" path can hide
+  // it — when the parcel is real, the elevation comes from DEM and the
+  // synthetic Terrain presets aren't useful.
+  const terrainWrap = document.createElement('div');
+  terrainWrap.id = 'mosaic-terrain-section';
+  terrainWrap.appendChild(sectionHead('Terrain'));
+  terrainWrap.appendChild(buildTopoSection(controls, onUpdate));
+  firePanelDiv.appendChild(terrainWrap);
 
   // Ignite tool
   firePanelDiv.appendChild(sectionHead('Fire'));
 
-  const igniteToolBtn = makeBtn('Ignite Tool', `
-    display:block; width:100%; padding:7px 10px;
-    border:2px solid #ff6a20; background:transparent; color:#ff8c42;
-    border-radius:4px; cursor:pointer; font-size:12px; margin-bottom:8px;
-  `);
+  const igniteToolBtn = makeBtn('Ignite Tool', 'mosaic-tool-btn');
   const refreshIgniteBtn = () => {
     const active = controls.activeTool === 'ignite';
-    igniteToolBtn.style.background  = active ? '#ff6a2040' : 'transparent';
-    igniteToolBtn.style.fontWeight  = active ? 'bold' : 'normal';
-    igniteToolBtn.textContent       = active ? 'Ignite Tool (ON)' : 'Ignite Tool';
+    igniteToolBtn.classList.toggle('active', active);
+    igniteToolBtn.textContent = 'Ignite Tool';
   };
   igniteToolBtn.addEventListener('click', () => {
     controls.activeTool = controls.activeTool === 'ignite' ? 'paint' : 'ignite';
@@ -425,9 +385,9 @@ export function createUI(onUpdate) {
 
   // Wind direction
   const windAngleLbl = makeLabel(
-    `Wind from: <span id="wind-angle-val">${controls.windAngle}</span>&deg;`,
-    'font-size:12px;margin-bottom:2px;'
+    `Wind from: <span id="wind-angle-val">${controls.windAngle}</span>&deg;`
   );
+  windAngleLbl.style.marginBottom = '2px';
   const windAngleSlider = makeSlider({ min: 0, max: 360, step: 5, value: controls.windAngle });
   windAngleSlider.addEventListener('input', () => {
     controls.windAngle = Number(windAngleSlider.value);
@@ -439,9 +399,9 @@ export function createUI(onUpdate) {
 
   // Wind speed
   const windSpeedLbl = makeLabel(
-    `Wind speed: <span id="wind-speed-val">${controls.windSpeed.toFixed(1)}</span>`,
-    'font-size:12px;margin-top:6px;margin-bottom:2px;'
+    `Wind speed: <span id="wind-speed-val">${controls.windSpeed.toFixed(1)}</span>`
   );
+  windSpeedLbl.style.cssText = 'margin-top:6px;margin-bottom:2px;';
   const windSpeedSlider = makeSlider({ min: 0, max: 5, step: 0.1, value: controls.windSpeed });
   windSpeedSlider.addEventListener('input', () => {
     controls.windSpeed = Number(windSpeedSlider.value);
@@ -451,11 +411,8 @@ export function createUI(onUpdate) {
   firePanelDiv.appendChild(windSpeedLbl);
   firePanelDiv.appendChild(windSpeedSlider);
 
-  const clearFireBtn = makeBtn('Clear Fire', `
-    margin-top:8px; padding:6px 10px; background:#5a2a20;
-    color:#ff9977; border:1px solid #8a4030;
-    border-radius:4px; cursor:pointer; font-size:12px; width:100%;
-  `);
+  const clearFireBtn = makeBtn('Clear Fire', 'mosaic-action-btn danger');
+  clearFireBtn.style.cssText = 'margin-top:8px;width:100%;';
   clearFireBtn.addEventListener('click', () => onUpdate?.('clear-fire'));
   firePanelDiv.appendChild(clearFireBtn);
 
@@ -464,20 +421,16 @@ export function createUI(onUpdate) {
   const fireViewDiv = document.createElement('div');
   fireViewDiv.style.cssText = 'display:flex;gap:4px;';
   const fireViewModes = [
-    { id: 'design', label: 'Design', title: 'Patch colors with fire overlay' },
-    { id: 'fuel',   label: 'Fuel Risk', title: 'Heatmap of fuelLoad — blue=firebreak, red=high fuel' },
+    { id: 'design', label: 'Land cover', title: 'Patch colors with fire overlay' },
+    { id: 'fuel',   label: 'Fuel Risk',  title: 'Heatmap of fuelLoad' },
   ];
   const fireViewBtns = fireViewModes.map(({ id, label, title }) => {
-    const btn = makeBtn(label, `
-      flex:1; padding:5px 4px; border:1px solid #444;
-      background:transparent; color:#888;
-      border-radius:4px; cursor:pointer; font-size:11px;
-    `, title);
+    const btn = makeBtn(label, 'mosaic-view-btn', title);
     const refresh = () => {
-      const active = controls.viewMode === id;
-      btn.style.background   = active ? '#4a3a5d' : 'transparent';
-      btn.style.color        = active ? '#cc99ff' : '#888';
-      btn.style.borderColor  = active ? '#7a5aad' : '#444';
+      btn.classList.toggle('active', controls.viewMode === id);
+      // Toggle the fuel-risk legend's visibility based on current view.
+      const legend = document.getElementById('fuel-risk-legend');
+      if (legend) legend.style.display = controls.viewMode === 'fuel' ? '' : 'none';
     };
     btn.addEventListener('click', () => {
       controls.viewMode = id;
@@ -489,6 +442,38 @@ export function createUI(onUpdate) {
   });
   fireViewBtns.forEach(b => fireViewDiv.appendChild(b));
   firePanelDiv.appendChild(fireViewDiv);
+
+  // Fuel-risk legend — visible only when the Fuel Risk view is active. Mirrors
+  // the colormap from the draw loop in sketch.js (Layer 1, viewMode === 'fuel'):
+  //   no fuel  → deep blue
+  //   below percolation threshold (~0.41) → blue → green
+  //   above threshold  → yellow → red (high risk)
+  const fuelLegend = document.createElement('div');
+  fuelLegend.id = 'fuel-risk-legend';
+  fuelLegend.className = 'mosaic-fuel-legend';
+  fuelLegend.style.display = controls.viewMode === 'fuel' ? '' : 'none';
+  fuelLegend.innerHTML = `
+    <div class="fuel-legend-title">Fuel risk · fuelLoad colormap</div>
+    <div class="fuel-legend-bar">
+      <span class="fuel-legend-stop" style="background:#2864c8;"></span>
+      <span class="fuel-legend-stop" style="background:#3585c8;"></span>
+      <span class="fuel-legend-stop" style="background:#6da2a0;"></span>
+      <span class="fuel-legend-stop" style="background:#a0c060;"></span>
+      <span class="fuel-legend-stop" style="background:#e6e600;"></span>
+      <span class="fuel-legend-stop" style="background:#ff7a00;"></span>
+      <span class="fuel-legend-stop" style="background:#ff0000;"></span>
+    </div>
+    <div class="fuel-legend-axis">
+      <span>0.0<br>no fuel</span>
+      <span style="text-align:center;">0.41<br>φ<sub>c</sub> threshold</span>
+      <span style="text-align:right;">1.0<br>max</span>
+    </div>
+    <div class="fuel-legend-note">
+      Below the percolation threshold φ<sub>c</sub> ≈ 0.41 the fuel can't form a
+      connected cluster — fires fizzle. Above it, ignition can sweep the parcel.
+    </div>
+  `;
+  firePanelDiv.appendChild(fuelLegend);
 
   // Run/Reset
   firePanelDiv.appendChild(buildRunButtons(controls, onUpdate, 'clear-fire', 'Reset Fire'));
@@ -509,9 +494,9 @@ export function createUI(onUpdate) {
   floodPanelDiv.appendChild(sectionHead('Water'));
 
   const rainLbl = makeLabel(
-    `Rainfall: <span id="rain-val">${controls.rainfall}</span> mm/hr`,
-    'font-size:12px;margin-bottom:2px;'
+    `Rainfall: <span id="rain-val">${controls.rainfall}</span> mm/hr`
   );
+  rainLbl.style.marginBottom = '2px';
   const rainSlider = makeSlider({ min: 0, max: 150, value: controls.rainfall });
   rainSlider.addEventListener('input', () => {
     controls.rainfall = Number(rainSlider.value);
@@ -522,16 +507,11 @@ export function createUI(onUpdate) {
   floodPanelDiv.appendChild(rainSlider);
 
   // Point source tool
-  const waterSourceToolBtn = makeBtn('Point Source', `
-    display:block; width:100%; margin-top:8px; padding:6px 10px;
-    border:2px solid #4a9eff; background:transparent; color:#4a9eff;
-    border-radius:4px; cursor:pointer; font-size:12px;
-  `);
+  const waterSourceToolBtn = makeBtn('Point Source', 'mosaic-tool-btn');
   const refreshWaterSourceBtn = () => {
     const active = controls.activeTool === 'water-source';
-    waterSourceToolBtn.style.background = active ? '#4a9eff30' : 'transparent';
-    waterSourceToolBtn.style.fontWeight = active ? 'bold' : 'normal';
-    waterSourceToolBtn.textContent      = active ? 'Point Source (ON)' : 'Point Source';
+    waterSourceToolBtn.classList.toggle('active', active);
+    waterSourceToolBtn.textContent = 'Point Source';
   };
   waterSourceToolBtn.addEventListener('click', () => {
     controls.activeTool = controls.activeTool === 'water-source' ? 'paint' : 'water-source';
@@ -543,13 +523,13 @@ export function createUI(onUpdate) {
 
   const floodHint = document.createElement('div');
   floodHint.textContent = 'Shift+drag on canvas to flood an area';
-  floodHint.style.cssText = 'font-size:10px;color:#666;margin-top:4px;';
+  floodHint.style.cssText = 'font-size:10px;color:#999;margin-top:4px;';
   floodPanelDiv.appendChild(floodHint);
 
   const wsRateLbl = makeLabel(
-    `Source rate: <span id="ws-rate-val">${controls.waterSourceRate.toFixed(2)}</span> m/step`,
-    'font-size:12px;margin-top:8px;margin-bottom:2px;'
+    `Source rate: <span id="ws-rate-val">${controls.waterSourceRate.toFixed(2)}</span> m/step`
   );
+  wsRateLbl.style.cssText = 'margin-top:8px;margin-bottom:2px;';
   const wsRateSlider = makeSlider({ min: 0.01, max: 0.2, step: 0.01, value: controls.waterSourceRate });
   wsRateSlider.addEventListener('input', () => {
     controls.waterSourceRate = Number(wsRateSlider.value);
@@ -559,11 +539,8 @@ export function createUI(onUpdate) {
   floodPanelDiv.appendChild(wsRateLbl);
   floodPanelDiv.appendChild(wsRateSlider);
 
-  const clearSourcesBtn = makeBtn('Clear Sources', `
-    margin-top:6px; padding:5px 10px; background:#2a3a4a;
-    color:#8acaff; border:1px solid #3a5a7a;
-    border-radius:4px; cursor:pointer; font-size:12px; width:100%;
-  `);
+  const clearSourcesBtn = makeBtn('Clear Sources', 'mosaic-action-btn');
+  clearSourcesBtn.style.cssText = 'margin-top:6px;width:100%;';
   clearSourcesBtn.addEventListener('click', () => onUpdate?.('clear-sources'));
   floodPanelDiv.appendChild(clearSourcesBtn);
 
@@ -572,7 +549,7 @@ export function createUI(onUpdate) {
 
   const makeFlagLabel = (text, initial, onChange) => {
     const lbl = document.createElement('label');
-    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:5px;cursor:pointer;font-size:12px;';
+    lbl.className = 'mosaic-flag-label';
     const chk = document.createElement('input');
     chk.type = 'checkbox';
     chk.checked = initial;
@@ -586,9 +563,9 @@ export function createUI(onUpdate) {
   floodPanelDiv.appendChild(makeFlagLabel('LBM density field',   controls.useLBM,              v => { controls.useLBM = v; }));
 
   const sedLbl = makeLabel(
-    `Sediment rate: <span id="sediment-val">${controls.sedimentMultiplier}</span>&times;`,
-    'font-size:12px;margin-top:8px;margin-bottom:2px;'
+    `Sediment rate: <span id="sediment-val">${controls.sedimentMultiplier}</span>&times;`
   );
+  sedLbl.style.cssText = 'margin-top:8px;margin-bottom:2px;';
   const sedSlider = makeSlider({ min: 0.5, max: 5, step: 0.25, value: controls.sedimentMultiplier });
   sedSlider.addEventListener('input', () => {
     controls.sedimentMultiplier = Number(sedSlider.value);
@@ -599,9 +576,9 @@ export function createUI(onUpdate) {
   floodPanelDiv.appendChild(sedSlider);
 
   const speedLbl = makeLabel(
-    `Speed: <span id="speed-val">${controls.speedMultiplier}</span>&times;`,
-    'font-size:12px;margin-top:8px;margin-bottom:2px;'
+    `Speed: <span id="speed-val">${controls.speedMultiplier}</span>&times;`
   );
+  speedLbl.style.cssText = 'margin-top:8px;margin-bottom:2px;';
   const speedSlider = makeSlider({ min: 1, max: 8, value: controls.speedMultiplier });
   speedSlider.addEventListener('input', () => {
     controls.speedMultiplier = Number(speedSlider.value);
@@ -621,16 +598,9 @@ export function createUI(onUpdate) {
     { id: 'sediment', label: 'Sediment', title: 'Amplified sediment deposition view' },
   ];
   const floodViewBtns = floodViewModes.map(({ id, label, title }) => {
-    const btn = makeBtn(label, `
-      flex:1; padding:5px 4px; border:1px solid #444;
-      background:transparent; color:#888;
-      border-radius:4px; cursor:pointer; font-size:11px;
-    `, title);
+    const btn = makeBtn(label, 'mosaic-view-btn', title);
     const refresh = () => {
-      const active = controls.viewMode === id;
-      btn.style.background  = active ? '#4a5a7d' : 'transparent';
-      btn.style.color       = active ? '#fff'    : '#888';
-      btn.style.borderColor = active ? '#6a7aad' : '#444';
+      btn.classList.toggle('active', controls.viewMode === id);
     };
     btn.addEventListener('click', () => {
       controls.viewMode = id;
@@ -646,28 +616,19 @@ export function createUI(onUpdate) {
   // Run/Reset + extra flood actions
   floodPanelDiv.appendChild(buildRunButtons(controls, onUpdate, 'reset', 'Reset Water'));
 
-  const restoreBtn = makeBtn('Restore Landscape', `
-    margin-top:6px; padding:6px 12px; background:#2d5a3d;
-    color:#7dcc9d; border:none; border-radius:4px; cursor:pointer;
-    font-size:12px; width:100%;
-  `, 'Replace ~30% of patches with wetland/forest');
+  const restoreBtn = makeBtn('Restore Landscape', 'mosaic-action-btn', 'Replace ~30% of patches with wetland/forest');
+  restoreBtn.style.cssText = 'margin-top:6px;width:100%;';
   restoreBtn.addEventListener('click', () => onUpdate?.('restore'));
   floodPanelDiv.appendChild(restoreBtn);
 
   floodPanelDiv.appendChild(buildExportImport(onUpdate));
 
   // ── Select tool (shared across modes) ────────────────────────────────────
-  const selectToolBtn = makeBtn('Select Tool', `
-    display:block; width:100%; padding:7px 10px;
-    border:2px solid #e07848; background:transparent; color:#ddd;
-    border-radius:4px; cursor:pointer; font-size:12px; margin-bottom:10px;
-  `);
+  const selectToolBtn = makeBtn('Pick cells (tree zoom)', 'mosaic-tool-btn');
   const refreshSelectBtn = () => {
     const active = controls.activeTool === 'select';
-    selectToolBtn.style.background = active ? '#e0784830' : 'transparent';
-    selectToolBtn.style.fontWeight = active ? 'bold' : 'normal';
-    selectToolBtn.style.color      = active ? '#e07848' : '#ddd';
-    selectToolBtn.textContent      = active ? 'Select Tool (ON)' : 'Select Tool';
+    selectToolBtn.classList.toggle('active', active);
+    selectToolBtn.textContent = 'Pick cells (tree zoom)';
   };
   selectToolBtn.addEventListener('click', () => {
     controls.activeTool = controls.activeTool === 'select' ? 'paint' : 'select';
@@ -685,15 +646,12 @@ export function createUI(onUpdate) {
   const switchMode = (mode) => {
     controls.simMode  = mode;
     controls.activeTool = 'paint';
-    // Reset running when switching modes
     controls.running = false;
-    // Set sensible viewMode defaults per mode
     if (mode === 'fire')  controls.viewMode = 'design';
     if (mode === 'flood') controls.viewMode = 'design';
 
     firePanelDiv.style.display   = mode === 'fire'  ? 'block' : 'none';
     floodPanelDiv.style.display  = mode === 'flood' ? 'block' : 'none';
-    // Hide chart in fire mode (fire has no hydrology metrics)
     if (chartCanvas) chartCanvas.style.display = mode === 'fire' ? 'none' : 'block';
 
     refreshModeBtns();
@@ -709,10 +667,8 @@ export function createUI(onUpdate) {
   // ── Metrics div ───────────────────────────────────────────────────────────
   const metricsDiv = document.createElement('div');
   metricsDiv.id = 'mosaic-metrics';
-  metricsDiv.style.cssText = 'padding:0 14px 10px;';
   const metricsText = document.createElement('div');
   metricsText.id = 'mosaic-metrics-text';
-  metricsText.style.cssText = 'font-size:11px;color:#aaa;line-height:1.6;';
   metricsText.innerHTML = 'Conn: — | Particles: —';
   metricsDiv.appendChild(metricsText);
   container.appendChild(metricsDiv);
@@ -725,77 +681,54 @@ export function createUI(onUpdate) {
   const chartCanvas = document.createElement('canvas');
   chartCanvas.width  = CHART_W;
   chartCanvas.height = CHART_H;
-  chartCanvas.style.cssText = `
-    position: absolute; top: 10px; right: 10px;
-    background: rgba(12, 12, 16, 0.95);
-    border: 1px solid #2a2a3a; border-radius: 6px;
-    z-index: 100; pointer-events: none;
-    display: none;
-  `;
+  chartCanvas.className = 'mosaic-chart-canvas';
   mosaicContainer.appendChild(chartCanvas);
 
   // Initialise to fire mode (must be after chartCanvas is defined)
   switchMode('fire');
 
   // ── Info button / modal ───────────────────────────────────────────────────
-  const infoBtn = makeBtn('i Info', `
-    position:absolute; bottom:16px; right:16px; padding:8px 14px;
-    background:rgba(50,50,65,0.9); border:1px solid #555;
-    border-radius:6px; color:#bbb; font-size:13px;
-    cursor:pointer; z-index:100; box-shadow:0 2px 8px rgba(0,0,0,0.3);
-  `, 'Model documentation');
+  const infoBtn = makeBtn('i Info', 'mosaic-info-btn', 'Model documentation');
   mosaicContainer.appendChild(infoBtn);
 
   const infoModal = document.createElement('div');
   infoModal.id = 'mosaic-info-modal';
-  infoModal.style.cssText = `
-    display:none; position:fixed; top:0;left:0;right:0;bottom:0;
-    background:rgba(0,0,0,0.7); z-index:10000;
-    justify-content:center; align-items:center;
-    padding:24px; overflow-y:auto;
-  `;
   const infoPanel = document.createElement('div');
-  infoPanel.style.cssText = `
-    background:#1e1e26; color:#e0e0e0; max-width:640px;
-    max-height:85vh; overflow-y:auto; padding:24px;
-    border-radius:10px; font-family:system-ui,sans-serif;
-    font-size:13px; line-height:1.5;
-    box-shadow:0 8px 32px rgba(0,0,0,0.5);
-  `;
+  infoPanel.className = 'info-panel';
 
   const patchTable = Object.entries(PATCH_PARAMS).map(([key, p]) =>
     `<tr>
-      <td style="color:${p.color};font-weight:bold">${p.name}</td>
+      <td style="color:${p.color};font-weight:600">${p.name}</td>
       <td>${p.manningN}</td>
       <td>${p.infiltration}</td>
       <td>${p.erodibility}</td>
-      <td style="color:#a0a0b8;font-size:10px">${p.fuelLoad ?? 0}</td>
-      <td style="font-size:11px;color:#aaa">${getPatchBehavior(key, p)}</td>
+      <td style="color:#999;font-size:10px">${p.fuelLoad ?? 0}</td>
+      <td style="font-size:11px;color:#666">${getPatchBehavior(key, p)}</td>
     </tr>`
   ).join('');
 
   infoPanel.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h2 style="margin:0;font-size:18px">Land Mosaic Flow Model</h2>
-      <button id="info-modal-close" style="background:#555;border:none;color:#fff;padding:6px 12px;border-radius:4px;cursor:pointer">Close</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2>Land Mosaic Flow Model</h2>
+      <button id="info-modal-close" class="info-close-btn">Close</button>
     </div>
 
-    <h3 style="margin-top:20px;font-size:14px">Model overview</h3>
+    <h3>Model overview</h3>
     <p>This model combines Richard T.T. Forman's patch-matrix-corridor framework with overland flow physics and a FireSweep-style percolation wildfire model.</p>
 
-    <h3 style="margin-top:20px;font-size:14px">Fire model — percolation / FireSweep</h3>
-    <p style="font-size:12px">Fire spread is a cellular automaton on a 64&times;64 grid. Each tick, every BURNING cell attempts to ignite its 8 unburned neighbors exactly once. The ignition probability is:</p>
-    <p style="font-size:12px"><code style="background:#2a2a32;padding:2px 6px;border-radius:4px">P = min(1, fuelLoad &times; continuity &times; windFactor &times; slopeFactor)</code></p>
-    <p style="font-size:12px">Each unburned cell receives <em>one roll only</em> regardless of how many burning neighbors it has. This makes <strong>fuelLoad = density p</strong> in site-percolation theory (8-neighbor threshold p<sub>c</sub> &asymp; 0.41). Below p<sub>c</sub>: fire burns out. Above: fire sweeps the landscape.</p>
+    <h3>Fire model — percolation / FireSweep</h3>
+    <p>Fire spread is a cellular automaton on a 64&times;64 grid. Each tick, every BURNING cell attempts to ignite its 8 unburned neighbors exactly once. The ignition probability is:</p>
+    <p><code>P = min(1, fuelLoad &times; continuity &times; windFactor &times; slopeFactor)</code></p>
+    <p>Each unburned cell receives <em>one roll only</em> regardless of how many burning neighbors it has. This makes <strong>fuelLoad = density p</strong> in site-percolation theory (8-neighbor threshold p<sub>c</sub> &asymp; 0.41). Below p<sub>c</sub>: fire burns out. Above: fire sweeps the landscape.</p>
 
-    <h3 style="margin-top:20px;font-size:14px">Flood model — Manning's equation</h3>
-    <p style="font-size:12px"><code style="background:#2a2a32;padding:2px 6px;border-radius:4px">v = (1/n) &times; R<sup>2/3</sup> &times; S<sup>1/2</sup></code><br>
+    <h3>Flood model — Manning's equation</h3>
+    <p><code>v = (1/n) &times; R<sup>2/3</sup> &times; S<sup>1/2</sup></code><br>
     Lower roughness <em>n</em> = faster flow. Flux routes via D8 proportional to gradient.</p>
 
-    <h3 style="margin-top:20px;font-size:14px">Patch parameters</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
+    <h3>Patch parameters</h3>
+    <table>
       <thead>
-        <tr style="text-align:left;border-bottom:1px solid #444">
+        <tr>
           <th>Patch</th><th>n</th><th>Infilt</th><th>Erod.</th><th>FuelLoad</th><th>Behavior</th>
         </tr>
       </thead>
@@ -811,20 +744,20 @@ export function createUI(onUpdate) {
 
   // ── Chart drawing ─────────────────────────────────────────────────────────
   const PANELS_CFG = [
-    { key: 'runoffRatio',   label: 'RUNOFF',  unit: '0–1',      color: '#4a9eff', fmt: v => v.toFixed(2) },
-    { key: 'meanStorage',   label: 'STORAGE', unit: 'mm depth', color: '#3dd6a3', fmt: v => (v*1000).toFixed(2) },
-    { key: 'etFraction',    label: 'ET',      unit: '0–1',      color: '#7dd87d', fmt: v => v.toFixed(2) },
-    { key: 'concentration', label: 'CONCEN.', unit: '0–1',      color: '#f0b429', fmt: v => v.toFixed(2) },
+    { key: 'runoffRatio',   label: 'RUNOFF',  unit: '0–1',      color: '#3c78b4', fmt: v => v.toFixed(2) },
+    { key: 'meanStorage',   label: 'STORAGE', unit: 'mm depth', color: '#2a9a7a', fmt: v => (v*1000).toFixed(2) },
+    { key: 'etFraction',    label: 'ET',      unit: '0–1',      color: '#5a9a5a', fmt: v => v.toFixed(2) },
+    { key: 'concentration', label: 'CONCEN.', unit: '0–1',      color: '#c08830', fmt: v => v.toFixed(2) },
   ];
 
   function drawChartPanel(chartHistory, interventionMarkers, running) {
     if (chartCanvas.style.display === 'none') return;
     const ctx = chartCanvas.getContext('2d');
     ctx.clearRect(0, 0, CHART_W, CHART_H);
-    ctx.fillStyle = 'rgba(12, 12, 16, 0.95)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
     ctx.fillRect(0, 0, CHART_W, CHART_H);
     if (!running) {
-      ctx.fillStyle = '#444'; ctx.font = '11px system-ui';
+      ctx.fillStyle = '#bbb'; ctx.font = '11px Inter, system-ui';
       ctx.textAlign = 'center';
       ctx.fillText('PAUSED', CHART_W/2, CHART_H/2);
       ctx.textAlign = 'left';
@@ -834,13 +767,13 @@ export function createUI(onUpdate) {
     PANELS_CFG.forEach((panel, pi) => {
       const py = pi * PANEL_H;
       if (pi > 0) {
-        ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1;
+        ctx.strokeStyle = '#e5e5e5'; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(CHART_W, py); ctx.stroke();
       }
-      ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(0,0,0,0.04)'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, py + PANEL_H*0.5); ctx.lineTo(CHART_W, py + PANEL_H*0.5); ctx.stroke();
       if (n < 2) {
-        ctx.fillStyle = panel.color; ctx.font = 'bold 9px system-ui';
+        ctx.fillStyle = panel.color; ctx.font = 'bold 9px Inter, system-ui';
         ctx.fillText(panel.label, PAD, py + 12); return;
       }
       let maxVal = 1e-9;
@@ -852,7 +785,7 @@ export function createUI(onUpdate) {
       const cW = chartRight - chartLeft;
 
       if (interventionMarkers?.length > 0) {
-        ctx.strokeStyle = 'rgba(255,200,50,0.2)'; ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(192,80,48,0.15)'; ctx.lineWidth = 1;
         for (const m of interventionMarkers) {
           const x = chartLeft + cW * (1 - m.framesAgo / 300);
           if (x < chartLeft || x > chartRight) continue;
@@ -884,9 +817,9 @@ export function createUI(onUpdate) {
       ctx.stroke();
 
       const last = chartHistory[n-1][panel.key];
-      ctx.fillStyle = panel.color; ctx.font = 'bold 9px system-ui';
+      ctx.fillStyle = panel.color; ctx.font = 'bold 9px Inter, system-ui';
       ctx.fillText(panel.label, PAD, py + 12);
-      ctx.fillStyle = '#ccc'; ctx.font = '9px system-ui';
+      ctx.fillStyle = '#666'; ctx.font = '9px Inter, system-ui';
       ctx.textAlign = 'right';
       ctx.fillText(panel.fmt(last), CHART_W - PAD, py + 12);
       ctx.textAlign = 'left';

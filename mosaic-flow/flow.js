@@ -69,9 +69,12 @@ export function flowWeights(i, j, elevations, cols, rows) {
  * @param {number} dt - timestep (s)
  * @param {Object} opts - { patchParams, patchKeys } from patches.js
  * @param {Float32Array} [patchState] - sediment accumulation per cell; reduces infiltration when nonzero
+ * @param {{infiltrationFactor: Float32Array, roughnessFactor: Float32Array}} [perturbation]
+ *   Optional per-cell scaling of infiltration and Manning's n (e.g. from burn severity).
+ *   Both arrays length cols*rows; values 1.0 = no change.
  * @returns {{ depths, fluxes, totalET, totalOutflow }}
  */
-export function stepFlow(state, rainfall, dt, opts, patchState) {
+export function stepFlow(state, rainfall, dt, opts, patchState, perturbation) {
   const { depths, patchGrid, elevations, cols, rows } = state;
   const { patchParams, patchKeys } = typeof opts.patchKeys !== 'undefined'
     ? opts
@@ -100,7 +103,8 @@ export function stepFlow(state, rainfall, dt, opts, patchState) {
 
       // Sediment load progressively reduces infiltration capacity
       const siltLoad = patchState ? patchState[idx] : 0;
-      const effectiveInfil = params.infiltration / (1 + siltLoad * 0.1);
+      const infilPerturb = perturbation ? perturbation.infiltrationFactor[idx] : 1;
+      const effectiveInfil = (params.infiltration / (1 + siltLoad * 0.1)) * infilPerturb;
 
       // T1-A: Evapotranspiration — subtract from standing water each step
       const etRateMs = (params.etRate ?? 0) / 1000 / 3600;
@@ -133,6 +137,9 @@ export function stepFlow(state, rainfall, dt, opts, patchState) {
           effectiveN = params.manningN * (1 - nCount) + nSum;
         }
       }
+
+      // Burn-severity perturbation on Manning's n (applied after edge-blend)
+      if (perturbation) effectiveN *= perturbation.roughnessFactor[idx];
 
       const v = manningVelocity(mobilizableH, Math.max(0.001, effectiveSlope), effectiveN);
       const infiltrationRate = effectiveInfil / 1000 / 3600;

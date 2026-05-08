@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reconstruction — animated bed (t=20–210s)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a0a; color: #e0e0e0;
+    overflow: hidden;
+  }
+  #viewer { position: absolute; inset: 0; }
+
+  /* ── Side panel ── */
+  #panel {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(20,20,20,0.85); backdrop-filter: blur(10px);
+    border: 1px solid #333; border-radius: 8px;
+    padding: 12px 14px; width: 260px; font-size: 11px; z-index: 10;
+  }
+  #panel h3 {
+    font-size: 10px; font-weight: 500; letter-spacing: 0.12em;
+    text-transform: uppercase; color: #c05030; margin-bottom: 8px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .row label { flex: 0 0 90px; color: #aaa; font-size: 10px; }
+  .row input[type="range"] { flex: 1; height: 4px; }
+  .row input[type="number"] { width: 56px; background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 2px 4px; font-size: 10px; }
+  .group { border-top: 1px solid #2a2a2a; padding-top: 8px; margin-top: 8px; }
+  .modes { display: flex; gap: 4px; margin-bottom: 8px; }
+  .modes button {
+    flex: 1; background: #1a1a1a; border: 1px solid #333; color: #aaa;
+    padding: 5px 4px; font-size: 10px; border-radius: 3px;
+    cursor: pointer; font-family: inherit;
+  }
+  .modes button.active { background: #c05030; border-color: #c05030; color: #fff; }
+  .modes button:hover:not(.active) { border-color: #555; color: #ddd; }
+  .toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .toggle span { color: #ccc; font-size: 11px; }
+  .description { color: #999; font-size: 10px; line-height: 1.5; margin-bottom: 10px; font-weight: 300; }
+
+  /* ── Floating video tile ── */
+  #videoTile {
+    position: absolute; top: 12px; right: 12px;
+    width: 320px; background: rgba(20,20,20,0.85); backdrop-filter: blur(10px);
+    border: 1px solid #333; border-radius: 8px; overflow: hidden; z-index: 10;
+  }
+  #videoTile .vt-header {
+    padding: 8px 12px; border-bottom: 1px solid #333;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: #aaa;
+  }
+  #videoTile video { width: 100%; display: block; background: #000; }
+
+  /* ── Timeline at bottom ── */
+  #timeline {
+    position: absolute; bottom: 12px; left: 12px; right: 12px;
+    background: rgba(20,20,20,0.92); backdrop-filter: blur(10px);
+    border: 1px solid #333; border-radius: 8px;
+    padding: 10px 16px; z-index: 10;
+    display: flex; align-items: center; gap: 14px;
+  }
+  #playBtn {
+    background: #c05030; border: none; color: #fff;
+    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+    font-size: 14px; display: flex; align-items: center; justify-content: center;
+  }
+  #playBtn:hover { background: #d8603a; }
+  #scrubber { flex: 1; height: 6px; }
+  #timeLabel {
+    font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #ccc;
+    min-width: 110px; text-align: right;
+  }
+  /* Tick markers under scrubber */
+  .tick-bar { position: relative; height: 14px; flex: 1; margin-bottom: -10px; }
+  .tick-wrap { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .tick { position: absolute; top: 0; width: 1px; height: 6px; background: #555; }
+  .tick-label { position: absolute; top: 6px; transform: translateX(-50%); font-size: 8px; color: #777; font-family: 'SF Mono', Menlo, monospace; }
+
+  /* ── Legend ── */
+  #legend {
+    position: absolute; bottom: 90px; right: 12px;
+    background: rgba(20,20,20,0.85); backdrop-filter: blur(10px);
+    border: 1px solid #333; border-radius: 6px;
+    padding: 8px 10px; font-size: 10px; z-index: 10;
+  }
+  .colorbar { width: 160px; height: 10px; border-radius: 2px;
+    background: linear-gradient(90deg, #2c7bb6, #abd9e9, #ffffbf, #fdae61, #d7191c); }
+  .cb-labels { display: flex; justify-content: space-between; margin-top: 3px; color: #aaa; }
+
+  #loading {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #aaa; font-size: 12px; gap: 8px;
+    z-index: 20; background: #0a0a0a;
+  }
+  #loading.hidden { display: none; }
+  #loadProgress {
+    width: 240px; height: 3px; background: #222; border-radius: 2px; overflow: hidden;
+  }
+  #loadProgress > div { height: 100%; width: 0%; background: #c05030; transition: width 0.2s; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div>Loading bed time-series…</div>
+  <div id="loadProgress"><div></div></div>
+  <div id="loadStatus" style="font-size:10px;color:#666;font-family:'SF Mono',Menlo,monospace;">starting</div>
+</div>
+
+<div id="viewer"></div>
+
+<div id="panel">
+  <h3>Bed reconstruction · animated</h3>
+  <div class="description">
+    9 timestamped Kinect heightmaps morphed across t=20–210s, synced to the kinect color video. Δheight is current vs. baseline (t≈15s pre-flow): blue = scour, red = deposit.
+  </div>
+
+  <div class="modes">
+    <button data-mode="dheight" class="active">Δheight</button>
+    <button data-mode="height">Height</button>
+    <button data-mode="flat">Flat tint</button>
+  </div>
+
+  <div class="row">
+    <label>Vertical exag</label>
+    <input type="range" id="zExag" min="1" max="20" step="0.5" value="6">
+  </div>
+  <div class="row">
+    <label>Δh range (mm)</label>
+    <input type="number" id="dRange" value="6" min="1" max="30" step="0.5">
+  </div>
+  <div class="row">
+    <label>Point size</label>
+    <input type="range" id="pointSize" min="0.2" max="3" step="0.1" value="0.6">
+  </div>
+
+  <div class="group">
+    <label class="toggle" style="margin-bottom:6px;">
+      <input type="checkbox" id="floorOn">
+      <span>Stream-signature underlay</span>
+    </label>
+    <div class="row">
+      <label>Opacity</label>
+      <input type="range" id="floorOpacity" min="0" max="1" step="0.05" value="0.7">
+    </div>
+    <div class="row">
+      <label>Z offset</label>
+      <input type="range" id="floorZ" min="-30" max="20" step="0.5" value="-3">
+    </div>
+  </div>
+
+  <div class="group">
+    <label class="toggle" style="margin-bottom:6px;">
+      <input type="checkbox" id="bedPlane" checked>
+      <span>Show bed extent rectangle</span>
+    </label>
+    <div class="row">
+      <label>Video offset</label>
+      <input type="number" id="vOffset" value="0" step="0.5" style="width:80px;">
+      <span style="color:#777;font-size:9px;">s · video t=bed_t+offset</span>
+    </div>
+    <button id="resetView" style="width:100%;background:#1a1a1a;border:1px solid #333;color:#aaa;padding:5px;font-size:10px;border-radius:3px;cursor:pointer;font-family:inherit;">Reset view</button>
+  </div>
+</div>
+
+<div id="videoTile">
+  <div class="vt-header">
+    <span>Kinect color · synced</span>
+    <span id="vStatus" style="font-family:'SF Mono',Menlo,monospace;color:#777;">—</span>
+  </div>
+  <video id="kinectVideo" muted playsinline preload="metadata" src="../videos/proxies/kinect_color.mp4"></video>
+</div>
+
+<div id="legend">
+  <div style="color:#aaa;margin-bottom:4px;" id="legendTitle">Δheight from baseline (mm)</div>
+  <div class="colorbar"></div>
+  <div class="cb-labels">
+    <span id="cbMin">−6</span><span>0</span><span id="cbMax">+6</span>
+  </div>
+</div>
+
+<div id="timeline">
+  <button id="playBtn">▶</button>
+  <div class="tick-wrap">
+    <input id="scrubber" type="range" min="20" max="210" step="0.1" value="20">
+    <div class="tick-bar" id="tickBar"></div>
+  </div>
+  <div id="timeLabel">t = 20.0 s</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.163.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.163.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Bed extent (from metadata.json) ──
+const BED_X = [-473.57, 471.88];
+const BED_Y = [-502.23, 454.44];
+const BED_W = BED_X[1] - BED_X[0];
+const BED_H = BED_Y[1] - BED_Y[0];
+const GRID_MM = 1.0;
+const TIMES = [20, 40, 60, 90, 120, 150, 180, 210];   // seconds
+const BASE_PATH = 'bed_rectified/';
+
+// ── NPY loader (parses little-endian float32 .npy) ──
+async function loadNpy(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
+  const buf = await res.arrayBuffer();
+  const view = new DataView(buf);
+  // magic bytes \x93NUMPY at offset 0
+  const major = view.getUint8(6), minor = view.getUint8(7);
+  let headerLen, dataStart;
+  if (major === 1) {
+    headerLen = view.getUint16(8, true);
+    dataStart = 10 + headerLen;
+  } else {
+    headerLen = view.getUint32(8, true);
+    dataStart = 12 + headerLen;
+  }
+  const headerStr = new TextDecoder().decode(new Uint8Array(buf, major === 1 ? 10 : 12, headerLen));
+  const m = headerStr.match(/'shape':\s*\((\d+),\s*(\d+)\)/);
+  const rows = +m[1], cols = +m[2];
+  const data = new Float32Array(buf, dataStart, rows * cols);
+  return { rows, cols, data };
+}
+
+// ── Subsample a 2D float array ──
+function subsample(npy, stride) {
+  const { rows, cols, data } = npy;
+  const outRows = Math.floor(rows / stride);
+  const outCols = Math.floor(cols / stride);
+  const out = new Float32Array(outRows * outCols);
+  for (let i = 0; i < outRows; i++) {
+    for (let j = 0; j < outCols; j++) {
+      out[i * outCols + j] = data[(i * stride) * cols + (j * stride)];
+    }
+  }
+  return { rows: outRows, cols: outCols, data: out };
+}
+
+// ── Three.js setup ──
+const viewer = document.getElementById('viewer');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 5000);
+camera.up.set(0, 0, 1);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+viewer.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+function resetView() {
+  camera.position.set(700, -900, 600);
+  controls.target.set(0, -25, 0);
+  controls.update();
+}
+resetView();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Reference grid + bed extent
+const grid = new THREE.GridHelper(1000, 20, 0x444444, 0x222222);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+const bedRect = new THREE.LineLoop(
+  new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(BED_X[0], BED_Y[0], 0), new THREE.Vector3(BED_X[1], BED_Y[0], 0),
+    new THREE.Vector3(BED_X[1], BED_Y[1], 0), new THREE.Vector3(BED_X[0], BED_Y[1], 0),
+  ]),
+  new THREE.LineBasicMaterial({ color: 0xc05030, transparent: true, opacity: 0.6 })
+);
+scene.add(bedRect);
+
+// ── Stream-signature floor ──
+const floorMat = new THREE.MeshBasicMaterial({
+  transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide,
+});
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(BED_W, BED_H), floorMat);
+floor.position.set((BED_X[0] + BED_X[1]) / 2, (BED_Y[0] + BED_Y[1]) / 2, -3);
+floor.visible = false;
+scene.add(floor);
+new THREE.TextureLoader().load('optical_flow/stream_signature_pure.png', (tex) => {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  floorMat.map = tex; floorMat.needsUpdate = true;
+});
+
+// ── Divergent colormap (RdBu reversed) ──
+function divergentRdBu(t) {
+  const stops = [
+    [0.0, [44, 123, 182]], [0.25, [171, 217, 233]],
+    [0.5, [255, 255, 191]], [0.75, [253, 174, 97]], [1.0, [215, 25, 28]],
+  ];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [t0, c0] = stops[i], [t1, c1] = stops[i + 1];
+    if (t <= t1) {
+      const f = (t - t0) / (t1 - t0);
+      return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+function viridis(t) {
+  const stops = [
+    [0.0, [68, 1, 84]], [0.25, [59, 82, 139]], [0.5, [33, 145, 140]],
+    [0.75, [94, 201, 98]], [1.0, [253, 231, 37]],
+  ];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [t0, c0] = stops[i], [t1, c1] = stops[i + 1];
+    if (t <= t1) {
+      const f = (t - t0) / (t1 - t0);
+      return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+// ── Load all heightmaps ──
+const STRIDE = 1;
+let heightmaps = []; // [{ rows, cols, data }] per timestamp
+let baseline = null;
+let G_ROWS = 0, G_COLS = 0;
+let pointCloud = null, pointMaterial = null;
+let positions = null, colors = null;
+let currentMode = 'dheight';
+let dRangeMm = 6;
+let zExag = 6;
+
+async function loadAll() {
+  const urls = [`${BASE_PATH}heightmap_baseline.npy`, ...TIMES.map(t => `${BASE_PATH}heightmap_t${String(t).padStart(3,'0')}.npy`)];
+  const total = urls.length;
+  const status = document.getElementById('loadStatus');
+  const bar = document.querySelector('#loadProgress > div');
+
+  const results = [];
+  for (let i = 0; i < urls.length; i++) {
+    status.textContent = `loading ${urls[i].split('/').pop()} (${i+1}/${total})`;
+    bar.style.width = `${(i / total) * 100}%`;
+    const npy = await loadNpy(urls[i]);
+    results.push(subsample(npy, STRIDE));
+  }
+  bar.style.width = '100%';
+  status.textContent = 'building geometry…';
+
+  baseline = results[0];
+  heightmaps = results.slice(1);
+  G_ROWS = baseline.rows; G_COLS = baseline.cols;
+
+  // Build point cloud geometry: one point per cell
+  const N = G_ROWS * G_COLS;
+  positions = new Float32Array(N * 3);
+  colors = new Float32Array(N * 3);
+
+  // x/y cell mapping: cell (i,j) → world (x_min + j*stride, y_min + i*stride)
+  // Note: rows = Y axis, cols = X axis (numpy convention)
+  for (let i = 0; i < G_ROWS; i++) {
+    for (let j = 0; j < G_COLS; j++) {
+      const idx = i * G_COLS + j;
+      const x = BED_X[0] + j * STRIDE * GRID_MM;
+      const y = BED_Y[0] + i * STRIDE * GRID_MM;
+      positions[idx * 3] = x;
+      positions[idx * 3 + 1] = y;
+      positions[idx * 3 + 2] = 0;
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  pointMaterial = new THREE.PointsMaterial({ size: 0.6, vertexColors: true, sizeAttenuation: true });
+  pointCloud = new THREE.Points(geom, pointMaterial);
+  scene.add(pointCloud);
+
+  document.getElementById('loading').classList.add('hidden');
+  setBedTime(20);
+}
+
+// ── Time interpolation ──
+// Returns interpolated heightmap at time t (linear between adjacent timestamps)
+let interpBuf = null; // reused per-frame buffer to avoid GC churn
+function interpolateAt(t) {
+  if (t <= TIMES[0]) return heightmaps[0].data;
+  if (t >= TIMES[TIMES.length - 1]) return heightmaps[heightmaps.length - 1].data;
+  let i = 0;
+  while (i < TIMES.length - 1 && TIMES[i + 1] < t) i++;
+  const t0 = TIMES[i], t1 = TIMES[i + 1];
+  const f = (t - t0) / (t1 - t0);
+  const a = heightmaps[i].data, b = heightmaps[i + 1].data;
+  if (!interpBuf || interpBuf.length !== a.length) interpBuf = new Float32Array(a.length);
+  for (let k = 0; k < a.length; k++) interpBuf[k] = a[k] + (b[k] - a[k]) * f;
+  return interpBuf;
+}
+
+let curHeights = null;
+
+function setBedTime(t) {
+  if (!heightmaps.length) return;
+  curHeights = interpolateAt(t);
+  updateGeometry();
+  // Sync video
+  const vid = document.getElementById('kinectVideo');
+  const vOffset = parseFloat(document.getElementById('vOffset').value) || 0;
+  const target = t + vOffset;
+  if (vid.readyState >= 1 && Math.abs(vid.currentTime - target) > 0.2) {
+    vid.currentTime = target;
+  }
+  document.getElementById('timeLabel').textContent = `t = ${t.toFixed(1)} s`;
+}
+
+function updateGeometry() {
+  if (!pointCloud || !curHeights) return;
+  const N = G_ROWS * G_COLS;
+  const posArr = pointCloud.geometry.getAttribute('position').array;
+  const colArr = pointCloud.geometry.getAttribute('color').array;
+  const baseData = baseline.data;
+
+  for (let k = 0; k < N; k++) {
+    const z = curHeights[k];
+    const dh = z - baseData[k];
+    posArr[k * 3 + 2] = z * zExag;
+
+    if (currentMode === 'dheight') {
+      const tt = Math.max(0, Math.min(1, 0.5 + dh / (2 * dRangeMm)));
+      const c = divergentRdBu(tt);
+      colArr[k * 3] = c[0] / 255; colArr[k * 3 + 1] = c[1] / 255; colArr[k * 3 + 2] = c[2] / 255;
+    } else if (currentMode === 'height') {
+      // map z ∈ ~[-8, +6] to viridis
+      const tt = Math.max(0, Math.min(1, (z + 8) / 14));
+      const c = viridis(tt);
+      colArr[k * 3] = c[0] / 255; colArr[k * 3 + 1] = c[1] / 255; colArr[k * 3 + 2] = c[2] / 255;
+    } else { // flat tint
+      const tt = Math.max(0, Math.min(1, 0.5 + dh / (2 * dRangeMm)));
+      const c = divergentRdBu(tt);
+      colArr[k * 3] = (c[0] / 255) * 0.6 + 0.2;
+      colArr[k * 3 + 1] = (c[1] / 255) * 0.6 + 0.2;
+      colArr[k * 3 + 2] = (c[2] / 255) * 0.6 + 0.2;
+    }
+  }
+  pointCloud.geometry.getAttribute('position').needsUpdate = true;
+  pointCloud.geometry.getAttribute('color').needsUpdate = true;
+}
+
+// ── Playback ──
+let playing = false;
+let lastTickWall = 0;
+const playBtn = document.getElementById('playBtn');
+const scrubber = document.getElementById('scrubber');
+
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  playBtn.textContent = playing ? '❚❚' : '▶';
+  const vid = document.getElementById('kinectVideo');
+  if (playing) {
+    lastTickWall = performance.now();
+    vid.play().catch(() => { /* autoplay may fail; ignore */ });
+  } else {
+    vid.pause();
+  }
+});
+
+scrubber.addEventListener('input', e => {
+  playing = false;
+  playBtn.textContent = '▶';
+  document.getElementById('kinectVideo').pause();
+  setBedTime(parseFloat(e.target.value));
+});
+
+// ── UI wiring ──
+document.querySelectorAll('.modes button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.modes button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    currentMode = b.dataset.mode;
+    document.getElementById('legendTitle').textContent =
+      currentMode === 'height' ? 'Bed height (mm, viridis)' : 'Δheight from baseline (mm)';
+    document.getElementById('cbMin').textContent = currentMode === 'height' ? '−8' : `−${dRangeMm}`;
+    document.getElementById('cbMax').textContent = currentMode === 'height' ? '+6' : `+${dRangeMm}`;
+    updateGeometry();
+  });
+});
+document.getElementById('zExag').addEventListener('input', e => {
+  zExag = parseFloat(e.target.value);
+  updateGeometry();
+});
+document.getElementById('dRange').addEventListener('input', e => {
+  dRangeMm = Math.max(0.5, parseFloat(e.target.value) || 6);
+  document.getElementById('cbMin').textContent = currentMode === 'height' ? '−8' : `−${dRangeMm}`;
+  document.getElementById('cbMax').textContent = currentMode === 'height' ? '+6' : `+${dRangeMm}`;
+  updateGeometry();
+});
+document.getElementById('pointSize').addEventListener('input', e => {
+  if (pointMaterial) pointMaterial.size = parseFloat(e.target.value);
+});
+document.getElementById('floorOn').addEventListener('change', e => { floor.visible = e.target.checked; });
+document.getElementById('floorOpacity').addEventListener('input', e => { floorMat.opacity = parseFloat(e.target.value); });
+document.getElementById('floorZ').addEventListener('input', e => { floor.position.z = parseFloat(e.target.value); });
+document.getElementById('bedPlane').addEventListener('change', e => {
+  grid.visible = e.target.checked; bedRect.visible = e.target.checked;
+});
+document.getElementById('resetView').addEventListener('click', resetView);
+
+// ── Render tick (drives playback when active) ──
+function tick() {
+  requestAnimationFrame(tick);
+  controls.update();
+
+  if (playing) {
+    const now = performance.now();
+    const dt = (now - lastTickWall) / 1000;
+    lastTickWall = now;
+    let cur = parseFloat(scrubber.value) + dt;
+    if (cur > 210) { cur = 20; }   // loop
+    scrubber.value = cur;
+    setBedTime(cur);
+  }
+
+  // Show video status briefly
+  const vid = document.getElementById('kinectVideo');
+  const vs = document.getElementById('vStatus');
+  if (vid.readyState >= 2) {
+    vs.textContent = `${vid.currentTime.toFixed(1)}s / ${vid.duration ? vid.duration.toFixed(0) : '?'}s`;
+  } else {
+    vs.textContent = 'buffering';
+  }
+
+  renderer.render(scene, camera);
+}
+tick();
+
+// ── Build tick markers under scrubber ──
+const tickBar = document.getElementById('tickBar');
+TIMES.forEach(t => {
+  const pct = ((t - 20) / (210 - 20)) * 100;
+  const tEl = document.createElement('div'); tEl.className = 'tick'; tEl.style.left = `${pct}%`;
+  const lEl = document.createElement('div'); lEl.className = 'tick-label'; lEl.style.left = `${pct}%`;
+  lEl.textContent = `${t}`;
+  tickBar.appendChild(tEl); tickBar.appendChild(lEl);
+});
+
+// ── Kick off ──
+loadAll().catch(err => {
+  document.getElementById('loadStatus').textContent = 'failed: ' + err.message;
+  console.error(err);
+});
+</script>
+
+</body>
+</html>

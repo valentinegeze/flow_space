@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stream formation — Kinect optical flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #fff; color: #1a1a1a;
+    line-height: 1.5;
+  }
+
+  /* ── Layout ── */
+  main {
+    padding: 24px 32px;
+    max-width: 1500px; margin: 0 auto;
+  }
+  .description {
+    font-size: 13px; color: #666; font-weight: 300;
+    max-width: 720px; margin-bottom: 18px;
+  }
+
+  /* ── Sticky legend ── */
+  .legend {
+    position: sticky; top: 0; z-index: 5;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid #eee; border-radius: 6px;
+    padding: 12px 18px;
+    margin-bottom: 24px;
+    display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+    font-size: 11px; color: #666;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #ddd; }
+  .hue-bar {
+    width: 90px; height: 12px; border-radius: 2px; border: 1px solid #ddd;
+    background: linear-gradient(90deg,
+      hsl(0,100%,50%), hsl(60,100%,50%), hsl(120,100%,50%),
+      hsl(180,100%,50%), hsl(240,100%,50%), hsl(300,100%,50%), hsl(360,100%,50%));
+  }
+  .inferno-bar {
+    width: 90px; height: 12px; border-radius: 2px; border: 1px solid #ddd;
+    background: linear-gradient(90deg, #000004, #51127c, #b73779, #fc8961, #fcfdbf);
+  }
+
+  /* ── Section labels ── */
+  .section {
+    margin-bottom: 36px;
+  }
+  .section-label {
+    font-size: 10px; font-weight: 500; letter-spacing: 0.12em;
+    text-transform: uppercase; color: #c05030; margin-bottom: 4px;
+  }
+  .section-title {
+    font-size: 15px; font-weight: 400; color: #1a1a1a; margin-bottom: 6px;
+  }
+  .section-desc {
+    font-size: 12px; color: #666; font-weight: 300; max-width: 720px; margin-bottom: 14px;
+  }
+
+  /* ── Hero: video + signature side-by-side ── */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 18px;
+  }
+  @media (max-width: 980px) { .hero { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: #fafafa;
+    border: 1px solid #eee;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .panel-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid #eee;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .panel-title {
+    font-size: 12px; font-weight: 500; color: #1a1a1a;
+    letter-spacing: 0.02em;
+  }
+  .panel-sub {
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 10px; color: #999;
+  }
+  .panel-body {
+    padding: 0;
+    background: #fff;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 0;
+  }
+  .panel-body img, .panel-body video {
+    width: 100%; height: auto; display: block;
+  }
+
+  /* ── Supporting grid ── */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+</style>
+</head>
+<body>
+
+<main>
+
+  <p class="description">
+    Dense optical flow between consecutive Kinect color frames. The stream signature accumulates per-pixel motion magnitude across the run, weighted by how often each pixel had detectable flow — bright regions are persistent channels, not transient noise.
+  </p>
+
+  <div class="legend" style="display:block;padding:14px 18px;font-size:12px;color:#444;line-height:1.55;">
+    <div style="font-size:10px;font-weight:500;letter-spacing:0.12em;text-transform:uppercase;color:#c05030;margin-bottom:6px;">Channel-network reading</div>
+    A single dominant channel forms in the first ~30 s along the bed's mid-line and stays there for the rest of the run — the bright corridor on the long axis. Two narrower side branches appear past t&nbsp;=&nbsp;60&nbsp;s once the main channel cuts deep enough to spill. The persistence map confirms it: central corridor in &gt;&nbsp;70&nbsp;% of frames; side branches in 20–40&nbsp;%; ridges between never carry water. This pattern aligns with the rectified Δheight scour zones (see Bed heightmaps), and is the empirical anchor for Phase 3's burn-perturbation map.
+  </div>
+
+  <!-- Sticky legend -->
+  <div class="legend">
+    <div class="legend-item">
+      <span style="color:#aaa">direction</span>
+      <div class="hue-bar" title="hue = flow direction"></div>
+    </div>
+    <div class="legend-item">
+      <span style="color:#aaa">speed</span>
+      <span class="swatch" style="background:#000"></span>
+      <span style="color:#666">→</span>
+      <span class="swatch" style="background:#fff"></span>
+      <span style="color:#777">0 → 4 px/fr</span>
+    </div>
+    <div class="legend-item">
+      <span style="color:#aaa">signature</span>
+      <div class="inferno-bar" title="inferno colormap"></div>
+      <span style="color:#777">low → high</span>
+    </div>
+  </div>
+
+  <!-- HERO: video + main signature -->
+  <section class="section">
+    <div class="section-label">primary results</div>
+    <div class="section-title">Per-frame flow vs. accumulated stream signature</div>
+    <div class="section-desc">
+      Left: live optical flow overlaid on the bed (hue = direction, brightness = speed). Right:
+      where water moved most over the entire run, painted onto the bed.
+    </div>
+    <div class="hero">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">flow overlay (timeline)</span>
+          <span class="panel-sub">flow_overlay.mp4 · 2 Hz</span>
+        </div>
+        <div class="panel-body">
+          <video controls loop autoplay muted playsinline src="flow_overlay.mp4"></video>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">stream signature on bed</span>
+          <span class="panel-sub">cumulative · inferno</span>
+        </div>
+        <div class="panel-body">
+          <img src="stream_signature.png" alt="stream signature on bed">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Supporting -->
+  <section class="section">
+    <div class="section-label">supporting maps</div>
+    <div class="section-title">Signature alone & motion persistence</div>
+    <div class="section-desc">
+      Signature without the bed underneath isolates the channel network. Persistence shows what
+      fraction of frames each pixel had detectable motion — a different read on the same data.
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">stream signature (isolated)</span>
+          <span class="panel-sub">no underlay</span>
+        </div>
+        <div class="panel-body">
+          <img src="stream_signature_pure.png" alt="stream signature isolated">
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">flow persistence</span>
+          <span class="panel-sub">fraction of frames w/ motion · viridis</span>
+        </div>
+        <div class="panel-body">
+          <img src="persistence.png" alt="flow persistence">
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

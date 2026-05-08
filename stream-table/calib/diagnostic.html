@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pose-source diagnostic</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'SF Mono', Menlo, monospace; background: #0f0f0f; color: #ddd; padding: 24px; line-height: 1.4; }
+  h1 { font-size: 14px; color: #ffd43b; margin-bottom: 6px; letter-spacing: 0.04em; text-transform: uppercase; }
+  p.help { font-size: 11px; color: #888; margin-bottom: 18px; max-width: 920px; line-height: 1.55; }
+  p.help code, table code { color: #9cf; background: #1a1a1a; padding: 1px 5px; border-radius: 3px; font-size: 10.5px; }
+  table { border-collapse: collapse; font-size: 11px; min-width: 100%; }
+  th { text-align: left; padding: 6px 10px; color: #888; font-weight: 500; font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; border-bottom: 1px solid #333; background: #161616; position: sticky; top: 0; }
+  td { padding: 7px 10px; border-bottom: 1px solid #1f1f1f; vertical-align: top; }
+  tr.cam-divider td { border-top: 2px solid #2a2a2a; padding-top: 12px; }
+  tr.cam-divider:first-child td { border-top: none; padding-top: 7px; }
+  td.cam { color: #ffd43b; font-weight: 600; }
+  td.source { color: #ddd; }
+  td.frame  { color: #888; font-size: 10px; }
+  td.center { color: #9cf; }
+  td.axis   { color: #c9c; font-size: 10.5px; }
+  td.rms    { color: #6a9; }
+  td.rms.warn { color: #eb5; }
+  td.rms.bad  { color: #e55; }
+  td.bounds.yes { color: #6a9; font-weight: 600; }
+  td.bounds.no  { color: #e55; font-weight: 600; }
+  td.missing { color: #555; font-style: italic; }
+  td.missing.outlier-9km { color: #e55; font-style: normal; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9.5px; margin-left: 6px; vertical-align: middle; }
+  .badge.preferred { background: #c05030; color: #fff; }
+  .badge.fallback { background: #444; color: #ddd; }
+  .badge.deprecated { background: #401515; color: #e88; border: 1px solid #602020; }
+  .footer { margin-top: 24px; font-size: 11px; color: #666; max-width: 900px; line-height: 1.6; }
+  .legend { color: #888; font-size: 10px; margin-top: 6px; }
+  .legend span { display: inline-block; margin-right: 18px; }
+  .legend .ok-mark    { color: #6a9; }
+  .legend .bad-mark   { color: #e55; }
+  .legend .miss-mark  { color: #555; }
+  .legend .outlier-mark { color: #e55; }
+</style>
+</head>
+<body>
+
+<h1>Pose-source diagnostic</h1>
+<p class="help">
+  Every pose file on disk for every camera, side by side. The keystone is
+  <code>pose_&lt;cam&gt;_flume.json</code> (the file <code>multiview.html</code>
+  prefers); when it's missing, the loader falls back to
+  <code>pose_&lt;cam&gt;_kinect_anchored.json</code> composed with the hand-rolled
+  <code>M_scene_from_kinect_cv</code> mount transform — that "flume center" column
+  for kinect-anchored rows shows what that fallback puts on screen. The
+  <code>_refined.json</code> rows are the known-bad bundle-adjustment results
+  from April; ±9 km outliers will be visible at a glance.
+</p>
+
+<table id="grid">
+  <thead>
+    <tr>
+      <th>Cam</th>
+      <th>Source</th>
+      <th>Frame</th>
+      <th>Optical center<br>(in source frame, mm)</th>
+      <th>Optical center<br>(flume frame, mm)</th>
+      <th>Optical axis<br>(unit vec, source frame)</th>
+      <th>Reproj RMS</th>
+      <th>In flume bounds?<br>(rim ± 200 mm)</th>
+    </tr>
+  </thead>
+  <tbody id="rows"><tr><td colspan="8" class="missing">loading…</td></tr></tbody>
+</table>
+
+<p class="legend">
+  <span class="ok-mark">■ in bounds</span>
+  <span class="bad-mark">■ out of bounds / ±km outlier</span>
+  <span class="miss-mark">■ no file on disk</span>
+</p>
+
+<p class="footer" id="footer-notes"></p>
+
+<script type="module">
+import { cameraCenter, opticalAxis, transpose3, mulMV, vec3Norm } from './lib/flume_pose.js';
+
+// =============================================================================
+// Configuration
+// =============================================================================
+const CAMS = ['anna', 'sophia', 'valentine', 'javier', 'kinect'];
+
+// (suffix, badge-class, label) — order controls row order within each cam group.
+const SOURCES = [
+  { suffix: '_flume',            badge: 'preferred',  badgeText: 'preferred' },
+  { suffix: '_kinect_anchored',  badge: 'fallback',   badgeText: 'fallback' },
+  { suffix: '_refined',          badge: 'deprecated', badgeText: 'known-bad' },
+];
+
+// "In flume bounds": cam center within rim ±200 mm in X/Y, and within a generous
+// vertical band so that Kinect at ~770 mm and a side-mounted phone at ~1500 mm
+// both pass. Beyond that, anything obviously wrong (km-scale) trips the flag.
+const BOUNDS = {
+  x_min: -200,   x_max:  838 + 200,
+  y_min: -200,   y_max: 1930 + 200,
+  z_min: -500,   z_max: 3000,
+};
+
+const FLUME_W = 838, FLUME_L = 1930, KINECT_HEIGHT_MM = 770;
+
+// Replicates multiview.html's M_scene_from_kinect_cv lifted into the flume frame.
+// Decomposes into  (rotation by diag(1,-1,-1))  +  (translation to (419, 965, 770)).
+// Used to project a kinect-frame optical center into the flume frame so its row
+// shows where the multiview-fallback path would actually place the camera.
+function flumeFromKinect(C_kinect) {
+  return [
+    C_kinect[0] + FLUME_W / 2,
+    -C_kinect[1] + FLUME_L / 2,
+    -C_kinect[2] + KINECT_HEIGHT_MM,
+  ];
+}
+
+// =============================================================================
+// Pose-shape normalization. _kinect_anchored and _refined store R as a nested
+// 3-array of 3-arrays; _flume stores R as a row-major flat-9. Normalize so we
+// can call into flume_pose.js on either shape.
+// =============================================================================
+function normalizePose(json, suffix) {
+  let R, t;
+  if (suffix === '_flume') {
+    R = json.R_flume_to_cam;          // flat-9
+    t = json.t_flume_to_cam_mm;       // flat-3
+    if (!R || !t) return null;
+    return { R, t, frame: 'flume' };
+  }
+  // _kinect_anchored / _refined / _partial / bare pose
+  if (!json.R || !json.t_mm) return null;
+  // Flatten nested R if needed
+  R = Array.isArray(json.R[0])
+    ? [json.R[0][0], json.R[0][1], json.R[0][2],
+       json.R[1][0], json.R[1][1], json.R[1][2],
+       json.R[2][0], json.R[2][1], json.R[2][2]]
+    : json.R;
+  t = json.t_mm;
+  // Frame depends on which file. _kinect_anchored is in Kinect color frame;
+  // _refined claims world frame (but is the known-bad one).
+  const frame = suffix === '_kinect_anchored' ? 'kinect' : 'world';
+  return { R, t, frame };
+}
+
+// Pre-computed centers in the file (when present) are the source of truth — the
+// homography decomposition stores them after orthogonalization, so re-deriving
+// from R and t can drift by a fraction of a mm. Fall back to deriving when
+// missing.
+function getCenter(json, pose, suffix) {
+  if (suffix === '_flume'           && Array.isArray(json.camera_center_in_flume_mm))   return json.camera_center_in_flume_mm;
+  if (suffix === '_kinect_anchored' && Array.isArray(json.camera_center_kinectFrame_mm)) return json.camera_center_kinectFrame_mm;
+  if (suffix === '_refined'         && Array.isArray(json.camera_center_world_mm))      return json.camera_center_world_mm;
+  return cameraCenter(pose);
+}
+
+// Reproj RMS isn't stored consistently. Try every spelling, then regex-mine the
+// notes string the various producers leave behind.
+function getReprojRMS(json) {
+  if (typeof json.reprojection_rms_px === 'number') return json.reprojection_rms_px;
+  if (typeof json.reproj_rms_px === 'number')      return json.reproj_rms_px;
+  const notes = Array.isArray(json.notes) ? json.notes.join(' ') : (json.notes || '');
+  // "Mean reproj after BA: 92.02 px"  /  "Mean reprojection error: 22.2 px"
+  const m = notes.match(/(?:mean\s+(?:reproj(?:ection)?(?:\s+error)?(?:\s+after\s+BA)?))[^0-9]+(\d+(?:\.\d+)?)\s*px/i);
+  if (m) return parseFloat(m[1]);
+  return null;
+}
+
+function rmsClass(rms) {
+  if (rms == null) return '';
+  if (rms < 5)   return 'ok';
+  if (rms < 20)  return 'warn';
+  return 'bad';
+}
+
+function inBounds(C_flume) {
+  if (!C_flume) return false;
+  return (
+    C_flume[0] >= BOUNDS.x_min && C_flume[0] <= BOUNDS.x_max &&
+    C_flume[1] >= BOUNDS.y_min && C_flume[1] <= BOUNDS.y_max &&
+    C_flume[2] >= BOUNDS.z_min && C_flume[2] <= BOUNDS.z_max
+  );
+}
+
+// Detect ±km-scale outliers — these are the "BA collapsed to ±9 km" symptom.
+function isKmOutlier(C) {
+  if (!C) return false;
+  return Math.abs(C[0]) > 5000 || Math.abs(C[1]) > 5000 || Math.abs(C[2]) > 5000;
+}
+
+function fmtVec(v, digits = 0) {
+  if (!v) return '—';
+  return `(${v.map(x => x.toFixed(digits)).join(', ')})`;
+}
+function fmtAxis(v) {
+  if (!v) return '—';
+  return `(${v.map(x => x.toFixed(3)).join(', ')})`;
+}
+
+// =============================================================================
+// Boot — fetch every (cam × source) JSON, build one row per combination.
+// Missing files are kept as visible "no file" rows so the gaps are obvious.
+// =============================================================================
+async function tryFetch(path) {
+  try {
+    const r = await fetch(path, { cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+const tbody = document.getElementById('rows');
+tbody.innerHTML = '';
+
+let fallbackCount = 0;
+let preferredCount = 0;
+let outlierCount = 0;
+let missingCount = 0;
+
+for (const cam of CAMS) {
+  let firstRow = true;
+  for (const src of SOURCES) {
+    const path = `pose_${cam}${src.suffix}.json`;
+    const json = await tryFetch(path);
+    const tr = document.createElement('tr');
+    if (firstRow) tr.classList.add('cam-divider');
+    firstRow = false;
+
+    // Cam name only on the first row of each group, blank for subsequent rows.
+    const camCell = document.createElement('td');
+    camCell.className = 'cam';
+    camCell.textContent = tr.classList.contains('cam-divider') ? cam : '';
+    tr.appendChild(camCell);
+
+    // Source label with a colored badge so the role of each row is unmistakable.
+    const sourceCell = document.createElement('td');
+    sourceCell.className = 'source';
+    sourceCell.innerHTML = `${src.suffix}<span class="badge ${src.badge}">${src.badgeText}</span>`;
+    tr.appendChild(sourceCell);
+
+    if (!json) {
+      const td = document.createElement('td');
+      td.colSpan = 6;
+      td.className = 'missing';
+      td.textContent = 'no file on disk';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      missingCount++;
+      continue;
+    }
+
+    const pose = normalizePose(json, src.suffix);
+    if (!pose) {
+      const td = document.createElement('td');
+      td.colSpan = 6;
+      td.className = 'missing';
+      td.textContent = 'unparseable (R or t missing)';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      continue;
+    }
+
+    const C_raw = getCenter(json, pose, src.suffix);
+    const C_flume = pose.frame === 'flume' ? C_raw
+                  : pose.frame === 'world' ? C_raw            // _refined claims world frame
+                  : pose.frame === 'kinect' ? flumeFromKinect(C_raw)
+                  : null;
+    const axis = opticalAxis(pose);
+    const rms = getReprojRMS(json);
+    const ok = inBounds(C_flume);
+    const km = isKmOutlier(C_flume) || isKmOutlier(C_raw);
+
+    if (src.suffix === '_flume')           preferredCount++;
+    if (src.suffix === '_kinect_anchored') fallbackCount++;
+    if (km)                                outlierCount++;
+
+    const frameCell = document.createElement('td'); frameCell.className = 'frame';
+    frameCell.textContent = pose.frame;
+    tr.appendChild(frameCell);
+
+    const rawCenterCell = document.createElement('td'); rawCenterCell.className = 'center';
+    rawCenterCell.textContent = fmtVec(C_raw);
+    tr.appendChild(rawCenterCell);
+
+    const flumeCenterCell = document.createElement('td');
+    flumeCenterCell.className = km ? 'center missing outlier-9km' : 'center';
+    flumeCenterCell.textContent = fmtVec(C_flume);
+    if (km) flumeCenterCell.title = 'km-scale outlier — BA degeneracy';
+    tr.appendChild(flumeCenterCell);
+
+    const axisCell = document.createElement('td'); axisCell.className = 'axis';
+    axisCell.textContent = fmtAxis(axis);
+    tr.appendChild(axisCell);
+
+    const rmsCell = document.createElement('td'); rmsCell.className = `rms ${rmsClass(rms)}`;
+    rmsCell.textContent = rms == null ? '—' : `${rms.toFixed(1)} px`;
+    tr.appendChild(rmsCell);
+
+    const boundsCell = document.createElement('td'); boundsCell.className = `bounds ${ok ? 'yes' : 'no'}`;
+    boundsCell.textContent = ok ? 'yes' : 'NO';
+    tr.appendChild(boundsCell);
+
+    tbody.appendChild(tr);
+  }
+}
+
+document.getElementById('footer-notes').innerHTML = (
+  `<strong>Summary:</strong> ${preferredCount} cam(s) have a <code>_flume.json</code> ` +
+  `keystone on disk. ${fallbackCount} have <code>_kinect_anchored.json</code> only ` +
+  `(would render via the multiview fallback path). ${outlierCount} ±km-scale outliers ` +
+  `detected (the known-bad <code>_refined</code> bundle-adjust collapse). ` +
+  `${missingCount} (cam, source) cells are empty.<br><br>` +
+  `<strong>Why so many "NO" in the bounds column for kinect-frame rows:</strong> ` +
+  `<code>_kinect_anchored</code> centers live in the Kinect's optical frame, where ` +
+  `(0,0,0) is the Kinect itself. The "flume center" column lifts them via the ` +
+  `assumed mount transform — that's what multiview.html actually displays in fallback. ` +
+  `If a row is "NO" in the flume column, the multiview fallback is placing the cam ` +
+  `outside the rim, which is usually fine for a side-mounted phone but is the visible ` +
+  `symptom of the mount being wrong by tens of mm.`
+);
+</script>
+
+</body>
+</html>

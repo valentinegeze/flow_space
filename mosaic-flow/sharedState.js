@@ -98,6 +98,9 @@ export const sharedState = {
   /** Elevation grid at time of fire (Float32Array copy). */
   elevationSnapshot: null,
 
+  /** Current workflow step ('site' | 'mosaic' | 'soil-study'). */
+  currentStep: 'site',
+
   /** Geographic bounds of the simulation grid, if a parcel was drawn.
    *  { west, south, east, north } or null for synthetic grids. */
   geoBounds: null,

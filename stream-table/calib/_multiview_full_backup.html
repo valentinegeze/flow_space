@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Multiview fly-around</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #08080f; color: #e0e0e0; overflow: hidden; }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .viewport { flex: 1; position: relative; min-height: 0; }
+  .viewport canvas { display: block; }
+  .topbar { position: absolute; top: 12px; left: 16px; font-size: 11px; color: #888; pointer-events: none; }
+  .topbar strong { color: #ffd43b; letter-spacing: 0.04em; text-transform: uppercase; font-size: 11px; margin-right: 8px; }
+  .help { position: absolute; bottom: 12px; left: 16px; font-size: 10px; color: #555; line-height: 1.6; pointer-events: none; }
+  .controls {
+    background: #0d0d14; border-top: 1px solid #1a1a2e;
+    padding: 10px 16px; display: flex; align-items: center; gap: 12px;
+    font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+  }
+  .controls button {
+    background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px;
+    padding: 5px 11px; cursor: pointer; font-size: 11px; font-family: inherit;
+  }
+  .controls button:hover { border-color: #ffd43b; color: #ffd43b; }
+  .controls button.active { background: #c05030; border-color: #c05030; color: #fff; }
+  .controls .play { background: #c05030; border-color: #c05030; color: #fff; min-width: 36px; }
+  .controls .play:hover { background: #d86040; border-color: #d86040; color: #fff; }
+  .controls .seek { flex: 1; accent-color: #ffd43b; }
+  .controls .time { color: #9cf; min-width: 130px; text-align: right; }
+  .controls .snaps { display: flex; gap: 4px; }
+  .controls .label { color: #667; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="viewport" id="viewport">
+    <div class="topbar"><strong>Multiview</strong><span id="status">loading…</span></div>
+    <div class="help">
+      drag = orbit · scroll = zoom · right-drag = pan<br>
+      use snap buttons to jump to a camera's eye view, or "free" to free-orbit
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="play" id="playBtn">▶</button>
+    <span class="label">t =</span>
+    <span class="time" id="timeReadout">0:00.00 / 0:00.00</span>
+    <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="1">
+    <span class="label">snap →</span>
+    <span class="snaps" id="snapBtns"></span>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+// Configuration
+// ============================================================
+// Mapping each cam label to its proxy video file. Kinect's color stream lives in a 20 GB
+// MKV that needs offline extraction before it can be used here, so we omit it for now.
+const VIDEO_PROXY_PATH = '../videos/proxies';
+const VIDEO_PROXIES = {
+  anna:      `${VIDEO_PROXY_PATH}/AM_03-11_01_wide-inlet_no-obstacles.mp4`,
+  sophia:    `${VIDEO_PROXY_PATH}/skm_0311_01_wide_no-obs.mp4`,
+  valentine: `${VIDEO_PROXY_PATH}/vmg_03-11_01.mp4`,
+  // kinect:  TODO — extract color stream from depth_20260311_105209.mkv to .mp4
+};
+
+// Image planes are placed at this many millimetres in front of each cam's optical centre
+// when rendering them as billboards in the 3D scene. Increase to make videos float farther
+// from the cam icon; decrease to keep them tucked close.
+const IMAGE_PLANE_DEPTH_MM = 600;
+
+// Flume rim dimensions (mm) — for ground reference outline
+const FLUME_W = 838, FLUME_L = 1930;
+
+// ============================================================
+// Coordinate conversion
+// All saved poses follow OpenCV (X right, Y down, Z forward).
+// Three.js default has Y up and the camera looks along −Z. We mirror Y and Z when loading
+// poses so that the scene renders with conventional Three.js axes.
+// ============================================================
+const CV_TO_THREE = new THREE.Matrix4().set(
+  1,  0,  0, 0,
+  0, -1,  0, 0,
+  0,  0, -1, 0,
+  0,  0,  0, 1,
+);
+
+// ============================================================
+// State
+// ============================================================
+const state = {
+  sync: null,
+  syncRefClap: 0,
+  cams: {},                      // label → { videoEl, plane, group, color, pose, intrinsic, fovDeg, worldFromCam }
+  master: 0,
+  duration: 0,
+  playing: false,
+  view: 'free',
+  transit: null,                 // see setView/tickTransit for shape
+  pinnedCam: null,
+  // The point the camera looks at and orbits around. In Three.js world coords.
+  // Initial value is the Kinect-frame point (0, 0, 800) in CV (table ~800mm in front of
+  // Kinect along its optical axis = below it physically), converted to Three.js → -Z.
+  // TODO: when state.bridge becomes non-null, set this to the flume centroid
+  //   (FLUME_W/2, FLUME_L/2, 0) expressed in the bridge's flume frame, then transformed
+  //   into whichever world frame the scene is currently rendered in.
+  target: new THREE.Vector3(0, 0, -800),
+};
+
+const CAM_COLORS = {
+  anna: 0xff5555, sophia: 0x55aaff, valentine: 0x55ff99, javier: 0xff99ff, kinect: 0xffd43b,
+};
+
+// ============================================================
+// Loaders
+// ============================================================
+async function loadJSON(path) {
+  try { return await (await fetch(path)).json(); } catch (e) { return null; }
+}
+
+// Flat 3×3 row-major matrix utilities (small, local to multiview).
+function mat3T(M) { return [M[0],M[3],M[6], M[1],M[4],M[7], M[2],M[5],M[8]]; }
+function mat3Mul(A, B) {
+  const C = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+    let s = 0;
+    for (let k = 0; k < 3; k++) s += A[i*3+k] * B[k*3+j];
+    C[i*3+j] = s;
+  }
+  return C;
+}
+function mat3Vec(M, v) {
+  return [
+    M[0]*v[0] + M[1]*v[1] + M[2]*v[2],
+    M[3]*v[0] + M[4]*v[1] + M[5]*v[2],
+    M[6]*v[0] + M[7]*v[1] + M[8]*v[2],
+  ];
+}
+
+// Load every per-cam pose JSON we can find. Don't pick the "best" yet; that happens after
+// all are loaded so the world-frame bridge can use any cam that has both flume + kinect.
+async function loadAllRawPoses(labels) {
+  const raw = {};
+  for (const label of labels) {
+    const flume = await loadJSON(`pose_${label}_flume.json`);
+    const kinectAnchored = await loadJSON(`pose_${label}_kinect_anchored.json`);
+    raw[label] = { flume, kinectAnchored };
+  }
+  return raw;
+}
+
+// If any cam has BOTH a flume-frame pose and a kinect-anchored pose, those two poses
+// over-determine the rigid transform between the two world frames. We use it to lift
+// every kinect-only cam into flume frame, so the whole scene shares one world.
+//
+//   X_cam = R_flume_to_cam · X_flume + t_flume_to_cam      (1)
+//   X_cam = R_k_to_cam     · X_kinect + t_k_to_cam         (2)
+// Equating and solving for X_flume in terms of X_kinect:
+//   X_flume = R_flume_to_cam⁻¹ · (R_k_to_cam · X_kinect + (t_k_to_cam − t_flume_to_cam))
+// i.e.
+//   R_flume_to_kinect = R_flume_to_cam⁻¹ · R_k_to_cam   = R_flume_to_camᵀ · R_k_to_cam
+//   t_flume_to_kinect = R_flume_to_camᵀ · (t_k_to_cam − t_flume_to_cam)
+// Wait — we actually want kinect→flume to express OTHER cams' kinect-only poses in flume:
+//   X_kinect = R_kinect_from_flume · X_flume + t_kinect_from_flume
+// where R_kinect_from_flume = R_flume_to_kinectᵀ. We compose to get flume_to_C for any cam C
+// with only a kinect_to_C pose: see `kinectToFlumePose` below.
+function deriveBridge(raw) {
+  for (const [label, p] of Object.entries(raw)) {
+    if (!p.flume || !p.kinectAnchored) continue;
+    const R_ftc = p.flume.R_flume_to_cam;
+    const t_ftc = p.flume.t_flume_to_cam_mm;
+    const R_ktc = [].concat(...p.kinectAnchored.R);
+    const t_ktc = p.kinectAnchored.t_mm;
+    if (!R_ftc || !t_ftc || !R_ktc || !t_ktc) continue;
+    // R_flume_to_kinect, t_flume_to_kinect — used to map flume points into kinect frame.
+    const R_ftcT = mat3T(R_ftc);
+    const R_ftk = mat3Mul(R_ftcT, R_ktc);
+    const dt = [t_ktc[0] - t_ftc[0], t_ktc[1] - t_ftc[1], t_ktc[2] - t_ftc[2]];
+    const t_ftk = mat3Vec(R_ftcT, dt);
+    return { bridgeLabel: label, R_flume_to_kinect: R_ftk, t_flume_to_kinect: t_ftk };
+  }
+  return null;
+}
+
+// Given a kinect-anchored pose (R_k_to_cam, t_k_to_cam) and the bridge transform, return
+// the equivalent (R_flume_to_cam, t_flume_to_cam):
+//   X_cam = R_k_to_cam · X_kinect + t_k_to_cam
+//        = R_k_to_cam · (R_flume_to_kinect · X_flume + t_flume_to_kinect) + t_k_to_cam
+//        = (R_k_to_cam · R_flume_to_kinect) · X_flume + (R_k_to_cam · t_flume_to_kinect + t_k_to_cam)
+function kinectToFlumePose(R_ktc, t_ktc, bridge) {
+  const R_ftc = mat3Mul(R_ktc, bridge.R_flume_to_kinect);
+  const Rt = mat3Vec(R_ktc, bridge.t_flume_to_kinect);
+  const t_ftc = [Rt[0] + t_ktc[0], Rt[1] + t_ktc[1], Rt[2] + t_ktc[2]];
+  return { R: R_ftc, t: t_ftc };
+}
+
+// Pick the best pose available for one cam, given the raw loads and the optional bridge.
+// Returns { R, t, frame, source } or null. Frame is 'flume' or 'kinect_anchored' so the
+// renderer / status display knows what world the scene is actually in.
+function resolvePose(label, raw, bridge) {
+  const r = raw[label];
+  if (!r) return null;
+  if (r.flume && r.flume.R_flume_to_cam && r.flume.t_flume_to_cam_mm) {
+    return {
+      source: 'flume:direct',
+      frame: 'flume',
+      R: r.flume.R_flume_to_cam,
+      t: r.flume.t_flume_to_cam_mm,
+      K: r.flume.K,
+    };
+  }
+  if (r.kinectAnchored && r.kinectAnchored.R && r.kinectAnchored.t_mm) {
+    const Rflat = [].concat(...r.kinectAnchored.R);
+    const tk = r.kinectAnchored.t_mm;
+    if (bridge) {
+      const lifted = kinectToFlumePose(Rflat, tk, bridge);
+      return {
+        source: `flume:via_${bridge.bridgeLabel}`,
+        frame: 'flume',
+        R: lifted.R,
+        t: lifted.t,
+        K: [].concat(...r.kinectAnchored.K),
+      };
+    }
+    return {
+      source: 'kinect_anchored:fallback',
+      frame: 'kinect_anchored',
+      R: Rflat,
+      t: tk,
+      K: [].concat(...r.kinectAnchored.K),
+    };
+  }
+  return null;
+}
+
+async function loadIntrinsics() {
+  const intr = await loadJSON('intrinsics.json');
+  const out = {};
+  if (intr) for (const p of intr.phones) out[p.label] = { fx: p.fx_px, fy: p.fx_px, cx: p.cx_px, cy: p.cy_px, W: p.W, H: p.H };
+  return out;
+}
+
+// ============================================================
+// Three.js scene
+// ============================================================
+const wrap = document.getElementById('viewport');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+wrap.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x06060c);
+
+const orbitCam = new THREE.PerspectiveCamera(50, 1, 1, 50000);
+orbitCam.up.set(0, 1, 0);
+orbitCam.position.set(2200, 1800, 2400);
+
+const controls = new OrbitControls(orbitCam, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.copy(state.target);
+
+// Lights — basic ambient + directional so the frustum lines and ground are visible
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+dir.position.set(1500, 3000, 1500);
+scene.add(dir);
+
+// World axes at origin
+const axes = new THREE.AxesHelper(300);
+scene.add(axes);
+
+// Flume rim outline (838×1930 rectangle on the rim plane). Only meaningful when the
+// scene is in flume world frame — otherwise it's drawn at flume coords inside the
+// Kinect frame, which puts it in the wrong place visually. We add it lazily after
+// pose loading, gated on state.bridge.
+function buildFlumeRim() {
+  const pts = [
+    new THREE.Vector3(0,       0, 0),
+    new THREE.Vector3(FLUME_W, 0, 0),
+    new THREE.Vector3(FLUME_W, 0, -FLUME_L),
+    new THREE.Vector3(0,       0, -FLUME_L),
+    new THREE.Vector3(0,       0, 0),
+  ];
+  const geom = new THREE.BufferGeometry().setFromPoints(pts);
+  const mat = new THREE.LineBasicMaterial({ color: 0xffd43b, transparent: true, opacity: 0.7 });
+  scene.add(new THREE.Line(geom, mat));
+  const grid = new THREE.GridHelper(4000, 16, 0x222233, 0x141420);
+  grid.position.set(FLUME_W/2, -1, -FLUME_L/2);
+  scene.add(grid);
+}
+
+// Build a camera "billboard" — frustum lines + image plane textured with the video.
+function buildCamObject(label, pose, intrinsic, videoEl) {
+  const group = new THREE.Group();
+  group.name = `cam_${label}`;
+  const color = CAM_COLORS[label] || 0xffffff;
+
+  if (!intrinsic) intrinsic = { fx: 600, fy: 600, cx: 540, cy: 960, W: 1080, H: 1920 };
+  const D = IMAGE_PLANE_DEPTH_MM;
+  const halfW = D * intrinsic.W / (2 * intrinsic.fx);
+  const halfH = D * intrinsic.H / (2 * intrinsic.fy);
+
+  // Frustum — 4 lines from optical centre (0,0,0 in cam frame) to image-plane corners.
+  // The group's transform applies CV_TO_THREE on both sides, which means LOCAL geometry
+  // is interpreted in Three.js convention (Y up, −Z forward). So "in front of the cam"
+  // is z = −D, not +D.
+  const corners = [
+    [-halfW, -halfH, -D],
+    [ halfW, -halfH, -D],
+    [ halfW,  halfH, -D],
+    [-halfW,  halfH, -D],
+  ];
+  const segs = [];
+  for (const c of corners) { segs.push(new THREE.Vector3(0,0,0)); segs.push(new THREE.Vector3(...c)); }
+  for (let i = 0; i < 4; i++) {
+    segs.push(new THREE.Vector3(...corners[i]));
+    segs.push(new THREE.Vector3(...corners[(i+1)%4]));
+  }
+  const fGeom = new THREE.BufferGeometry().setFromPoints(segs);
+  const fMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 });
+  group.add(new THREE.LineSegments(fGeom, fMat));
+
+  // Optical-centre dot
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(20, 16, 16),
+    new THREE.MeshBasicMaterial({ color }),
+  ));
+
+  // Image plane (textured with video). Sits at z=−D in cam-local Three.js frame so the
+  // plane is in front of the cam (cam looks along −Z). PlaneGeometry's default normal
+  // is +Z; with the plane at −D facing +Z, it's facing the cam — correct for a billboard
+  // the cam (or anyone behind the cam) sees. Y-flip via scale keeps the picture
+  // right-side-up given image-Y-down vs Three.js-Y-up.
+  const planeGeom = new THREE.PlaneGeometry(halfW * 2, halfH * 2);
+  let mat;
+  if (videoEl) {
+    const tex = new THREE.VideoTexture(videoEl);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    // Proxy mp4 buffers come out landscape (e.g. 406×720) even though the original
+    // recordings are portrait — the rotation metadata was stripped during proxy
+    // generation. Rotate the texture 90° about its centre so the table reads vertically
+    // again. center.set is required, otherwise rotation pivots on the (0,0) corner.
+    tex.center.set(0.5, 0.5);
+    tex.rotation = -Math.PI / 2;
+    mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
+  } else {
+    mat = new THREE.MeshBasicMaterial({ color: 0x202030, side: THREE.DoubleSide, transparent: true, opacity: 0.4 });
+  }
+  const plane = new THREE.Mesh(planeGeom, mat);
+  plane.position.set(0, 0, -D);
+  plane.scale.set(1, -1, 1);
+  group.add(plane);
+
+  // Label sprite above the cam
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000d'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.font = 'bold 30px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#' + color.toString(16).padStart(6,'0');
+  ctx.fillText(label, 128, 32);
+  const spriteMat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.scale.set(400, 100, 1);
+  sprite.position.set(0, -150, 0);
+  group.add(sprite);
+
+  // Place the group at the cam's pose. The pose JSON stores R, t such that
+  //   X_cam = R · X_world + t   (OpenCV).
+  // Three.js wants the group's transform world←cam (object's local-to-world). So:
+  //   X_world = R^T · (X_cam − t)
+  // Build the world←cam matrix (4×4 in CV coords), then convert to Three.js coords by
+  //   M_three = CV_TO_THREE · M_cv · CV_TO_THREE^-1   (= CV_TO_THREE since it's involutory).
+  const Rcv = pose.R;
+  const RcvMat = new THREE.Matrix4().set(
+    Rcv[0], Rcv[1], Rcv[2], pose.t[0],
+    Rcv[3], Rcv[4], Rcv[5], pose.t[1],
+    Rcv[6], Rcv[7], Rcv[8], pose.t[2],
+    0, 0, 0, 1,
+  );
+  // Invert (world ← cam) and convert to Three frame.
+  const M_world_from_cam_cv = RcvMat.clone().invert();
+  const M_world_from_cam_three = new THREE.Matrix4()
+    .multiply(CV_TO_THREE).multiply(M_world_from_cam_cv).multiply(CV_TO_THREE);
+  group.applyMatrix4(M_world_from_cam_three);
+  scene.add(group);
+
+  // Vertical FOV (degrees) from intrinsics — used when snapping the orbit camera to
+  // this cam's eye view so the image plane fills the screen exactly.
+  const fovDeg = 2 * Math.atan(intrinsic.H / (2 * intrinsic.fy)) * 180 / Math.PI;
+
+  return { group, plane, color, intrinsic, pose, fovDeg, worldFromCam: M_world_from_cam_three.clone() };
+}
+
+// ============================================================
+// Video / sync
+// ============================================================
+function makeVideoEl(src) {
+  const v = document.createElement('video');
+  v.src = src;
+  v.crossOrigin = 'anonymous';
+  v.preload = 'auto';
+  v.playsInline = true;
+  v.muted = true;
+  v.loop = false;
+  return v;
+}
+
+// Set every cam's video to the master clock t (seconds since clap).
+function syncToMaster(t) {
+  state.master = Math.max(0, t);
+  for (const [label, cam] of Object.entries(state.cams)) {
+    if (!cam.videoEl) continue;
+    const sync = state.sync.videos[label];
+    if (!sync) continue;
+    const target = sync.clap_time_s + state.master;
+    // Only seek if the video is paused, or if it has drifted noticeably.
+    const drift = Math.abs(cam.videoEl.currentTime - target);
+    if (cam.videoEl.paused || drift > 0.25) {
+      try { cam.videoEl.currentTime = Math.min(target, cam.videoEl.duration || target); } catch (e) {}
+    }
+  }
+}
+
+function setPlaying(p) {
+  state.playing = p;
+  document.getElementById('playBtn').textContent = p ? '❚❚' : '▶';
+  for (const cam of Object.values(state.cams)) {
+    if (!cam.videoEl) continue;
+    if (p) cam.videoEl.play().catch(() => {}); else cam.videoEl.pause();
+  }
+}
+
+function fmtTime(s) {
+  if (!isFinite(s)) return '0:00.00';
+  const m = Math.floor(s / 60), r = s - m*60;
+  return `${m}:${r.toFixed(2).padStart(5, '0')}`;
+}
+
+function updateTimeReadout() {
+  const seek = document.getElementById('seek');
+  const ratio = state.duration > 0 ? state.master / state.duration : 0;
+  seek.value = String(Math.round(ratio * 1000));
+  document.getElementById('timeReadout').textContent = `${fmtTime(state.master)} / ${fmtTime(state.duration)}`;
+}
+
+// ============================================================
+// Animated viewpoint transitions — arc on a sphere centred at state.target
+// ============================================================
+// Free-mode survey position. Distance/direction are interpreted relative to state.target,
+// so changing state.target later automatically re-frames free mode around it.
+const FREE_POS  = new THREE.Vector3(2200, 1800, 2400);
+const FREE_FOV  = 50;
+const TRANSIT_MS = 1300;
+const SLERP_ORIENT_FRACTION = 0.05;  // last 5% of the flight slerps into the cam's exact orientation
+
+// Spec for one transit endpoint:
+//   { pos: THREE.Vector3,  fov: number,  quat: THREE.Quaternion | null }
+// quat = null → end the flight in lookAt(state.target) orientation (free mode).
+// quat set    → end pinned to that orientation (cam mode), so the cam's image plane fills
+//               the screen exactly. The slerp from "lookAt-derived orientation" to this
+//               quat happens during the last SLERP_ORIENT_FRACTION of the flight.
+function targetForView(view) {
+  if (view === 'free') {
+    return { pos: FREE_POS.clone(), fov: FREE_FOV, quat: null };
+  }
+  const label = view.split(':')[1];
+  const cam = state.cams[label];
+  if (!cam || !cam.worldFromCam) return targetForView('free');
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  const scl = new THREE.Vector3();
+  cam.worldFromCam.decompose(pos, quat, scl);
+  return { pos, fov: cam.fovDeg, quat };
+}
+
+function easeInOutCubic(t) { return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3) / 2; }
+
+// Slerp on the unit-sphere between two unit vectors (Three.Vector3 has no built-in vec3 slerp).
+function slerpUnit(out, a, b, t) {
+  const dot = THREE.MathUtils.clamp(a.dot(b), -1, 1);
+  const theta = Math.acos(dot);
+  if (theta < 1e-6) return out.copy(a);
+  const sinTheta = Math.sin(theta);
+  const w1 = Math.sin((1 - t) * theta) / sinTheta;
+  const w2 = Math.sin(t * theta) / sinTheta;
+  return out.set(w1*a.x + w2*b.x, w1*a.y + w2*b.y, w1*a.z + w2*b.z);
+}
+
+function setView(view) {
+  const dest = targetForView(view);
+  // From-side state captured at the moment the user clicked.
+  const fromPos = orbitCam.position.clone();
+  const fromFov = orbitCam.fov;
+  // Express both endpoints as (direction-from-target, distance-from-target) so the flight
+  // path is an arc on a sphere centred at state.target. If either endpoint coincides with
+  // the target (zero-length vector), fall back to a small +Y offset so slerp doesn't NaN.
+  const FALLBACK_DIR = new THREE.Vector3(0, 1, 0);
+  const fromDelta = fromPos.clone().sub(state.target);
+  const fromDist  = fromDelta.length();
+  const fromDir   = fromDist > 1e-6 ? fromDelta.divideScalar(fromDist) : FALLBACK_DIR.clone();
+  const toDelta   = dest.pos.clone().sub(state.target);
+  const toDist    = toDelta.length();
+  const toDir     = toDist > 1e-6 ? toDelta.divideScalar(toDist) : FALLBACK_DIR.clone();
+
+  state.transit = {
+    t0: performance.now(),
+    dur: TRANSIT_MS,
+    destView: view,
+    fromPos, fromFov,
+    fromDir, fromDist,
+    toDir, toDist,
+    destPos: dest.pos.clone(),
+    destFov: dest.fov,
+    destQuat: dest.quat,    // may be null for free mode
+    lookAtQuatAtSlerpStart: null,  // captured the first frame we cross SLERP_ORIENT_FRACTION
+  };
+  state.view = 'transit';
+  state.pinnedCam = null;
+  controls.enabled = false;
+  for (const btn of document.querySelectorAll('#snapBtns button')) {
+    btn.classList.toggle('active', btn.dataset.view === view);
+  }
+}
+
+const _slerpScratch = new THREE.Vector3();
+
+function tickTransit(now) {
+  if (!state.transit) return;
+  const tr = state.transit;
+  const t = Math.min(1, (now - tr.t0) / tr.dur);
+  const e = easeInOutCubic(t);
+
+  // Position: arc on sphere about state.target. Direction slerps; distance lerps.
+  slerpUnit(_slerpScratch, tr.fromDir, tr.toDir, e);
+  const dist = tr.fromDist + (tr.toDist - tr.fromDist) * e;
+  orbitCam.position.copy(state.target).addScaledVector(_slerpScratch, dist);
+
+  // FOV
+  orbitCam.fov = tr.fromFov + (tr.destFov - tr.fromFov) * e;
+  orbitCam.updateProjectionMatrix();
+
+  // Orientation. Two phases:
+  //   e ∈ [0, 1−SLERP_ORIENT_FRACTION]: lookAt(state.target) every frame so the table
+  //     stays anchored on screen as the camera arcs around it.
+  //   e ∈ (1−SLERP_ORIENT_FRACTION, 1]: slerp from the last lookAt orientation into
+  //     destQuat (the cam's exact world orientation). For free mode (destQuat=null), we
+  //     never enter this phase — lookAt drives orientation through to the end.
+  const slerpThreshold = 1 - SLERP_ORIENT_FRACTION;
+  if (e < slerpThreshold || !tr.destQuat) {
+    orbitCam.lookAt(state.target);
+    if (tr.destQuat) {
+      // Keep refreshing until we're about to enter the slerp phase, so the snapshot we
+      // freeze is the most recent lookAt orientation.
+      tr.lookAtQuatAtSlerpStart = orbitCam.quaternion.clone();
+    }
+  } else {
+    if (!tr.lookAtQuatAtSlerpStart) {
+      orbitCam.lookAt(state.target);
+      tr.lookAtQuatAtSlerpStart = orbitCam.quaternion.clone();
+    }
+    const localT = (e - slerpThreshold) / SLERP_ORIENT_FRACTION;
+    orbitCam.quaternion.copy(tr.lookAtQuatAtSlerpStart).slerp(tr.destQuat, localT);
+  }
+
+  if (t >= 1) {
+    state.transit = null;
+    state.view = tr.destView;
+    if (tr.destView === 'free') {
+      // Hand over to OrbitControls — orbit-around-target is now state.target.
+      controls.target.copy(state.target);
+      controls.enabled = true;
+      state.pinnedCam = null;
+    } else {
+      // Pinned to a cam's eye view; orbit is disabled so the user stays put.
+      controls.enabled = false;
+      state.pinnedCam = tr.destView.split(':')[1];
+    }
+    updateCamPlanesOpacity();
+  }
+}
+
+// When you're sitting at one cam's eye, dim the other cams' floating image planes so they
+// don't compete with the full-screen video for attention. In free-orbit, all are bright.
+function updateCamPlanesOpacity() {
+  for (const [label, cam] of Object.entries(state.cams)) {
+    if (!cam.plane || !cam.plane.material) continue;
+    const isMe = state.pinnedCam === label;
+    cam.plane.material.opacity = state.pinnedCam ? (isMe ? 1.0 : 0.18) : 0.92;
+    cam.plane.material.transparent = true;
+    cam.plane.material.needsUpdate = true;
+  }
+}
+
+// ============================================================
+// Boot
+// ============================================================
+(async () => {
+  document.getElementById('status').textContent = 'loading sync + poses…';
+  state.sync = await loadJSON('../data/sync.json');
+  if (!state.sync) {
+    document.getElementById('status').textContent = 'failed to load data/sync.json';
+    return;
+  }
+  state.syncRefClap = state.sync.videos[state.sync.reference_label || 'anna']?.clap_time_s || 0;
+
+  const intrinsics = await loadIntrinsics();
+  const labels = Object.keys(VIDEO_PROXIES);
+
+  // Build snap buttons — clicking one initiates an animated fly-to that cam's eye.
+  const snapBtns = document.getElementById('snapBtns');
+  for (const label of [...labels, 'free']) {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.dataset.view = (label === 'free') ? 'free' : `cam:${label}`;
+    btn.onclick = () => setView(btn.dataset.view);
+    snapBtns.appendChild(btn);
+  }
+
+  // Load every cam's poses (both flume + kinect-anchored where available), pick the
+  // bridge, then resolve each cam to a single (R, t) in flume frame whenever possible.
+  const rawPoses = await loadAllRawPoses(labels);
+  const bridge = deriveBridge(rawPoses);
+  state.bridge = bridge;
+  // Only draw the rim wireframe if we're actually in flume frame; otherwise it would
+  // float at flume coords inside the Kinect frame and visually mislead.
+  if (bridge) buildFlumeRim();
+
+  for (const label of labels) {
+    const pose = resolvePose(label, rawPoses, bridge);
+    const videoEl = makeVideoEl(VIDEO_PROXIES[label]);
+    document.body.appendChild(videoEl);
+    videoEl.style.display = 'none';
+    const intrinsic = intrinsics[label];
+    if (pose) {
+      const built = buildCamObject(label, pose, intrinsic, videoEl);
+      state.cams[label] = { ...built, videoEl, pose };
+    } else {
+      state.cams[label] = { videoEl, pose: null, plane: null, group: null };
+    }
+  }
+
+  // Once metadata for all videos has loaded we can compute a sensible duration window.
+  await Promise.all(Object.entries(state.cams).map(([label, cam]) => new Promise((res) => {
+    if (!cam.videoEl) return res();
+    if (cam.videoEl.readyState >= 1) return res();
+    cam.videoEl.addEventListener('loadedmetadata', () => res(), { once: true });
+    cam.videoEl.addEventListener('error', () => res(), { once: true });
+  })));
+
+  // Issue B diagnostic — log video element dimensions (which the browser reports after
+  // it has parsed the proxy's metadata) against the intrinsic dimensions used to build the
+  // image plane. If the videoElement reports e.g. 1920×1080 while the intrinsic says
+  // 1080×1920, the proxy is stored landscape and the browser is auto-rotating it for us
+  // (or not), which would explain the "table runs sideways" symptom. Console-only; no
+  // visual change. Remove once the rotation cause is confirmed.
+  for (const [label, cam] of Object.entries(state.cams)) {
+    const v = cam.videoEl;
+    if (!v) continue;
+    const intr = cam.intrinsic;
+    console.log(label, 'video:', v.videoWidth, 'x', v.videoHeight,
+                'intrinsic:', intr ? `${intr.W} x ${intr.H}` : '(none)');
+  }
+
+  // Master duration = min of (each cam's video duration − that cam's clap_time_s),
+  // i.e., how long after the clap every cam still has footage.
+  let dMin = Infinity;
+  for (const [label, cam] of Object.entries(state.cams)) {
+    if (!cam.videoEl || !state.sync.videos[label]) continue;
+    const dur = cam.videoEl.duration;
+    const clap = state.sync.videos[label].clap_time_s;
+    if (isFinite(dur) && dur > clap) dMin = Math.min(dMin, dur - clap);
+  }
+  state.duration = isFinite(dMin) ? dMin : 0;
+
+  syncToMaster(0);
+  updateTimeReadout();
+
+  const posedCount = Object.values(state.cams).filter(c => c.pose).length;
+  // Surface what world frame the scene is in. If even one cam is in 'kinect_anchored',
+  // the rim wireframe in the renderer (drawn at flume coords) won't line up — flag it.
+  const frames = Object.values(state.cams).map(c => c.pose?.frame).filter(Boolean);
+  const allFlume = frames.length > 0 && frames.every(f => f === 'flume');
+  let frameTag;
+  if (allFlume && state.bridge) frameTag = `flume frame · bridge=${state.bridge.bridgeLabel}`;
+  else if (allFlume)            frameTag = 'flume frame · all direct';
+  else if (frames.includes('flume') && frames.includes('kinect_anchored')) frameTag = 'MIXED FRAMES — rim won\'t line up';
+  else                          frameTag = 'kinect frame · no bridge yet';
+  document.getElementById('status').textContent =
+    `${posedCount}/${labels.length} cams · ${frameTag} · ${fmtTime(state.duration)} footage`;
+
+  // Wire controls
+  document.getElementById('playBtn').onclick = () => setPlaying(!state.playing);
+  document.getElementById('seek').addEventListener('input', (e) => {
+    const r = +e.target.value / 1000;
+    syncToMaster(r * state.duration);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === ' ' && e.target.tagName !== 'INPUT') {
+      e.preventDefault(); setPlaying(!state.playing);
+    }
+  });
+
+  // Resize handling
+  function resize() {
+    const r = wrap.getBoundingClientRect();
+    renderer.setSize(r.width, r.height, false);
+    orbitCam.aspect = r.width / r.height;
+    orbitCam.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Default first viewpoint: drop straight into valentine's eye if posed; otherwise free.
+  if (state.cams.valentine && state.cams.valentine.pose) setView('cam:valentine');
+  else setView('free');
+  updateCamPlanesOpacity();
+
+  // Render loop
+  let lastT = performance.now();
+  function tick(now) {
+    requestAnimationFrame(tick);
+    const dt = (now - lastT) / 1000;
+    lastT = now;
+    if (state.transit) tickTransit(now);
+    if (state.playing) {
+      const ref = state.cams[state.sync.reference_label || 'anna'];
+      if (ref && ref.videoEl && !ref.videoEl.paused) {
+        const refClap = state.sync.videos[state.sync.reference_label || 'anna'].clap_time_s;
+        state.master = Math.max(0, ref.videoEl.currentTime - refClap);
+      } else {
+        state.master += dt;
+      }
+      if (state.master > state.duration) { state.master = state.duration; setPlaying(false); }
+      updateTimeReadout();
+    }
+    if (controls.enabled) controls.update();
+    renderer.render(scene, orbitCam);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

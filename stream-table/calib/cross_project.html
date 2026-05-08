@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Multi-phone cross-projection</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #0f0f0f; color: #eee; }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #333; }
+  .topbar strong { color: #c05030; letter-spacing: 0.04em; font-size: 12px; text-transform: uppercase; }
+  .topbar button, .topbar select { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 5px 11px; cursor: pointer; font-size: 12px; font-family: inherit; }
+  .topbar .pill { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #6a9; }
+  .grid { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; min-height: 0; }
+  .cell { position: relative; background: #000; overflow: hidden; display: flex; flex-direction: column; }
+  .cell h3 { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: #888; padding: 6px 10px; background: #181818; }
+  .cell canvas { flex: 1; max-width: 100%; max-height: calc(100% - 28px); cursor: crosshair; }
+  .status { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.7); color: #ddd; padding: 4px 8px; font-family: 'SF Mono', Menlo, monospace; font-size: 11px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <strong>Cross-Project</strong>
+    <span style="font-size:11px;color:#aaa;">Click any frame to drop a marker — the same point appears on the other views (each click adds a numbered colored marker).</span>
+    <span class="pill" id="status">loading…</span>
+    <button id="frameSetBtn" style="margin-left:auto">Frames: setup</button>
+    <button id="clearBtn">Clear</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<script>
+// Javier excluded for this round (his flow features move too much between frames for reliable
+// cross-view feature matching). He's still solved from the earlier setup-frame features.
+const PHONES = ["anna", "valentine", "sophia", "kinect"];
+const POSE_OPTIONAL = new Set(["anna", "kinect"]);
+const state = {
+  poses: {}, imgs: {}, canvases: {},
+  frameSet: "setup",    // "setup" | "flow"
+  // Persistent list of click→projection points so you can see multiple
+  // correspondences at once (each colored + numbered).
+  projections: [],     // [{ sourceLabel, uv, world, ray, color, idx }]
+};
+
+// Visually distinct colors for sequential project-mode clicks
+const PROJECTION_COLORS = ["#ff4040", "#40e0ff", "#ffdd40", "#9d40ff", "#40ff80", "#ff80c0", "#ff8040", "#80c0ff"];
+
+const status = document.getElementById("status");
+
+// ─── Math ───────────────────────────────────────────────────────────────────
+function mm(M, v) {
+  return [
+    M[0][0]*v[0] + M[0][1]*v[1] + M[0][2]*v[2],
+    M[1][0]*v[0] + M[1][1]*v[1] + M[1][2]*v[2],
+    M[2][0]*v[0] + M[2][1]*v[1] + M[2][2]*v[2],
+  ];
+}
+function transpose(M) {
+  return [[M[0][0], M[1][0], M[2][0]], [M[0][1], M[1][1], M[2][1]], [M[0][2], M[1][2], M[2][2]]];
+}
+function matInverse3x3(m) {
+  // For K: upper triangular with fy=fx, skew=0 → simpler form
+  const a = m[0][0], b = m[0][2], c = m[1][1], d = m[1][2];
+  return [[1/a, 0, -b/a], [0, 1/c, -d/c], [0, 0, 1]];
+}
+function project(pose, Xw) {
+  const R = pose.R, t = pose.t_mm, K = pose.K;
+  const Xc = mm(R, Xw); Xc[0] += t[0]; Xc[1] += t[1]; Xc[2] += t[2];
+  if (Xc[2] <= 0) return null;
+  let x = Xc[0]/Xc[2], y = Xc[1]/Xc[2];
+  const d = pose.dist_coeffs || {};
+  const k1 = d.k1 || 0, k2 = d.k2 || 0;
+  if (k1 || k2) {
+    const r2 = x*x + y*y;
+    const f = 1 + k1*r2 + k2*r2*r2;
+    x *= f; y *= f;
+  }
+  return [K[0][0]*x + K[0][2], K[1][1]*y + K[1][2]];
+}
+function backProjectRay(pose, u, v) {
+  const Kinv = matInverse3x3(pose.K);
+  const d_cam = mm(Kinv, [u, v, 1]);
+  const RT = transpose(pose.R);
+  let d_world = mm(RT, d_cam);
+  const norm = Math.hypot(d_world[0], d_world[1], d_world[2]);
+  d_world = [d_world[0]/norm, d_world[1]/norm, d_world[2]/norm];
+  const negT = [-pose.t_mm[0], -pose.t_mm[1], -pose.t_mm[2]];
+  const C = mm(RT, negT);
+  return { origin: C, direction: d_world };
+}
+function rayIntersectPlaneZ0(ray) {
+  if (Math.abs(ray.direction[2]) < 1e-9) return null;
+  const s = -ray.origin[2] / ray.direction[2];
+  if (s <= 0) return null;  // intersection is behind camera
+  return [
+    ray.origin[0] + s * ray.direction[0],
+    ray.origin[1] + s * ray.direction[1],
+    0,
+  ];
+}
+
+// ─── Loading ────────────────────────────────────────────────────────────────
+async function loadAll() {
+  const grid = document.getElementById("grid");
+  for (const label of PHONES) {
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    cell.innerHTML = `<h3>${label}</h3><canvas id="cv_${label}"></canvas><div class="status" id="st_${label}">—</div>`;
+    grid.appendChild(cell);
+  }
+  // Pose convention: bed plane is Z=0 in the world frame, camera is above (Cz>0).
+  // The bare-name poses (`pose_<label>.json`) use this convention.
+  // The kinect_anchored / refined / partial variants live in the kinect camera
+  // frame (Z=0 is the camera origin, bed is at Z≈770), so they break the Z=0
+  // intersection used here. Skip them. Anna and kinect have no bare-name pose,
+  // so they show as obs-only.
+  let loaded = 0;
+  for (const label of PHONES) {
+    try {
+      let poseSource = null;
+      try {
+        const fname = `pose_${label}.json`;
+        const r = await fetch(fname);
+        if (r.ok) { state.poses[label] = await r.json(); poseSource = fname; }
+      } catch {}
+      const img = new Image();
+      const suffix = state.frameSet === "flow" ? "_flow" : "";
+      img.src = `reference_frames/${label}${suffix}.jpg`;
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+      state.imgs[label] = img;
+      const canvas = document.getElementById(`cv_${label}`);
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      state.canvases[label] = { canvas, ctx: canvas.getContext("2d") };
+      canvas.addEventListener("click", (e) => onClick(label, e));
+      const poseTag = state.poses[label] ? "(pose ✓)" : "(obs only — no world-frame pose)";
+      document.getElementById(`st_${label}`).textContent = poseTag;
+      loaded++;
+    } catch (e) {
+      document.getElementById(`st_${label}`).textContent = `load error: ${e.message}`;
+    }
+  }
+  const withPose = Object.keys(state.poses).length;
+  status.textContent = `loaded ${loaded}/${PHONES.length} views (${withPose} with pose, ${loaded - withPose} obs-only)`;
+  redrawAll();
+}
+
+function onClick(label, e) {
+  const canvas = state.canvases[label].canvas;
+  const rect = canvas.getBoundingClientRect();
+  const u = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const v = (e.clientY - rect.top) * (canvas.height / rect.height);
+  const pose = state.poses[label];
+  if (!pose) {
+    status.textContent = `${label}: no pose loaded — click on a view with (pose ✓)`;
+    return;
+  }
+  const ray = backProjectRay(pose, u, v);
+  const bedPt = rayIntersectPlaneZ0(ray);
+  if (!bedPt) {
+    status.textContent = `${label}: ray misses bed (Z=0) — click on the table surface`;
+    return;
+  }
+  const idx = state.projections.length;
+  const color = PROJECTION_COLORS[idx % PROJECTION_COLORS.length];
+  const projectableTargets = PHONES.filter(p => p !== label && state.poses[p]);
+  state.projections.push({
+    sourceLabel: label, uv: [u, v], world: bedPt, ray, color, idx: idx + 1,
+  });
+  status.textContent =
+    `#${idx + 1} ${label} (${u.toFixed(0)},${v.toFixed(0)}) → world (${bedPt[0].toFixed(0)}, ${bedPt[1].toFixed(0)}, 0) mm` +
+    ` · projecting onto ${projectableTargets.join(', ') || '(no other views with poses)'}`;
+  redrawAll();
+}
+
+function redrawAll() {
+  for (const label of PHONES) {
+    const { canvas, ctx } = state.canvases[label] || {};
+    if (!canvas) continue;
+    const img = state.imgs[label];
+    ctx.drawImage(img, 0, 0);
+
+    // ── Draw every persistent projection ──
+    // For the source view: bold crosshair at the click pixel.
+    // For other views with a pose: faint ray line + bold circle at the Z=0 projection.
+    const pose = state.poses[label];
+    for (const proj of state.projections) {
+      if (proj.sourceLabel === label) {
+        // Source view — crosshair at click
+        const [u, v] = proj.uv;
+        ctx.strokeStyle = proj.color; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(u, v, 16, 0, Math.PI*2); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(u-22, v); ctx.lineTo(u+22, v);
+        ctx.moveTo(u, v-22); ctx.lineTo(u, v+22);
+        ctx.stroke();
+        // Number badge
+        ctx.fillStyle = proj.color;
+        ctx.font = "bold 18px 'SF Mono', Menlo, monospace";
+        ctx.strokeStyle = "#000"; ctx.lineWidth = 4;
+        const tag = `#${proj.idx}`;
+        ctx.strokeText(tag, u + 22, v - 12);
+        ctx.fillText(tag, u + 22, v - 12);
+        continue;
+      }
+      // Target view — needs a pose to project into
+      if (!pose) continue;
+
+      // Ray line: sample world positions along the back-projected ray and project each
+      const pts = [];
+      for (const s of [10, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 10000]) {
+        const Xw = [
+          proj.ray.origin[0] + s * proj.ray.direction[0],
+          proj.ray.origin[1] + s * proj.ray.direction[1],
+          proj.ray.origin[2] + s * proj.ray.direction[2],
+        ];
+        const p = project(pose, Xw);
+        if (p) pts.push(p);
+      }
+      if (pts.length >= 2) {
+        ctx.strokeStyle = proj.color; ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+      }
+      // Z=0 intersection — the bold circle that "this is where the source click lands here"
+      const bedProj = project(pose, proj.world);
+      if (bedProj) {
+        ctx.strokeStyle = proj.color; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(bedProj[0], bedProj[1], 18, 0, Math.PI*2); ctx.stroke();
+        ctx.fillStyle = proj.color;
+        ctx.font = "bold 18px 'SF Mono', Menlo, monospace";
+        const tag = `#${proj.idx}`;
+        ctx.strokeStyle = "#000"; ctx.lineWidth = 4;
+        ctx.strokeText(tag, bedProj[0] + 22, bedProj[1] - 12);
+        ctx.fillText(tag, bedProj[0] + 22, bedProj[1] - 12);
+      }
+    }
+  }
+}
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  state.projections = [];
+  redrawAll();
+  status.textContent = "cleared";
+});
+
+document.getElementById("frameSetBtn").addEventListener("click", async () => {
+  state.frameSet = state.frameSet === "setup" ? "flow" : "setup";
+  document.getElementById("frameSetBtn").textContent = `Frames: ${state.frameSet}`;
+  status.textContent = `reloading with ${state.frameSet} frames…`;
+  for (const label of PHONES) {
+    const img = new Image();
+    const suffix = state.frameSet === "flow" ? "_flow" : "";
+    img.src = `reference_frames/${label}${suffix}.jpg?t=${Date.now()}`;
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+    state.imgs[label] = img;
+  }
+  status.textContent = `frames: ${state.frameSet}`;
+  redrawAll();
+});
+
+loadAll();
+</script>
+</body>
+</html>

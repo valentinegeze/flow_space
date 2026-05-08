@@ -67,12 +67,17 @@ export function createPhiPanel(parentEl) {
 
     <canvas id="phi-scurve" width="200" height="120"></canvas>
 
+    <!-- Step 2 is fire-only now; the Flood mode button was hidden when the
+         user-facing flood toggle was removed from Step 2. φ_flood readout still
+         exists in the code for Step 3's pre/post comparison. -->
     <div class="phi-mode-row">
       <button class="phi-mode-btn active" data-mode="fire">Fire</button>
-      <button class="phi-mode-btn" data-mode="flood">Flood</button>
+    </div>
+    <div class="phi-scale-readout" id="phi-scale-readout">
+      <span style="color:#888;">scale:</span> <span id="phi-cell-size">unitless</span>
     </div>
   `;
-  _injectStyles(parentEl);
+  // Styles are in styles.css
   parentEl.appendChild(_panelEl);
 
   _phiValueEl  = _panelEl.querySelector('#phi-val');
@@ -109,6 +114,41 @@ export function setPhiGrid(patchGrid, cols, rows) {
   _cols = cols;
   _rows = rows;
   _recompute();
+  _refreshCellSize();
+}
+
+// Show the real-world cell size when a parcel is loaded; otherwise show
+// "unitless" so the user knows the random-landscape view doesn't have a
+// physical scale. Called whenever the grid is set up or refreshed.
+function _refreshCellSize() {
+  const el = _panelEl?.querySelector?.('#phi-cell-size');
+  if (!el) return;
+  // Pull bounds from sharedState (set by the parcel-analysis flow). If the
+  // user came in via the Randomize fork, bounds will be missing → unitless.
+  let bounds = null;
+  try {
+    if (typeof window !== 'undefined' && window.simState && window.simState.parcelBounds) {
+      bounds = window.simState.parcelBounds;
+    } else if (typeof window !== 'undefined' && window.mosaicControls?.parcelBounds) {
+      bounds = window.mosaicControls.parcelBounds;
+    }
+  } catch (e) { /* fall through */ }
+  if (!bounds || !_cols || !_rows) {
+    el.textContent = 'unitless (synthetic)';
+    el.title = 'Random landscape — model is intrinsically scale-invariant';
+    return;
+  }
+  // Haversine — same as zoom-panel.js cellSizeLabel.
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const latMid = (bounds.north + bounds.south) / 2;
+  const dW = bounds.east - bounds.west;
+  const dH = bounds.north - bounds.south;
+  const widthM  = 2 * R * Math.asin(Math.sqrt(Math.cos(toRad(latMid))**2 * Math.sin(toRad(dW)/2)**2));
+  const heightM = 2 * R * Math.asin(Math.sqrt(Math.sin(toRad(dH)/2)**2));
+  const cw = widthM / _cols, ch = heightM / _rows;
+  el.textContent = `${cw.toFixed(0)}×${ch.toFixed(0)} m per cell`;
+  el.title = `Parcel ≈ ${(widthM).toFixed(0)}×${heightM.toFixed(0)} m, divided into ${_cols}×${_rows} cells`;
 }
 
 /**
@@ -176,7 +216,7 @@ function _drawSCurve() {
   const ph = h - pad.top - pad.bottom;
 
   // Axes
-  ctx.strokeStyle = '#555';
+  ctx.strokeStyle = '#ccc';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(pad.left, pad.top);
@@ -185,8 +225,8 @@ function _drawSCurve() {
   ctx.stroke();
 
   // Labels
-  ctx.fillStyle = '#777';
-  ctx.font = '9px system-ui';
+  ctx.fillStyle = '#999';
+  ctx.font = '9px Inter, system-ui';
   ctx.textAlign = 'center';
   ctx.fillText('\u03c6', pad.left + pw / 2, h - 2);
   ctx.save();
@@ -196,8 +236,8 @@ function _drawSCurve() {
   ctx.restore();
 
   // Ticks
-  ctx.fillStyle = '#555';
-  ctx.font = '8px system-ui';
+  ctx.fillStyle = '#bbb';
+  ctx.font = '8px Inter, system-ui';
   ctx.textAlign = 'center';
   for (let i = 0; i <= 4; i++) {
     const v = i / 4;
@@ -205,7 +245,7 @@ function _drawSCurve() {
   }
 
   // S-curve (sigmoid approximation)
-  ctx.strokeStyle = 'rgba(120,180,255,0.5)';
+  ctx.strokeStyle = 'rgba(60,120,180,0.5)';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   for (let i = 0; i <= 100; i++) {
@@ -219,7 +259,7 @@ function _drawSCurve() {
 
   // φ* dashed vertical
   ctx.setLineDash([4, 3]);
-  ctx.strokeStyle = 'rgba(255,200,100,0.5)';
+  ctx.strokeStyle = 'rgba(192,80,48,0.4)';
   ctx.lineWidth = 1;
   const xStar = pad.left + PHI_STAR * pw;
   ctx.beginPath();
@@ -229,8 +269,8 @@ function _drawSCurve() {
   ctx.setLineDash([]);
 
   // φ* label
-  ctx.fillStyle = '#aa8844';
-  ctx.font = '8px system-ui';
+  ctx.fillStyle = '#c05030';
+  ctx.font = '8px Inter, system-ui';
   ctx.fillText('\u03c6*', xStar, pad.top - 2);
 
   // Current φ dot
@@ -241,96 +281,9 @@ function _drawSCurve() {
   ctx.beginPath();
   ctx.arc(dx, dy, 4, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#fff';
+  ctx.strokeStyle = '#1a1a1a';
   ctx.lineWidth = 1;
   ctx.stroke();
 }
 
-function _injectStyles(parentEl) {
-  if (document.getElementById('phi-panel-styles')) return;
-  const style = document.createElement('style');
-  style.id = 'phi-panel-styles';
-  style.textContent = `
-    #phi-panel {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      width: 210px;
-      background: rgba(18,18,26,0.94);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 8px;
-      padding: 12px 14px;
-      z-index: 200;
-      font-family: system-ui, -apple-system, sans-serif;
-      color: #c8c8d8;
-    }
-    #phi-panel .phi-header {
-      display: flex;
-      align-items: baseline;
-      gap: 6px;
-    }
-    #phi-panel .phi-symbol {
-      font-size: 14px;
-      color: #888;
-      font-style: italic;
-    }
-    #phi-panel .phi-value {
-      font-size: 36px;
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-      letter-spacing: -0.02em;
-      color: #e8e8f0;
-    }
-    #phi-panel .phi-label {
-      font-size: 12px;
-      margin-top: 2px;
-      margin-bottom: 10px;
-      transition: color 0.15s;
-    }
-    #phi-panel .phi-slider-label {
-      display: block;
-      font-size: 10px;
-      color: #888;
-      margin-bottom: 3px;
-    }
-    #phi-panel input[type="range"] {
-      width: 100%;
-      accent-color: #cc8844;
-      margin-bottom: 8px;
-    }
-    #phi-panel canvas {
-      display: block;
-      width: 100%;
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 4px;
-      margin-bottom: 8px;
-    }
-    #phi-panel .phi-mode-row {
-      display: flex;
-      gap: 4px;
-    }
-    #phi-panel .phi-mode-btn {
-      flex: 1;
-      padding: 4px 0;
-      text-align: center;
-      background: transparent;
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 4px;
-      color: #888;
-      font-size: 11px;
-      cursor: pointer;
-      transition: all 0.15s;
-      font-family: inherit;
-    }
-    #phi-panel .phi-mode-btn:hover {
-      color: #ccc;
-      border-color: rgba(255,255,255,0.25);
-    }
-    #phi-panel .phi-mode-btn.active {
-      background: rgba(200,140,60,0.15);
-      border-color: rgba(200,140,60,0.45);
-      color: #dda855;
-    }
-  `;
-  document.head.appendChild(style);
-}
+// Styles are in styles.css

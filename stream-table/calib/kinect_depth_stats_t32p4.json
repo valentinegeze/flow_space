@@ -1,0 +1,16 @@
+{
+  "n_pixels_total": 368640,
+  "n_pixels_valid": 303894,
+  "pct_valid": 82.44,
+  "min_mm": 672,
+  "p5_mm": 718,
+  "median_mm": 772,
+  "p95_mm": 823,
+  "max_mm": 841,
+  "unit_check": "mm",
+  "nfov_unbinned_range_mm": [
+    500,
+    5460
+  ],
+  "pct_in_nfov_range": 100.0
+}

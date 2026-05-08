@@ -113,6 +113,56 @@ export function computePhiConnectivity(patchGrid, patchKeys, flammableKeys, cols
   };
 }
 
+/**
+ * Water-side percolation order parameter.
+ *
+ * Same union-find as computePhiConnectivity, but cells are "active" when their
+ * water depth exceeds a threshold. φ_water = giantClusterSize / (cols * rows)
+ * indicates whether ponded/flowing water has organized into a system-spanning
+ * connected network or remains in isolated patches.
+ *
+ * @param {Float32Array} depths   Per-cell water depth (m)
+ * @param {number}       cols
+ * @param {number}       rows
+ * @param {number}       depthThreshold  Minimum depth (m) to count as wet
+ * @returns {{ phi: number, giantClusterSize: number, activeCells: number }}
+ */
+export function computePhiFlow(depths, cols, rows, depthThreshold = 1e-4) {
+  const n = cols * rows;
+  const active = new Uint8Array(n);
+  let activeCells = 0;
+  for (let i = 0; i < n; i++) {
+    if (depths[i] > depthThreshold) { active[i] = 1; activeCells++; }
+  }
+
+  const uf = new UnionFind(n);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const idx = r * cols + c;
+      if (!active[idx]) continue;
+      for (const [dr, dc] of DIRS4) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= rows || nc >= cols) continue;
+        const nidx = nr * cols + nc;
+        if (active[nidx]) uf.union(idx, nidx);
+      }
+    }
+  }
+
+  let giantSize = 0;
+  for (let i = 0; i < n; i++) {
+    if (!active[i]) continue;
+    const s = uf.size[uf.find(i)];
+    if (s > giantSize) giantSize = s;
+  }
+
+  return {
+    phi: n > 0 ? giantSize / n : 0,
+    giantClusterSize: giantSize,
+    activeCells,
+  };
+}
+
 // ── Flow-weighted connectivity ───────────────────────────────────────────────
 
 /**

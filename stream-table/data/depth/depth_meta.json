@@ -1,0 +1,349 @@
+{
+  "source": "depth_20260311_105209.mkv",
+  "rgb_resolution": [
+    1920,
+    1080
+  ],
+  "depth_resolution": [
+    640,
+    576
+  ],
+  "frame_interval_s": 5,
+  "n_rgb_frames": 48,
+  "n_depth_frames": 47,
+  "depth_range": {
+    "min": 586,
+    "max": 3824
+  },
+  "frames": [
+    {
+      "index": 0,
+      "time_s": 0,
+      "min_depth": 586,
+      "max_depth": 836,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 1,
+      "time_s": 5,
+      "min_depth": 595,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 2,
+      "time_s": 10,
+      "min_depth": 672,
+      "max_depth": 838,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 3,
+      "time_s": 15,
+      "min_depth": 599,
+      "max_depth": 840,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 4,
+      "time_s": 20,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 5,
+      "time_s": 25,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 6,
+      "time_s": 30,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 7,
+      "time_s": 35,
+      "min_depth": 674,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 8,
+      "time_s": 40,
+      "min_depth": 673,
+      "max_depth": 838,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 9,
+      "time_s": 45,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 10,
+      "time_s": 50,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303894
+    },
+    {
+      "index": 11,
+      "time_s": 55,
+      "min_depth": 670,
+      "max_depth": 842,
+      "valid_pixels": 303847
+    },
+    {
+      "index": 12,
+      "time_s": 60,
+      "min_depth": 671,
+      "max_depth": 844,
+      "valid_pixels": 303089
+    },
+    {
+      "index": 13,
+      "time_s": 65,
+      "min_depth": 670,
+      "max_depth": 843,
+      "valid_pixels": 302852
+    },
+    {
+      "index": 14,
+      "time_s": 70,
+      "min_depth": 669,
+      "max_depth": 3824,
+      "valid_pixels": 302593
+    },
+    {
+      "index": 15,
+      "time_s": 75,
+      "min_depth": 672,
+      "max_depth": 841,
+      "valid_pixels": 302752
+    },
+    {
+      "index": 16,
+      "time_s": 80,
+      "min_depth": 670,
+      "max_depth": 840,
+      "valid_pixels": 302890
+    },
+    {
+      "index": 17,
+      "time_s": 85,
+      "min_depth": 668,
+      "max_depth": 840,
+      "valid_pixels": 302970
+    },
+    {
+      "index": 18,
+      "time_s": 90,
+      "min_depth": 670,
+      "max_depth": 839,
+      "valid_pixels": 303025
+    },
+    {
+      "index": 19,
+      "time_s": 95,
+      "min_depth": 671,
+      "max_depth": 838,
+      "valid_pixels": 302916
+    },
+    {
+      "index": 20,
+      "time_s": 100,
+      "min_depth": 672,
+      "max_depth": 841,
+      "valid_pixels": 302767
+    },
+    {
+      "index": 21,
+      "time_s": 105,
+      "min_depth": 671,
+      "max_depth": 839,
+      "valid_pixels": 302592
+    },
+    {
+      "index": 22,
+      "time_s": 110,
+      "min_depth": 669,
+      "max_depth": 839,
+      "valid_pixels": 302775
+    },
+    {
+      "index": 23,
+      "time_s": 115,
+      "min_depth": 670,
+      "max_depth": 840,
+      "valid_pixels": 302470
+    },
+    {
+      "index": 24,
+      "time_s": 120,
+      "min_depth": 671,
+      "max_depth": 840,
+      "valid_pixels": 303253
+    },
+    {
+      "index": 25,
+      "time_s": 125,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303431
+    },
+    {
+      "index": 26,
+      "time_s": 130,
+      "min_depth": 672,
+      "max_depth": 842,
+      "valid_pixels": 303062
+    },
+    {
+      "index": 27,
+      "time_s": 135,
+      "min_depth": 670,
+      "max_depth": 841,
+      "valid_pixels": 303042
+    },
+    {
+      "index": 28,
+      "time_s": 140,
+      "min_depth": 670,
+      "max_depth": 840,
+      "valid_pixels": 303494
+    },
+    {
+      "index": 29,
+      "time_s": 145,
+      "min_depth": 671,
+      "max_depth": 838,
+      "valid_pixels": 303618
+    },
+    {
+      "index": 30,
+      "time_s": 150,
+      "min_depth": 669,
+      "max_depth": 837,
+      "valid_pixels": 303613
+    },
+    {
+      "index": 31,
+      "time_s": 155,
+      "min_depth": 669,
+      "max_depth": 838,
+      "valid_pixels": 303680
+    },
+    {
+      "index": 32,
+      "time_s": 160,
+      "min_depth": 669,
+      "max_depth": 838,
+      "valid_pixels": 303684
+    },
+    {
+      "index": 33,
+      "time_s": 165,
+      "min_depth": 670,
+      "max_depth": 837,
+      "valid_pixels": 303494
+    },
+    {
+      "index": 34,
+      "time_s": 170,
+      "min_depth": 671,
+      "max_depth": 837,
+      "valid_pixels": 303674
+    },
+    {
+      "index": 35,
+      "time_s": 175,
+      "min_depth": 671,
+      "max_depth": 837,
+      "valid_pixels": 303730
+    },
+    {
+      "index": 36,
+      "time_s": 180,
+      "min_depth": 670,
+      "max_depth": 837,
+      "valid_pixels": 303652
+    },
+    {
+      "index": 37,
+      "time_s": 185,
+      "min_depth": 672,
+      "max_depth": 839,
+      "valid_pixels": 303497
+    },
+    {
+      "index": 38,
+      "time_s": 190,
+      "min_depth": 672,
+      "max_depth": 840,
+      "valid_pixels": 303798
+    },
+    {
+      "index": 39,
+      "time_s": 195,
+      "min_depth": 668,
+      "max_depth": 838,
+      "valid_pixels": 303619
+    },
+    {
+      "index": 40,
+      "time_s": 200,
+      "min_depth": 671,
+      "max_depth": 837,
+      "valid_pixels": 303788
+    },
+    {
+      "index": 41,
+      "time_s": 205,
+      "min_depth": 669,
+      "max_depth": 837,
+      "valid_pixels": 303801
+    },
+    {
+      "index": 42,
+      "time_s": 210,
+      "min_depth": 671,
+      "max_depth": 837,
+      "valid_pixels": 303870
+    },
+    {
+      "index": 43,
+      "time_s": 215,
+      "min_depth": 670,
+      "max_depth": 837,
+      "valid_pixels": 303856
+    },
+    {
+      "index": 44,
+      "time_s": 220,
+      "min_depth": 670,
+      "max_depth": 839,
+      "valid_pixels": 303868
+    },
+    {
+      "index": 45,
+      "time_s": 225,
+      "min_depth": 673,
+      "max_depth": 838,
+      "valid_pixels": 303813
+    },
+    {
+      "index": 46,
+      "time_s": 230,
+      "min_depth": 671,
+      "max_depth": 837,
+      "valid_pixels": 303667
+    }
+  ]
+}

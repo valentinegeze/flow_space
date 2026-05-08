@@ -1,0 +1,36 @@
+{
+  "videos": {
+    "anna": {
+      "filename": "AM_03-11_01_wide-inlet_no-obstacles.mp4",
+      "clap_time_s": 0.8,
+      "offset_s": 0.0,
+      "confidence": "high",
+      "method": "manual"
+    },
+    "sophia": {
+      "filename": "skm_0311_01_wide_no-obs.mp4",
+      "clap_time_s": 1.5,
+      "offset_s": 0.7,
+      "confidence": "high",
+      "method": "manual"
+    },
+    "valentine": {
+      "filename": "vmg_03-11_01.mp4",
+      "clap_time_s": 23.333,
+      "offset_s": 22.533,
+      "confidence": "high",
+      "method": "manual"
+    },
+    "kinect": {
+      "filename": "depth_20260311_105209.mkv",
+      "clap_time_s": 27.4,
+      "offset_s": 26.6,
+      "confidence": "high",
+      "method": "manual",
+      "color_stream": "0:0"
+    }
+  },
+  "reference_label": "anna",
+  "method": "manual_frame_identification",
+  "notes": "Javier's recording does not capture the clack and is excluded from the synchronized multi-view. Kinect is the RGB-D reference; no audio."
+}

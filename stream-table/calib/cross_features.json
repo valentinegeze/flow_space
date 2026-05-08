@@ -1,0 +1,11 @@
+{
+  "exported_at": "2026-04-17T18:41:03.198Z",
+  "n_features": 5,
+  "features": [
+    {"name": "feature_1", "world_xyz_mm": [-839.6, -5054.1, -1241.6], "clicks_per_phone": {"valentine": [797.01, 108.78], "sophia": [977.50, 24.48], "javier": [477.93, 1547.42]}},
+    {"name": "feature_2", "world_xyz_mm": [1371.3, -1079.8, -378.7],  "clicks_per_phone": {"valentine": [77.97, 187.65],  "sophia": [258.46, 38.07],  "javier": [501.75, 815.86]}},
+    {"name": "feature_3", "world_xyz_mm": [2200.9, -19526.6, -3158.9], "clicks_per_phone": {"valentine": [411.50, 27.20], "javier": [588.38, 1153.09]}},
+    {"name": "feature_4", "world_xyz_mm": [1462.3, 1435.6, -1078.9],  "clicks_per_phone": {"valentine": [253.40, 1648.05], "sophia": [22.39, 1169.41]}},
+    {"name": "feature_5", "world_xyz_mm": [917.4, -5162.0, -1326.8],  "clicks_per_phone": {"valentine": [437.49, 144.14], "sophia": [609.31, 21.76], "javier": [488.76, 1153.09]}}
+  ]
+}

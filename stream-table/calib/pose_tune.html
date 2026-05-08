@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flume Pose Tuner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: #0f0f0f; color: #eee; }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #333; flex-wrap: wrap; }
+  .topbar strong { color: #c05030; letter-spacing: 0.04em; font-size: 12px; text-transform: uppercase; margin-right: 4px; }
+  .topbar button, .topbar select {
+    background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px;
+    padding: 5px 11px; cursor: pointer; font-size: 12px; font-family: inherit;
+  }
+  .topbar button.active { background: #c05030; border-color: #c05030; color: #fff; }
+  .topbar .sep { flex: 1; }
+  .main { flex: 1; display: flex; min-height: 0; }
+  .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100%; max-height: 100%; display: block; }
+  .sidebar { width: 430px; background: #151515; border-left: 1px solid #333; overflow-y: auto; padding: 14px; }
+  .sidebar h3 { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: #888; margin: 10px 0 6px; }
+  .slider-row { display: grid; grid-template-columns: 70px 1fr 80px; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .slider-row label { font-size: 12px; color: #bbb; font-family: 'SF Mono', Menlo, monospace; }
+  .slider-row input[type=range] { width: 100%; accent-color: #c05030; }
+  .slider-row input[type=number] {
+    width: 80px; background: #222; color: #ddd; border: 1px solid #333; border-radius: 3px;
+    padding: 3px 6px; font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+  }
+  .pill { font-family: 'SF Mono', Menlo, monospace; font-size: 10px; color: #6a9; }
+  .legend { font-size: 11px; color: #888; margin-top: 10px; line-height: 1.5; }
+  .legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  textarea { width: 100%; height: 140px; background: #0a0a0a; color: #9cf; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: 'SF Mono', Menlo, monospace; font-size: 10px; resize: vertical; }
+  .btn-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .btn-row button { padding: 5px 11px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <strong>Pose Tuner</strong>
+    <select id="viewSelect">
+      <option value="anna">Anna</option>
+      <option value="sophia">Sophia</option>
+      <option value="valentine" selected>Valentine</option>
+      <option value="javier">Javier</option>
+      <option value="kinect_color">Kinect</option>
+    </select>
+    <span class="sep"></span>
+    <span class="pill" id="status">ready</span>
+  </div>
+  <div class="main">
+    <div class="canvas-wrap">
+      <canvas id="cv"></canvas>
+    </div>
+    <div class="sidebar">
+      <h3>Camera position (mm)</h3>
+      <div class="slider-row"><label>Cx</label><input type="range" id="Cx_r" min="-3000" max="3000" step="10"><input type="number" id="Cx_n" step="10"></div>
+      <div class="slider-row"><label>Cy</label><input type="range" id="Cy_r" min="-3000" max="5000" step="10"><input type="number" id="Cy_n" step="10"></div>
+      <div class="slider-row"><label>Cz</label><input type="range" id="Cz_r" min="-500" max="3000" step="10"><input type="number" id="Cz_n" step="10"></div>
+      <div class="slider-row"><label>standoff</label><input type="range" id="standoff_r" min="200" max="10000" step="10"><input type="number" id="standoff_n" step="10"></div>
+
+      <h3>Camera orientation (degrees)</h3>
+      <div class="slider-row"><label>yaw</label><input type="range" id="yaw_r" min="-180" max="180" step="0.5"><input type="number" id="yaw_n" step="0.5"></div>
+      <div class="slider-row"><label>pitch</label><input type="range" id="pitch_r" min="-90" max="90" step="0.5"><input type="number" id="pitch_n" step="0.5"></div>
+      <div class="slider-row"><label>roll</label><input type="range" id="roll_r" min="-180" max="180" step="0.5"><input type="number" id="roll_n" step="0.5"></div>
+
+      <h3>Intrinsics</h3>
+      <div class="slider-row"><label>fx</label><input type="range" id="fx_r" min="150" max="2000" step="1"><input type="number" id="fx_n" step="1"></div>
+      <div class="slider-row"><label>k1</label><input type="range" id="k1_r" min="-0.8" max="0.3" step="0.005"><input type="number" id="k1_n" step="0.005"></div>
+      <div class="slider-row"><label>k2</label><input type="range" id="k2_r" min="-0.5" max="0.5" step="0.01"><input type="number" id="k2_n" step="0.01"></div>
+
+      <div class="btn-row">
+        <button id="resetBtn">Reset to defaults</button>
+        <button id="loadSolveBtn">Load from pose_{view}.json</button>
+        <button id="copyBtn">Copy pose JSON</button>
+        <button id="flipYawBtn">Rotate yaw +180°</button>
+        <button id="flipCamBtn">Swap camera side (Cx ↔ Cy mirror)</button>
+        <button id="lookAtBtn">Look at flume centre</button>
+      </div>
+
+      <h3>Direct corner drag (bypass sliders)</h3>
+      <div class="btn-row">
+        <button id="dragModeBtn">Enable drag-corners</button>
+        <button id="solveFromCornersBtn">Solve pose from dragged corners</button>
+      </div>
+      <div class="legend" style="margin-top:4px">
+        Drag mode: big red circles on the 4 rim corners become draggable. Move each to where you actually see the corner in the image. Then click "Solve pose" to back-compute camera pose from the homography (world rim Z=0 plane → image).
+      </div>
+
+      <h3>Exported pose JSON</h3>
+      <textarea id="exportArea" readonly></textarea>
+
+      <div class="legend">
+        <div><span class="dot" style="background:#ff4040"></span>Rim corners (rim_NW, NE, SE, SW) with edges</div>
+        <div><span class="dot" style="background:#40aaff"></span>Upper cross-rib (rib_W_upper ↔ rib_E_upper at Y=343)</div>
+        <div><span class="dot" style="background:#40ff80"></span>Lower cross-rib (rib_W_lower ↔ hypothetical rib_E_lower at Y=1588)</div>
+        <div><span class="dot" style="background:#ffdd40"></span>Standpipe (base + top)</div>
+        <div><span class="dot" style="background:#ff80ff"></span>EDU midpoint</div>
+        <div style="margin-top:8px;color:#666">Z+ = UP (standpipe_top at +60). Yaw 0 = camera looks +X world; pitch&lt;0 = looking down.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const CX = 540, CY = 960;  // principal point (same for all 1080×1920 phones; scaled for others)
+const WORLD = {
+  rim_NW:         [0,   0,    0],
+  rim_NE:         [838, 0,    0],
+  rim_SW:         [0,   1930, 0],
+  rim_SE:         [838, 1930, 0],
+  standpipe_base: [419, 1900, 0],
+  standpipe_top:  [419, 1900, 60],
+  edu_midpoint:   [419, 30,   127],
+  rib_W_upper:    [0,   343,  0],
+  rib_E_upper:    [838, 343,  0],
+  rib_W_lower:    [0,   1588, 0],
+  rib_E_lower:    [838, 1588, 0],  // hypothetical, for wireframe
+};
+
+const VIEWS = {
+  anna:         { file: "reference_frames/anna.jpg",         W: 720,  H: 1280 },
+  sophia:       { file: "reference_frames/sophia.jpg",       W: 1080, H: 1920 },
+  valentine:    { file: "reference_frames/valentine.jpg",    W: 1080, H: 1920 },
+  javier:       { file: "reference_frames/javier.jpg",       W: 1080, H: 1920 },
+  kinect_color: { file: "reference_frames/kinect_color.jpg", W: 1920, H: 1080 },
+};
+
+const DEFAULTS = {
+  anna:       { Cx: 1500, Cy: 1000, Cz: 400, yaw: 180, pitch: -30, roll: 0, fx: 480, k1: 0, k2: 0 },
+  sophia:     { Cx: 419,  Cy: 2400, Cz: 500, yaw: -90, pitch: -20, roll: 0, fx: 360, k1: 0, k2: 0 },
+  valentine:  { Cx: 1068, Cy: 1079, Cz: 228, yaw: -100, pitch: -68.5, roll: 0, fx: 781, k1: 0, k2: 0 },
+  javier:     { Cx: 400, Cy: 2400, Cz: 200, yaw: -90, pitch: -10, roll: 0, fx: 780, k1: 0, k2: 0 },
+  kinect_color: { Cx: 419, Cy: 965, Cz: 770, yaw: 0, pitch: -89, roll: 0, fx: 1940, k1: 0, k2: 0 },
+};
+
+// ─── Linear algebra helpers ─────────────────────────────────────────────────
+function cross(a, b) {
+  return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+}
+function norm(v) { return Math.hypot(v[0], v[1], v[2]); }
+function nrm(v) { const n = norm(v); return [v[0]/n, v[1]/n, v[2]/n]; }
+function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+function buildPose(Cx, Cy, Cz, yaw_d, pitch_d, roll_d) {
+  const yaw = yaw_d * Math.PI / 180, pitch = pitch_d * Math.PI / 180, roll = roll_d * Math.PI / 180;
+  // Optical axis (camera forward = +Z_cam direction in world)
+  const z = [Math.cos(yaw)*Math.cos(pitch), Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch)];
+  // Up vector in world. Z+ = UP. So "down" = -Z_world.
+  const down = [0, 0, -1];
+  // Camera x axis = cross(down, z). For pitch within (-90,90) this is well-defined.
+  let x = nrm(cross(down, z));
+  // Apply roll: rotate x around z by roll angle
+  const y_noroll = nrm(cross(z, x));
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  x = [
+    x[0]*cr + y_noroll[0]*sr,
+    x[1]*cr + y_noroll[1]*sr,
+    x[2]*cr + y_noroll[2]*sr,
+  ];
+  const y = nrm(cross(z, x));
+  const R = [x, y, z];  // rows of R are camera axes in world coords → R maps world→camera
+  const C = [Cx, Cy, Cz];
+  const t = [
+    -(R[0][0]*C[0] + R[0][1]*C[1] + R[0][2]*C[2]),
+    -(R[1][0]*C[0] + R[1][1]*C[1] + R[1][2]*C[2]),
+    -(R[2][0]*C[0] + R[2][1]*C[1] + R[2][2]*C[2]),
+  ];
+  return { R, t };
+}
+
+function project(Xw, R, t, fx, cxp, cyp, k1, k2) {
+  const Xc0 = R[0][0]*Xw[0] + R[0][1]*Xw[1] + R[0][2]*Xw[2] + t[0];
+  const Xc1 = R[1][0]*Xw[0] + R[1][1]*Xw[1] + R[1][2]*Xw[2] + t[1];
+  const Xc2 = R[2][0]*Xw[0] + R[2][1]*Xw[1] + R[2][2]*Xw[2] + t[2];
+  if (Xc2 <= 0.1) return null;  // behind camera
+  // Normalised image coords
+  let x = Xc0 / Xc2, y = Xc1 / Xc2;
+  // Apply radial distortion: x_d = x * (1 + k1 r² + k2 r⁴)
+  if (k1 || k2) {
+    const r2 = x*x + y*y;
+    const dist = 1 + k1 * r2 + k2 * r2 * r2;
+    x *= dist; y *= dist;
+  }
+  return [fx * x + cxp, fx * y + cyp];
+}
+
+// Project a 3D world line as a polyline (subdivided) so radial distortion curves it
+function projectLineSegments(P1, P2, R, t, fx, cxp, cyp, k1, k2, n) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const s = i / n;
+    const X = [P1[0] + s*(P2[0]-P1[0]), P1[1] + s*(P2[1]-P1[1]), P1[2] + s*(P2[2]-P1[2])];
+    pts.push(project(X, R, t, fx, cxp, cyp, k1, k2));
+  }
+  return pts;
+}
+
+// ─── State ──────────────────────────────────────────────────────────────────
+const state = {
+  view: "valentine",
+  img: null,
+  imgW: 1080, imgH: 1920,
+  params: { ...DEFAULTS.valentine },
+  dragMode: false,
+  dragHandle: null,
+  cornerPixels: null,
+  clicks: {},  // loaded from calib/annotations/<view>.json if exists
+};
+
+const canvas = document.getElementById("cv");
+const ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
+
+// ─── Image loading ──────────────────────────────────────────────────────────
+function loadView(key) {
+  const v = VIEWS[key];
+  status.textContent = `loading ${v.file}…`;
+  const img = new Image();
+  img.onload = () => {
+    state.img = img;
+    state.imgW = v.W; state.imgH = v.H;
+    canvas.width = v.W; canvas.height = v.H;
+    status.textContent = `${key}: ${v.W}×${v.H}`;
+    loadClicks(key);
+    draw();
+  };
+  img.onerror = () => { status.textContent = `failed to load ${v.file}`; };
+  img.src = v.file;
+}
+
+async function loadClicks(key) {
+  state.clicks = {};
+  try {
+    const r = await fetch(`annotations/${key}.json`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const a = data.annotations?.[key] || {};
+    for (const [name, entry] of Object.entries(a)) {
+      if (entry.visible && entry.u !== undefined && entry.u !== null) {
+        state.clicks[name] = [entry.u, entry.v];
+      }
+    }
+    status.textContent = `${key}: loaded ${Object.keys(state.clicks).length} annotation clicks`;
+  } catch (e) { /* ignore — no annotations */ }
+}
+
+// ─── Render ─────────────────────────────────────────────────────────────────
+function draw() {
+  if (!state.img) return;
+  ctx.drawImage(state.img, 0, 0, state.imgW, state.imgH);
+  const p = state.params;
+  // Principal point scales with image size (assumes image center)
+  const cxp = state.imgW / 2, cyp = state.imgH / 2;
+  const { R, t } = buildPose(p.Cx, p.Cy, p.Cz, p.yaw, p.pitch, p.roll);
+
+  // Project all landmarks (with distortion)
+  const proj = {};
+  for (const [name, Xw] of Object.entries(WORLD)) {
+    proj[name] = project(Xw, R, t, p.fx, cxp, cyp, p.k1, p.k2);
+  }
+
+  const drawLineWorld = (Pw1, Pw2, color, w) => {
+    const pts = projectLineSegments(Pw1, Pw2, R, t, p.fx, cxp, cyp, p.k1, p.k2, 40);
+    ctx.strokeStyle = color; ctx.lineWidth = w || 4;
+    ctx.beginPath();
+    let started = false;
+    for (const pt of pts) {
+      if (!pt) { started = false; continue; }
+      if (!started) { ctx.moveTo(pt[0], pt[1]); started = true; }
+      else ctx.lineTo(pt[0], pt[1]);
+    }
+    ctx.stroke();
+  };
+  const drawDot = (pt, color, label) => {
+    if (!pt) return;
+    ctx.fillStyle = color; ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(pt[0], pt[1], 10, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    if (label) {
+      ctx.font = "bold 22px 'SF Mono', Menlo, monospace";
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 4;
+      ctx.strokeText(label, pt[0] + 14, pt[1] + 8);
+      ctx.fillStyle = color;
+      ctx.fillText(label, pt[0] + 14, pt[1] + 8);
+    }
+  };
+
+  // Rim rectangle (drawn as subdivided world-line polylines → curves correctly under distortion)
+  drawLineWorld(WORLD.rim_NW, WORLD.rim_NE, "#ff4040", 5);
+  drawLineWorld(WORLD.rim_NE, WORLD.rim_SE, "#ff4040", 5);
+  drawLineWorld(WORLD.rim_SE, WORLD.rim_SW, "#ff4040", 5);
+  drawLineWorld(WORLD.rim_SW, WORLD.rim_NW, "#ff4040", 5);
+  // Cross-ribs
+  drawLineWorld(WORLD.rib_W_upper, WORLD.rib_E_upper, "#40aaff", 4);
+  drawLineWorld(WORLD.rib_W_lower, WORLD.rib_E_lower, "#40ff80", 4);
+  // Standpipe
+  drawLineWorld(WORLD.standpipe_base, WORLD.standpipe_top, "#ffdd40", 5);
+
+  // Dots + labels
+  drawDot(proj.rim_NW, "#ff4040", "rim_NW");
+  drawDot(proj.rim_NE, "#ff4040", "rim_NE");
+  drawDot(proj.rim_SW, "#ff4040", "rim_SW");
+  drawDot(proj.rim_SE, "#ff4040", "rim_SE");
+  drawDot(proj.rib_W_upper, "#40aaff", "rib_W_u");
+  drawDot(proj.rib_E_upper, "#40aaff", "rib_E_u");
+  drawDot(proj.rib_W_lower, "#40ff80", "rib_W_l");
+  drawDot(proj.rib_E_lower, "#40ff80", "(rib_E_l)");
+  drawDot(proj.standpipe_base, "#ffdd40", "sp_base");
+  drawDot(proj.standpipe_top, "#ffdd40", "sp_top");
+  drawDot(proj.edu_midpoint, "#ff80ff", "edu");
+
+  // Draw annotation-file clicks as fixed white reference markers with residuals.
+  // Each clicked pixel is shown; if it has a schema world position, the residual is shown.
+  for (const [name, uv] of Object.entries(state.clicks)) {
+    ctx.save();
+    // White ring to stand out
+    ctx.beginPath();
+    ctx.arc(uv[0], uv[1], 18, 0, Math.PI*2);
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(uv[0], uv[1], 18, 0, Math.PI*2);
+    ctx.strokeStyle = "#000000"; ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.font = "bold 20px 'SF Mono', Menlo, monospace";
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 4;
+    ctx.strokeText(name, uv[0] + 22, uv[1] - 8);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(name, uv[0] + 22, uv[1] - 8);
+    // Draw residual line from clicked position to its projected wireframe position (if known)
+    if (proj[name]) {
+      ctx.beginPath();
+      ctx.moveTo(uv[0], uv[1]);
+      ctx.lineTo(proj[name][0], proj[name][1]);
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const err = Math.hypot(proj[name][0] - uv[0], proj[name][1] - uv[1]);
+      ctx.font = "14px 'SF Mono', Menlo, monospace";
+      ctx.fillStyle = "#ffffaa";
+      ctx.fillText(`Δ ${err.toFixed(0)}px`, uv[0] + 22, uv[1] + 18);
+    }
+    ctx.restore();
+  }
+
+  // Draw drag handles on top if drag mode is active
+  if (state.dragMode && state.cornerPixels) {
+    for (const [name, uv] of Object.entries(state.cornerPixels)) {
+      ctx.beginPath();
+      ctx.arc(uv[0], uv[1], 26, 0, Math.PI*2);
+      ctx.fillStyle = "rgba(255, 255, 0, 0.3)";
+      ctx.fill();
+      ctx.strokeStyle = "#ffff00"; ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.font = "bold 18px 'SF Mono', Menlo, monospace";
+      ctx.fillStyle = "#ffff00";
+      ctx.fillText(name, uv[0] + 30, uv[1] + 6);
+    }
+  }
+
+  // Update export
+  exportJSON(R, t, p.fx, cxp, cyp);
+}
+
+// ─── Homography solve from 4 dragged corners ────────────────────────────────
+// Linear DLT solution for H (3x3) such that H * [X, Y, 1]ᵀ ≈ [u, v, 1]ᵀ (up to scale).
+function homographyFromCorners(cornerPixels) {
+  const world = {
+    rim_NW: [0, 0], rim_NE: [838, 0], rim_SW: [0, 1930], rim_SE: [838, 1930]
+  };
+  const A = [];
+  for (const name of ["rim_NW", "rim_NE", "rim_SW", "rim_SE"]) {
+    const [X, Y] = world[name];
+    const [u, v] = cornerPixels[name];
+    A.push([-X, -Y, -1, 0, 0, 0, u*X, u*Y, u]);
+    A.push([0, 0, 0, -X, -Y, -1, v*X, v*Y, v]);
+  }
+  // Solve A h = 0, h 9-vector, via SVD — but we'll use the 8-unknowns-1-fixed approach
+  // Assume h9 = 1 (H[2][2] = 1). Then A[:, :8] h[:8] = -A[:, 8].
+  const A8 = A.map(row => row.slice(0, 8));
+  const b = A.map(row => -row[8]);
+  const h8 = solveLinear(A8, b);  // 8 values
+  return [
+    [h8[0], h8[1], h8[2]],
+    [h8[3], h8[4], h8[5]],
+    [h8[6], h8[7], 1.0]
+  ];
+}
+
+// Gaussian elimination on an 8x8 system
+function solveLinear(A, b) {
+  const n = A.length;
+  // Augmented matrix
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let i = 0; i < n; i++) {
+    // Pivot
+    let maxRow = i;
+    for (let k = i + 1; k < n; k++) {
+      if (Math.abs(M[k][i]) > Math.abs(M[maxRow][i])) maxRow = k;
+    }
+    [M[i], M[maxRow]] = [M[maxRow], M[i]];
+    // Eliminate
+    for (let k = i + 1; k < n; k++) {
+      const f = M[k][i] / M[i][i];
+      for (let j = i; j <= n; j++) M[k][j] -= f * M[i][j];
+    }
+  }
+  // Back-substitute
+  const x = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    x[i] = M[i][n];
+    for (let j = i + 1; j < n; j++) x[i] -= M[i][j] * x[j];
+    x[i] /= M[i][i];
+  }
+  return x;
+}
+
+// Extract camera pose from homography (world Z=0 plane → image)
+// Uses the fact that H = K [r1 r2 t], where r1, r2 are cols 0 and 1 of R.
+function decomposeHomography(H, fx, cxp, cyp) {
+  const K = [[fx, 0, cxp], [0, fx, cyp], [0, 0, 1]];
+  // K⁻¹ * H = [r1 r2 t]
+  const Kinv = [[1/fx, 0, -cxp/fx], [0, 1/fx, -cyp/fx], [0, 0, 1]];
+  const M = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++)
+      for (let k = 0; k < 3; k++)
+        M[i][j] += Kinv[i][k] * H[k][j];
+  // r1 = M[:, 0], r2 = M[:, 1], t_unscaled = M[:, 2]
+  let r1 = [M[0][0], M[1][0], M[2][0]];
+  let r2 = [M[0][1], M[1][1], M[2][1]];
+  let t = [M[0][2], M[1][2], M[2][2]];
+  // Normalise: ||r1|| should equal ||r2|| equal scale factor λ. Use geometric mean.
+  const s = Math.sqrt(norm(r1) * norm(r2));
+  r1 = [r1[0]/s, r1[1]/s, r1[2]/s];
+  r2 = [r2[0]/s, r2[1]/s, r2[2]/s];
+  t = [t[0]/s, t[1]/s, t[2]/s];
+  // Orthogonalise: r1 stays, r2 = r2 - (r2·r1) r1, then renormalise
+  const d = dot(r2, r1);
+  r2 = nrm([r2[0] - d*r1[0], r2[1] - d*r1[1], r2[2] - d*r1[2]]);
+  r1 = nrm(r1);
+  const r3 = cross(r1, r2);
+  // R columns are r1, r2, r3. R rows (world→camera) are [r1 r2 r3] transposed
+  const R = [[r1[0], r2[0], r3[0]], [r1[1], r2[1], r3[1]], [r1[2], r2[2], r3[2]]];
+  // Ensure correct cheirality: the scene is at Z_world=0 and should be in front of camera (Z_cam>0)
+  // For a point at world origin: X_cam = t. If t[2] < 0, flip sign of r1, r2, t.
+  if (t[2] < 0) {
+    r1 = [-r1[0], -r1[1], -r1[2]];
+    r2 = [-r2[0], -r2[1], -r2[2]];
+    t = [-t[0], -t[1], -t[2]];
+    const r3_new = cross(r1, r2);
+    R[0] = [r1[0], r2[0], r3_new[0]];
+    R[1] = [r1[1], r2[1], r3_new[1]];
+    R[2] = [r1[2], r2[2], r3_new[2]];
+  }
+  // R as stored: rows are [r1_row[j], r2_row[j], r3_row[j]] — but we want R such that
+  // X_cam = R * X_world + t.  R's columns are world X, Y, Z directions in camera frame.
+  // R[:,0] = r1 (column) = image of world +X axis through camera.
+  // So R = [r1 | r2 | r3] (each as column). That's what I have above. Transpose for row form.
+  // Actually let me return R such that R[i][j] is the (i,j) element: rows i, cols j.
+  // I built R as: R[0] = row0 = [r1[0], r2[0], r3[0]], etc. That is the matrix with columns r1,r2,r3.
+  return { R, t };
+}
+
+function poseToEuler(R) {
+  // Reverse-engineer yaw, pitch, roll from R (camera→world rotation, rows = camera axes in world)
+  // R[2] = z_cam in world = (cos(yaw)cos(pitch), sin(yaw)cos(pitch), sin(pitch))
+  const zc = [R[0][2], R[1][2], R[2][2]];
+  const pitch = Math.asin(zc[2]);
+  const yaw = Math.atan2(zc[1], zc[0]);
+  // Roll: angle between the "no-roll" x_cam and the actual x_cam
+  // no-roll x_cam = nrm(cross([0,0,-1], z))
+  const down = [0, 0, -1];
+  const x_noroll = nrm(cross(down, zc));
+  const y_noroll = nrm(cross(zc, x_noroll));
+  const x_actual = [R[0][0], R[1][0], R[2][0]];  // column 0 of R
+  // roll = angle from x_noroll to x_actual, rotating around zc
+  const cos_r = dot(x_actual, x_noroll);
+  const sin_r = dot(x_actual, y_noroll);
+  const roll = Math.atan2(sin_r, cos_r);
+  return {
+    yaw: yaw * 180 / Math.PI,
+    pitch: pitch * 180 / Math.PI,
+    roll: roll * 180 / Math.PI,
+  };
+}
+
+function solveFromCorners() {
+  if (!state.cornerPixels) return;
+  const H = homographyFromCorners(state.cornerPixels);
+  const cxp = state.imgW / 2, cyp = state.imgH / 2;
+  const { R, t } = decomposeHomography(H, state.params.fx, cxp, cyp);
+  // Camera center C = -Rᵀ t
+  const C = [
+    -(R[0][0]*t[0] + R[1][0]*t[1] + R[2][0]*t[2]),
+    -(R[0][1]*t[0] + R[1][1]*t[1] + R[2][1]*t[2]),
+    -(R[0][2]*t[0] + R[1][2]*t[1] + R[2][2]*t[2]),
+  ];
+  const euler = poseToEuler(R);
+  state.params.Cx = C[0];
+  state.params.Cy = C[1];
+  state.params.Cz = C[2];
+  state.params.yaw = euler.yaw;
+  state.params.pitch = euler.pitch;
+  state.params.roll = euler.roll;
+  for (const k of ["Cx","Cy","Cz","yaw","pitch","roll"]) {
+    document.getElementById(`${k}_r`).value = Math.round(state.params[k] * 10) / 10;
+    document.getElementById(`${k}_n`).value = Math.round(state.params[k] * 10) / 10;
+  }
+  status.textContent = `pose solved from corners: C=(${Math.round(C[0])},${Math.round(C[1])},${Math.round(C[2])}) yaw=${Math.round(euler.yaw)} pitch=${Math.round(euler.pitch)} roll=${Math.round(euler.roll)}`;
+  draw();
+}
+
+function exportJSON(R, t, fx, cxp, cyp) {
+  const C = [state.params.Cx, state.params.Cy, state.params.Cz];
+  const out = {
+    label: state.view, session: 1, method: "manual_tune",
+    K: [[fx, 0, cxp], [0, fx, cyp], [0, 0, 1]],
+    R: R, t_mm: t,
+    camera_center_world_mm: C,
+    euler_deg: { yaw: state.params.yaw, pitch: state.params.pitch, roll: state.params.roll },
+    fx_px: fx,
+    dist_coeffs: { k1: state.params.k1, k2: state.params.k2 },
+  };
+  document.getElementById("exportArea").value = JSON.stringify(out, null, 2);
+}
+
+// ─── Controls binding ───────────────────────────────────────────────────────
+const FLUME_CENTER = [419, 965, 0];
+
+function currentStandoff() {
+  const p = state.params;
+  return Math.hypot(p.Cx - FLUME_CENTER[0], p.Cy - FLUME_CENTER[1], p.Cz - FLUME_CENTER[2]);
+}
+
+function applyStandoff(newStandoff) {
+  const p = state.params;
+  const curr = currentStandoff();
+  if (curr < 1e-6) { p.Cy = FLUME_CENTER[1] + newStandoff; return; }  // avoid /0
+  const ratio = newStandoff / curr;
+  p.Cx = FLUME_CENTER[0] + ratio * (p.Cx - FLUME_CENTER[0]);
+  p.Cy = FLUME_CENTER[1] + ratio * (p.Cy - FLUME_CENTER[1]);
+  p.Cz = FLUME_CENTER[2] + ratio * (p.Cz - FLUME_CENTER[2]);
+  for (const k of ["Cx", "Cy", "Cz"]) {
+    document.getElementById(`${k}_r`).value = Math.round(p[k] * 10) / 10;
+    document.getElementById(`${k}_n`).value = Math.round(p[k] * 10) / 10;
+  }
+}
+
+function updateStandoffDisplay() {
+  const s = Math.round(currentStandoff());
+  document.getElementById("standoff_r").value = s;
+  document.getElementById("standoff_n").value = s;
+}
+
+function bindSlider(key) {
+  const r = document.getElementById(`${key}_r`);
+  const n = document.getElementById(`${key}_n`);
+  const sync = (val) => {
+    state.params[key] = val; r.value = val; n.value = val;
+    if (key === "Cx" || key === "Cy" || key === "Cz") updateStandoffDisplay();
+    draw();
+  };
+  r.addEventListener("input", () => sync(parseFloat(r.value)));
+  n.addEventListener("input", () => sync(parseFloat(n.value)));
+  sync(state.params[key]);
+}
+for (const key of ["Cx", "Cy", "Cz", "yaw", "pitch", "roll", "fx", "k1", "k2"]) bindSlider(key);
+
+// Standoff slider binding (derived quantity, modifies Cx/Cy/Cz)
+function bindStandoff() {
+  const r = document.getElementById("standoff_r");
+  const n = document.getElementById("standoff_n");
+  const sync = (val) => {
+    applyStandoff(val);
+    r.value = val; n.value = val;
+    draw();
+  };
+  r.addEventListener("input", () => sync(parseFloat(r.value)));
+  n.addEventListener("input", () => sync(parseFloat(n.value)));
+  updateStandoffDisplay();
+}
+bindStandoff();
+
+document.getElementById("viewSelect").addEventListener("change", (e) => {
+  state.view = e.target.value;
+  state.params = { ...DEFAULTS[state.view] };
+  for (const key of ["Cx", "Cy", "Cz", "yaw", "pitch", "roll", "fx", "k1", "k2"]) {
+    document.getElementById(`${key}_r`).value = state.params[key];
+    document.getElementById(`${key}_n`).value = state.params[key];
+  }
+  loadView(state.view);
+});
+
+document.getElementById("resetBtn").addEventListener("click", () => {
+  state.params = { ...DEFAULTS[state.view] };
+  for (const key of ["Cx", "Cy", "Cz", "yaw", "pitch", "roll", "fx", "k1", "k2"]) {
+    document.getElementById(`${key}_r`).value = state.params[key];
+    document.getElementById(`${key}_n`).value = state.params[key];
+  }
+  draw();
+});
+
+document.getElementById("loadSolveBtn").addEventListener("click", async () => {
+  const url = `pose_${state.view}.json`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) { status.textContent = `no ${url}`; return; }
+    const pose = await resp.json();
+    // Extract euler and position from the loaded pose
+    if (pose.euler_deg) {
+      state.params.yaw = pose.euler_deg.yaw;
+      state.params.pitch = pose.euler_deg.pitch;
+      state.params.roll = pose.euler_deg.roll;
+    }
+    if (pose.camera_center_world_mm) {
+      state.params.Cx = pose.camera_center_world_mm[0];
+      state.params.Cy = pose.camera_center_world_mm[1];
+      state.params.Cz = pose.camera_center_world_mm[2];
+    }
+    if (pose.fx_px) state.params.fx = pose.fx_px;
+    for (const key of ["Cx", "Cy", "Cz", "yaw", "pitch", "roll", "fx", "k1", "k2"]) {
+      document.getElementById(`${key}_r`).value = Math.round(state.params[key]);
+      document.getElementById(`${key}_n`).value = Math.round(state.params[key] * 10) / 10;
+    }
+    draw();
+    status.textContent = `loaded ${url}`;
+  } catch (e) {
+    status.textContent = `err: ${e.message}`;
+  }
+});
+
+document.getElementById("copyBtn").addEventListener("click", () => {
+  const ta = document.getElementById("exportArea");
+  ta.select();
+  document.execCommand("copy");
+  status.textContent = "copied JSON to clipboard";
+});
+
+document.getElementById("flipYawBtn").addEventListener("click", () => {
+  let y = state.params.yaw + 180;
+  if (y > 180) y -= 360;
+  if (y < -180) y += 360;
+  state.params.yaw = y;
+  document.getElementById("yaw_r").value = y;
+  document.getElementById("yaw_n").value = y;
+  draw();
+});
+
+document.getElementById("lookAtBtn").addEventListener("click", () => {
+  // Set yaw/pitch so the camera looks at the flume centre from the current C.
+  const p = state.params;
+  const dx = FLUME_CENTER[0] - p.Cx;
+  const dy = FLUME_CENTER[1] - p.Cy;
+  const dz = FLUME_CENTER[2] - p.Cz;
+  const d = Math.hypot(dx, dy, dz);
+  if (d < 1e-6) return;
+  // Match buildPose convention: z_cam_world = (cos(yaw)cos(pitch), sin(yaw)cos(pitch), sin(pitch))
+  const pitch = Math.asin(dz / d) * 180 / Math.PI;
+  const yaw = Math.atan2(dy, dx) * 180 / Math.PI;
+  p.yaw = Math.round(yaw * 10) / 10;
+  p.pitch = Math.round(pitch * 10) / 10;
+  // Don't change roll
+  for (const k of ["yaw", "pitch"]) {
+    document.getElementById(`${k}_r`).value = p[k];
+    document.getElementById(`${k}_n`).value = p[k];
+  }
+  status.textContent = `look-at set: yaw=${p.yaw} pitch=${p.pitch}`;
+  draw();
+});
+
+document.getElementById("flipCamBtn").addEventListener("click", () => {
+  // Mirror camera position across the flume centre line
+  state.params.Cx = 838 - state.params.Cx;
+  state.params.Cy = 1930 - state.params.Cy;
+  let y = state.params.yaw + 180;
+  if (y > 180) y -= 360;
+  if (y < -180) y += 360;
+  state.params.yaw = y;
+  for (const k of ["Cx","Cy","yaw"]) {
+    document.getElementById(`${k}_r`).value = state.params[k];
+    document.getElementById(`${k}_n`).value = state.params[k];
+  }
+  draw();
+});
+
+// ─── Drag mode ──────────────────────────────────────────────────────────────
+document.getElementById("dragModeBtn").addEventListener("click", () => {
+  state.dragMode = !state.dragMode;
+  if (state.dragMode) {
+    const p = state.params;
+    const cxp = state.imgW / 2, cyp = state.imgH / 2;
+    const { R, t } = buildPose(p.Cx, p.Cy, p.Cz, p.yaw, p.pitch, p.roll);
+    state.cornerPixels = {};
+    // Try to use existing annotation clicks first (rim_NE, rim_SW, etc.)
+    for (const name of ["rim_NW", "rim_NE", "rim_SW", "rim_SE"]) {
+      if (state.clicks[name]) {
+        state.cornerPixels[name] = [...state.clicks[name]];
+        continue;
+      }
+      const pt = project(WORLD[name], R, t, p.fx, cxp, cyp, p.k1, p.k2);
+      if (pt && pt[0] > -5000 && pt[0] < 5000 && pt[1] > -5000 && pt[1] < 5000) {
+        state.cornerPixels[name] = [pt[0], pt[1]];
+      }
+    }
+    // For any corners that didn't get placed, default to a rough rectangle inset from
+    // image edges so the user can drag them sensibly
+    const inset = Math.min(state.imgW, state.imgH) * 0.15;
+    const fallbacks = {
+      rim_NW: [inset, inset],
+      rim_NE: [state.imgW - inset, inset],
+      rim_SW: [inset, state.imgH - inset],
+      rim_SE: [state.imgW - inset, state.imgH - inset],
+    };
+    for (const name of ["rim_NW", "rim_NE", "rim_SW", "rim_SE"]) {
+      if (!state.cornerPixels[name]) state.cornerPixels[name] = fallbacks[name];
+    }
+    document.getElementById("dragModeBtn").textContent = "Disable drag-corners";
+    document.getElementById("dragModeBtn").classList.add("active");
+  } else {
+    document.getElementById("dragModeBtn").textContent = "Enable drag-corners";
+    document.getElementById("dragModeBtn").classList.remove("active");
+  }
+  draw();
+});
+
+document.getElementById("solveFromCornersBtn").addEventListener("click", () => {
+  if (!state.dragMode || !state.cornerPixels) {
+    status.textContent = "enable drag-corners first, then move them";
+    return;
+  }
+  try { solveFromCorners(); }
+  catch (e) { status.textContent = `solve failed: ${e.message}`; }
+});
+
+// Mouse handlers on canvas for dragging
+function canvasPixelFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return [(e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY];
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  if (!state.dragMode || !state.cornerPixels) return;
+  const [u, v] = canvasPixelFromEvent(e);
+  let nearest = null, dmin = 1e9;
+  for (const [name, uv] of Object.entries(state.cornerPixels)) {
+    const d = Math.hypot(uv[0] - u, uv[1] - v);
+    if (d < dmin) { dmin = d; nearest = name; }
+  }
+  if (dmin < 60) {
+    state.dragHandle = nearest;
+    canvas.style.cursor = "grabbing";
+  }
+});
+canvas.addEventListener("mousemove", (e) => {
+  if (!state.dragHandle || !state.cornerPixels) return;
+  const [u, v] = canvasPixelFromEvent(e);
+  state.cornerPixels[state.dragHandle] = [u, v];
+  draw();
+});
+canvas.addEventListener("mouseup", () => {
+  state.dragHandle = null;
+  canvas.style.cursor = "default";
+});
+canvas.addEventListener("mouseleave", () => {
+  state.dragHandle = null;
+  canvas.style.cursor = "default";
+});
+
+// Initial load
+loadView(state.view);
+</script>
+</body>
+</html>

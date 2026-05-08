@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Per-cam alignment</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0a0a10; color: #ddd;
+               font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; }
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+            background: #1a1a1a; border-bottom: 1px solid #2a2a2a; flex-shrink: 0; }
+  .topbar strong { color: #ffd43b; letter-spacing: 0.06em; font-size: 12px;
+                   text-transform: uppercase; margin-right: 6px; }
+  .topbar select, .topbar button {
+    background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px;
+    padding: 5px 11px; cursor: pointer; font-size: 12px; font-family: inherit;
+  }
+  .topbar select:hover, .topbar button:hover { border-color: #ffd43b; color: #ffd43b; }
+  .topbar button.primary { background: #c05030; border-color: #c05030; color: #fff; }
+  .topbar button.copied { background: #2a4a2a; border-color: #6a9; color: #6a9; }
+  .topbar .label { color: #888; font-size: 11px; }
+  .topbar .sep { flex: 1; }
+  .topbar .pill { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: #6a9; }
+
+  .main { flex: 1; display: flex; min-height: 0; }
+  .canvas-wrap { flex: 1; position: relative; background: #050508;
+                 display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+  /* The stacking area is a fixed-aspect box that holds the base + overlay images.
+     Both fill the box; CSS transforms on the overlay handle the alignment.
+     The `perspective` here is what makes rotateX/rotateY look like camera-style
+     yaw/pitch (image edges fold into depth) instead of flat-rotated 2D. */
+  .stack { position: relative; height: 100%; aspect-ratio: 1080 / 1920;
+           max-width: 100%; perspective: 1800px; perspective-origin: 50% 50%; }
+  .stack img, .stack video { position: absolute; inset: 0; width: 100%; height: 100%;
+               object-fit: contain; pointer-events: none; user-select: none; background: #000; }
+  #overlay { transform-origin: 50% 50%; mix-blend-mode: normal; }
+
+  .sidebar { width: 320px; background: #15151a; border-left: 1px solid #2a2a2a;
+             padding: 14px; overflow-y: auto; flex-shrink: 0;
+             font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
+  .sidebar h3 { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+                color: #888; font-weight: 600; margin: 14px 0 6px; padding-bottom: 4px;
+                border-bottom: 1px solid #2a2a2a; }
+  .sidebar h3:first-child { margin-top: 0; }
+  .slider-row { display: grid; grid-template-columns: 64px 1fr 70px; gap: 6px;
+                align-items: center; margin: 5px 0; }
+  .slider-row label { color: #888; font-size: 10px; }
+  .slider-row input[type=range] { width: 100%; accent-color: #c05030; }
+  .slider-row .val { color: #9cf; font-size: 10px; text-align: right;
+                     font-variant-numeric: tabular-nums; }
+  .footer-row { display: flex; gap: 6px; margin-top: 12px; }
+  .footer-row button { flex: 1; }
+  .footer-row button.reset { background: #401515; border-color: #602020; color: #e88; }
+  .footer-row button.reset:hover { border-color: #c05030; color: #c05030; }
+
+  textarea { width: 100%; min-height: 110px; background: #0a0a0e; color: #9cf;
+             border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px;
+             font-family: inherit; font-size: 10.5px; resize: vertical; }
+  .help { color: #777; font-size: 10.5px; line-height: 1.5; margin-top: 6px; }
+  .help kbd { background: #2a2a2a; padding: 1px 5px; border-radius: 3px;
+              border: 1px solid #444; font-family: 'SF Mono', Menlo, monospace; font-size: 10px; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+            vertical-align: middle; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <strong>Per-cam alignment</strong>
+  <span class="label">overlay →</span>
+  <select id="camSel">
+    <option value="anna">anna</option>
+    <option value="sophia">sophia</option>
+    <option value="valentine">valentine</option>
+  </select>
+  <span class="label">over kinect</span>
+  <span class="sep"></span>
+  <span class="pill" title="all _flow stills are clap-synchronized — kinect, anna, sophia, valentine all show the same physical moment during active flow">_flow stills · clap-aligned</span>
+  <span class="label" id="status">loading…</span>
+  <button id="copyBtn" title="copy all three transforms as JSON">Copy JSON</button>
+  <a class="topbar" href="multiview.html" style="border:none;padding:0;color:#888;text-decoration:none;font-size:11px;margin-left:8px">↗ multiview</a>
+</div>
+
+<div class="main">
+  <div class="canvas-wrap">
+    <div class="stack" id="stack">
+      <img id="base"    src="reference_frames/kinect_flow.jpg" alt="kinect">
+      <img id="overlay" alt="overlay">
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <h3>overlay opacity</h3>
+    <div class="slider-row"><label>opacity</label><input type="range" id="s_op" min="0" max="1" step="0.01"><span class="val" id="s_op_val"></span></div>
+
+    <h3>translate (display px)</h3>
+    <div class="slider-row"><label>tx</label><input type="range" id="s_tx" min="-500" max="500" step="1"><span class="val" id="s_tx_val"></span></div>
+    <div class="slider-row"><label>ty</label><input type="range" id="s_ty" min="-800" max="800" step="1"><span class="val" id="s_ty_val"></span></div>
+
+    <h3>scale</h3>
+    <div class="slider-row" title="horizontal stretch (image width)"><label>X</label><input type="range" id="s_scx" min="0.2" max="3" step="0.005"><span class="val" id="s_scx_val"></span></div>
+    <div class="slider-row" title="vertical stretch (image height)"><label>Y</label><input type="range" id="s_scy" min="0.2" max="3" step="0.005"><span class="val" id="s_scy_val"></span></div>
+
+    <h3>3D rotation (deg)</h3>
+    <div class="slider-row" title="rotate about the image's vertical axis — folds left/right into depth"><label>yaw</label><input type="range" id="s_yaw" min="-60" max="60" step="0.5"><span class="val" id="s_yaw_val"></span></div>
+    <div class="slider-row" title="rotate about the image's horizontal axis — folds top/bottom into depth"><label>pitch</label><input type="range" id="s_pit" min="-60" max="60" step="0.5"><span class="val" id="s_pit_val"></span></div>
+    <div class="slider-row" title="spin in the image plane (no perspective change)"><label>roll</label><input type="range" id="s_rol" min="-180" max="180" step="0.5"><span class="val" id="s_rol_val"></span></div>
+
+    <h3>skew (deg)</h3>
+    <div class="slider-row"><label>skew X</label><input type="range" id="s_skx" min="-45" max="45" step="0.5"><span class="val" id="s_skx_val"></span></div>
+    <div class="slider-row"><label>skew Y</label><input type="range" id="s_sky" min="-45" max="45" step="0.5"><span class="val" id="s_sky_val"></span></div>
+
+    <div class="footer-row">
+      <button id="resetBtn" class="reset">Reset cam</button>
+      <button id="resetAllBtn" class="reset">Reset all</button>
+    </div>
+
+    <h3>current transform (per cam)</h3>
+    <textarea id="export" readonly></textarea>
+
+    <div class="help">
+      Pick a cam → drag sliders until features in the overlay (rim corners,
+      standpipe, water-flow streaks) line up with the kinect base. <strong>Copy JSON</strong>
+      grabs all three transforms. The transform is in <em>display-pixel</em> space of the
+      stacked frames; combine with the underlying image natural sizes if you want
+      native-pixel offsets.
+      <br><br>
+      <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> → switch to anna/sophia/valentine. <kbd>R</kbd>
+      → reset active cam. <kbd>O</kbd> → toggle overlay on/off.
+    </div>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// State — one transform block per phone, persisted to localStorage so refreshing
+// the page doesn't lose progress. Defaults match a "no-op" alignment.
+// =============================================================================
+const CAMS = ['anna', 'sophia', 'valentine'];
+const DEFAULT_T = {
+  opacity: 0.5, tx: 0, ty: 0,
+  scaleX: 1, scaleY: 1,             // independent X/Y stretch — was a single `scale` field; migrated below
+  yaw: 0, pitch: 0, roll: 0,        // 3D rotations (deg) — true perspective via CSS perspective on .stack
+  skewX: 0, skewY: 0,
+};
+
+const STORAGE_KEY = 'multiview-alignment-v1';
+function loadTransforms() {
+  try {
+    const j = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    const out = {};
+    for (const c of CAMS) {
+      const stored = j[c] || {};
+      // Migrate older saves: single 2D `rot` -> `roll`; uniform `scale` ->
+      // separate `scaleX`/`scaleY`. Drop nothing on disk — overwritten on
+      // next save.
+      if (stored.rot   != null && stored.roll   == null) stored.roll = stored.rot;
+      if (stored.scale != null && stored.scaleX == null) stored.scaleX = stored.scale;
+      if (stored.scale != null && stored.scaleY == null) stored.scaleY = stored.scale;
+      out[c] = { ...DEFAULT_T, ...stored };
+    }
+    return out;
+  } catch (e) {
+    return Object.fromEntries(CAMS.map(c => [c, { ...DEFAULT_T }]));
+  }
+}
+function saveTransforms() { localStorage.setItem(STORAGE_KEY, JSON.stringify(transforms)); }
+
+const transforms = loadTransforms();
+let activeCam = CAMS[0];
+let overlayVisible = true;
+
+// =============================================================================
+// Sliders — six DOM controls. Each binds to the active cam's transform block.
+// =============================================================================
+const SLIDERS = [
+  { id: 's_op',  prop: 'opacity', fmt: v => v.toFixed(2) },
+  { id: 's_tx',  prop: 'tx',      fmt: v => (v >= 0 ? '+' : '') + v.toFixed(0) + ' px' },
+  { id: 's_ty',  prop: 'ty',      fmt: v => (v >= 0 ? '+' : '') + v.toFixed(0) + ' px' },
+  { id: 's_scx', prop: 'scaleX',  fmt: v => v.toFixed(3) + '×' },
+  { id: 's_scy', prop: 'scaleY',  fmt: v => v.toFixed(3) + '×' },
+  { id: 's_yaw', prop: 'yaw',     fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+  { id: 's_pit', prop: 'pitch',   fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+  { id: 's_rol', prop: 'roll',    fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+  { id: 's_skx', prop: 'skewX',   fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+  { id: 's_sky', prop: 'skewY',   fmt: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '°' },
+];
+
+// Both layers are stills extracted from the corresponding video at the same
+// physical moment (the "_flow" set in reference_frames/, sampled after the
+// water has been running long enough to leave visible sediment streaks). They
+// share a clap-aligned timestamp, so if features in the kinect overhead match
+// features in a phone view at default transform, they correspond to the same
+// real point on the bed.
+const overlayEl = document.getElementById('overlay');
+
+function syncFromState() {
+  const t = transforms[activeCam];
+  for (const s of SLIDERS) {
+    const el = document.getElementById(s.id);
+    el.value = t[s.prop];
+    document.getElementById(s.id + '_val').textContent = s.fmt(t[s.prop]);
+  }
+  overlayEl.src = `reference_frames/${activeCam}_flow.jpg`;
+  applyTransform();
+  refreshExport();
+}
+
+function applyTransform() {
+  const t = transforms[activeCam];
+  const ov = document.getElementById('overlay');
+  ov.style.opacity = overlayVisible ? t.opacity : 0;
+  // CSS applies transforms right-to-left in matrix terms, so the rightmost
+  // transform here is innermost. Compose order:
+  //   1. scale         — resize the image first
+  //   2. skew(X, Y)    — non-rigid stretch (mostly redundant with yaw/pitch
+  //                       once you have perspective, but kept for fine-grained
+  //                       affine fits)
+  //   3. rotateX(pitch)— fold top/bottom into depth (perspective via .stack)
+  //   4. rotateY(yaw)  — fold left/right into depth
+  //   5. rotateZ(roll) — spin in the image plane
+  //   6. translate     — slide on the display
+  // The .stack container has perspective: 1800px so rotateX/Y produce true
+  // foreshortening rather than flat 2D rotation.
+  ov.style.transform =
+    `translate(${t.tx}px, ${t.ty}px) ` +
+    `rotateZ(${t.roll}deg) ` +
+    `rotateY(${t.yaw}deg) ` +
+    `rotateX(${t.pitch}deg) ` +
+    `skew(${t.skewX}deg, ${t.skewY}deg) ` +
+    `scale(${t.scaleX}, ${t.scaleY})`;
+}
+
+function refreshExport() {
+  const el = document.getElementById('export');
+  el.value = JSON.stringify(transforms, null, 2);
+}
+
+for (const s of SLIDERS) {
+  document.getElementById(s.id).addEventListener('input', e => {
+    const v = parseFloat(e.target.value);
+    if (Number.isNaN(v)) return;
+    transforms[activeCam][s.prop] = v;
+    document.getElementById(s.id + '_val').textContent = s.fmt(v);
+    saveTransforms();
+    applyTransform();
+    refreshExport();
+  });
+}
+
+// =============================================================================
+// UI wiring
+// =============================================================================
+document.getElementById('camSel').addEventListener('change', e => {
+  activeCam = e.target.value;
+  syncFromState();
+  setStatus(`editing: ${activeCam}`);
+});
+
+document.getElementById('resetBtn').onclick = () => {
+  transforms[activeCam] = { ...DEFAULT_T };
+  saveTransforms();
+  syncFromState();
+  setStatus(`reset ${activeCam}`);
+};
+
+document.getElementById('resetAllBtn').onclick = () => {
+  if (!confirm('Reset all three cams to defaults? localStorage will be cleared.')) return;
+  for (const c of CAMS) transforms[c] = { ...DEFAULT_T };
+  saveTransforms();
+  syncFromState();
+  setStatus('reset all');
+};
+
+document.getElementById('copyBtn').onclick = async () => {
+  const blob = JSON.stringify(transforms, null, 2);
+  try {
+    await navigator.clipboard.writeText(blob);
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = 'copied ✓'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy JSON'; btn.classList.remove('copied'); }, 1500);
+  } catch (e) {
+    setStatus('clipboard blocked — JSON in textarea');
+  }
+};
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === '1') { document.getElementById('camSel').value = 'anna';
+                       activeCam = 'anna'; syncFromState(); }
+  else if (e.key === '2') { document.getElementById('camSel').value = 'sophia';
+                            activeCam = 'sophia'; syncFromState(); }
+  else if (e.key === '3') { document.getElementById('camSel').value = 'valentine';
+                            activeCam = 'valentine'; syncFromState(); }
+  else if (e.key === 'r' || e.key === 'R') { document.getElementById('resetBtn').click(); }
+  else if (e.key === 'o' || e.key === 'O') {
+    overlayVisible = !overlayVisible;
+    applyTransform();
+    setStatus(`overlay ${overlayVisible ? 'on' : 'off'}`);
+  }
+});
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+// Boot
+syncFromState();
+setStatus(`editing: ${activeCam}`);
+</script>
+
+</body>
+</html>
