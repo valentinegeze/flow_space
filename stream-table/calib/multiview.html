@@ -161,11 +161,14 @@ const FLUME_L = 1930;
 // −90° on the GPU because the proxies' rotation metadata was stripped during extraction.
 // kinect is the overhead view — probably the most useful first-glance, since its
 // content actually corresponds to a top-down look at the rectangle.
+// Web-friendly recompressed copies live alongside the originals (proxies/).
+// The originals are gitignored (~340MB total); the web/ versions are
+// ~7MB each and ship with the GitHub Pages deploy.
 const VIDEO_PROXIES = {
-  kinect:    '../videos/proxies/kinect_color.mp4',
-  anna:      '../videos/proxies/AM_03-11_01_wide-inlet_no-obstacles.mp4',
-  sophia:    '../videos/proxies/skm_0311_01_wide_no-obs.mp4',
-  valentine: '../videos/proxies/vmg_03-11_01.mp4',
+  kinect:    '../videos/web/kinect_color.mp4',
+  anna:      '../videos/web/AM_03-11_01_wide-inlet_no-obstacles.mp4',
+  sophia:    '../videos/web/skm_0311_01_wide_no-obs.mp4',
+  valentine: '../videos/web/vmg_03-11_01.mp4',
 };
 // Order of preference for the initial active cam if multiple are ready.
 const INITIAL_CAM_PREFERENCE = ['kinect', 'valentine', 'sophia', 'anna'];
@@ -325,7 +328,7 @@ for (const btn of document.querySelectorAll('.cam-btn')) {
     btn.disabled = true;
     btn.style.opacity = '0.4';
     btn.style.cursor = 'not-allowed';
-    btn.title = `proxy not ready — ../videos/proxies/${VIDEO_PROXIES[btn.dataset.cam].split('/').pop()} missing or still encoding`;
+    btn.title = `video not loaded — ${VIDEO_PROXIES[btn.dataset.cam]} missing`;
   }
 }
 

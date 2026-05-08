@@ -11,9 +11,9 @@ const VIDEO_FILES = {
   sophia:    'videos/skm_0311_01_wide_no-obs.mp4',
   valentine: 'videos/vmg_03-11_01.mp4',
   // Kinect: original .mkv is huge (audio-less, depth+color), so we point
-  // straight at the extracted color proxy. resolveSrc() will accept this
-  // path as-is; sync.json's clap_time_s=27.4 timing still applies.
-  kinect:    'videos/proxies/kinect_color.mp4',
+  // straight at the extracted web-friendly proxy. resolveSrc() prefers the
+  // web/ copy too. sync.json's clap_time_s=27.4 timing still applies.
+  kinect:    'videos/web/kinect_color.mp4',
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -67,16 +67,15 @@ async function loadSyncData() {
 }
 
 async function resolveSrc(originalSrc) {
-  // Prefer a proxy if one exists (same filename under videos/proxies/).
+  // Prefer a web-friendly recompressed copy if one exists, then a local
+  // full-res proxy, otherwise fall back to the original raw filename.
   const filename = originalSrc.split('/').pop();
-  const proxySrc = `videos/proxies/${filename}`;
-  try {
-    const res = await fetch(proxySrc, { method: 'HEAD' });
-    if (res.ok) {
-      console.log(`[proxy] using ${proxySrc}`);
-      return proxySrc;
-    }
-  } catch (e) {}
+  for (const candidate of [`videos/web/${filename}`, `videos/proxies/${filename}`]) {
+    try {
+      const res = await fetch(candidate, { method: 'HEAD' });
+      if (res.ok) { console.log(`[video] using ${candidate}`); return candidate; }
+    } catch (e) {}
+  }
   return originalSrc;
 }
 

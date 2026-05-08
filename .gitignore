@@ -11,6 +11,9 @@ mosaic-flow/build/
 
 # Source video footage (too large for git — 22GB)
 stream-table/videos/
+# ...except the small web-friendly proxies that the GitHub Pages site needs
+!stream-table/videos/web/
+!stream-table/videos/web/**
 
 # Large intermediate / overlay videos
 stream-table/calib/*.mp4
