@@ -9,11 +9,16 @@
 # Build output
 mosaic-flow/build/
 
-# Source video footage (too large for git — 22GB)
-stream-table/videos/
-# ...except the small web-friendly proxies that the GitHub Pages site needs
-!stream-table/videos/web/
-!stream-table/videos/web/**
+# Source video footage (too large for git — 22GB).
+# The directory itself is NOT ignored so git can recurse into web/;
+# only the heavy children below are excluded explicitly.
+stream-table/videos/proxies/
+stream-table/videos/session_2/
+stream-table/videos/*.mp4
+stream-table/videos/*.mkv
+stream-table/videos/*.mov
+stream-table/videos/*.MP4
+stream-table/videos/*.MOV
 
 # Large intermediate / overlay videos
 stream-table/calib/*.mp4
