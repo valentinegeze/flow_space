@@ -294,7 +294,6 @@
     <button class="subtab"        data-tab="pair-tune"      role="tab">Pair tune</button>
     <button class="subtab"        data-tab="cross-project"  role="tab">Cross-projection</button>
     <button class="subtab"        data-tab="result"         role="tab">Result</button>
-    <button class="subtab"        data-tab="depth-motion"   role="tab">Depth &amp; Motion</button>
     <button class="subtab"        data-tab="reconstruction" role="tab">Reconstruction</button>
   </nav>
 
@@ -388,31 +387,6 @@
       </div>
     </section>
 
-    <section class="panel" data-panel="depth-motion">
-      <div class="panel-header">
-        <div class="panel-header-text">
-          <div class="panel-aspiration">Where did the water go (optical flow), and what changed underneath (Δheight from a dry-bed baseline).</div>
-        </div>
-        <div class="panel-actions">
-          <a class="btn" id="depth-motion-link" href="stream-table/calib/optical_flow/index.html" target="_blank" rel="noopener">Open standalone ↗</a>
-        </div>
-      </div>
-      <div class="subtoggle" id="depth-motion-subtoggle">
-        <button class="active" data-dm="optical-flow"
-                data-href="stream-table/calib/optical_flow/index.html"
-                data-params="<strong>Parameters:</strong> dense flow magnitude · accumulated persistence · motion-only signature.">Optical flow (motion)</button>
-        <button data-dm="heightmaps"
-                data-href="stream-table/calib/bed_rectified/index.html"
-                data-params="<strong>Parameters:</strong> SVD plane fit to dry bed · 1 mm/cell rectified Z-grid · Δheight from baseline · scour/deposit colormap.">Bed heightmaps (depth)</button>
-      </div>
-      <div class="frame-host" id="host-depth-motion">
-        <button class="fs-toggle" data-fs="depth-motion" title="Fullscreen">
-          <svg viewBox="0 0 16 16"><path d="M2 6 V2 H6 M10 2 H14 V6 M14 10 V14 H10 M6 14 H2 V10"/></svg>
-        </button>
-        <iframe id="depth-motion-frame" data-src="stream-table/calib/optical_flow/index.html" title="Depth and motion"></iframe>
-      </div>
-    </section>
-
     <section class="panel" data-panel="reconstruction">
       <div class="panel-header">
         <div class="panel-header-text">
@@ -465,7 +439,7 @@
     }
 
     // Phase 2 sub-tabs — visible only when one of the Phase 2 panels is active.
-    const PHASE2_TABS = ['capture', 'pair-tune', 'cross-project', 'result', 'depth-motion', 'reconstruction'];
+    const PHASE2_TABS = ['capture', 'pair-tune', 'cross-project', 'result', 'reconstruction'];
     const subtabRow = document.getElementById('phase2-subtabs');
     const subtabs = subtabRow ? subtabRow.querySelectorAll('.subtab') : [];
 
@@ -496,24 +470,11 @@
     tabs.forEach(t => t.addEventListener('click', () => activate(t.dataset.tab)));
     subtabs.forEach(s => s.addEventListener('click', () => activate(s.dataset.tab)));
 
-    // Old links (#optical-flow, #heightmaps) routed to two separate tabs that
-    // are now the two sub-views of #depth-motion. Map them so external links
-    // still land somewhere sensible, and pre-select the right sub-view.
-    const HASH_ALIASES = {
-      'optical-flow': { tab: 'depth-motion', sub: 'optical-flow' },
-      'heightmaps':   { tab: 'depth-motion', sub: 'heightmaps' },
-    };
-
     const initial = location.hash.slice(1);
-    const alias = HASH_ALIASES[initial];
-    if (alias) {
-      activate(alias.tab);
-      const subBtn = document.querySelector(`#depth-motion-subtoggle button[data-dm="${alias.sub}"]`);
-      if (subBtn) subBtn.click();
-    } else if (initial && (
-                document.querySelector(`.tab[data-tab="${initial}"]`) ||
-                document.querySelector(`.subtab[data-tab="${initial}"]`)
-              )) {
+    if (initial && (
+          document.querySelector(`.tab[data-tab="${initial}"]`) ||
+          document.querySelector(`.subtab[data-tab="${initial}"]`)
+        )) {
       activate(initial);
     } else {
       loadFrame('abstract');
@@ -521,23 +482,6 @@
 
     // (Calibration sub-toggle removed: pair-tune / cross-project / result are
     // now top-level Phase 2 subtabs with their own panels.)
-
-    // Depth & Motion sub-toggle — same pattern as calibration, plus swaps the
-    // panel's parameter blurb so the description tracks which view is active.
-    const dmFrame  = document.getElementById('depth-motion-frame');
-    const dmLink   = document.getElementById('depth-motion-link');
-    const dmParams = document.getElementById('depth-motion-params');
-    document.querySelectorAll('#depth-motion-subtoggle button').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('#depth-motion-subtoggle button').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const href = btn.dataset.href;
-        dmFrame.src = href;
-        dmFrame.removeAttribute('data-src');
-        if (dmLink) dmLink.href = href;
-        if (dmParams && btn.dataset.params) dmParams.innerHTML = btn.dataset.params;
-      });
-    });
 
     // Fullscreen
     document.querySelectorAll('[data-fs]').forEach(btn => {
