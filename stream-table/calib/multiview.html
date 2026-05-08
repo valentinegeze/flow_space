@@ -1045,19 +1045,25 @@ let activeTween = null;
 
 function flyToCam(label) {
   const entry = camRegistry.find(c => c.label === label);
-  if (!entry) return;
+  if (!entry) {
+    console.warn(`[flyToCam] no camRegistry entry for "${label}" — registry has`,
+                 camRegistry.map(c => c.label));
+    return;
+  }
   scene.updateMatrixWorld(true);
   // Optical center in world (= scene) coords.
   const C = new THREE.Vector3();
   C.setFromMatrixPosition(entry.group.matrixWorld);
   // Always aim the orbit camera at the rim centre (flume (FLUME_W/2, FLUME_L/2, 0)
-  // → scene). This deliberately ignores the cam's solved optical axis: many
-  // axes from the kinect-anchored PnP solves point at the feature cluster
-  // near mid-table, which gets visually wrong after PHONE_OFFSETS pushes the
-  // cam to its physical location. Aiming at the rim centre always frames the
-  // bed in the orbit camera's view, even if it doesn't match exactly what
-  // that phone actually recorded.
+  // → scene). Many axes from the kinect-anchored PnP solves point at the
+  // feature cluster near mid-table, which is visually wrong after PHONE_OFFSETS
+  // pushes the cam to its physical location. Rim centre always frames the bed.
   const target = new THREE.Vector3(FLUME_W / 2, 0, -FLUME_L / 2);
+  // Pause OrbitControls damping during the tween — leaving damping on lets the
+  // controls' internal spherical drift away from what we set each frame, which
+  // looks like a "stutter" or like the fly never quite lands. Re-enabled when
+  // the tween completes.
+  controls.enableDamping = false;
   activeTween = {
     t0: performance.now(),
     duration: FLY_DURATION_MS,
@@ -1066,8 +1072,9 @@ function flyToCam(label) {
     fromTarget: controls.target.clone(),
     toTarget:   target,
     fromFov:    camera.fov,
-    toFov:      entry.fov_v_deg,
+    toFov:      Math.min(75, entry.fov_v_deg),  // clamp wide phone FOVs
   };
+  console.log(`[flyToCam] "${label}" → C=(${C.x.toFixed(0)}, ${C.y.toFixed(0)}, ${C.z.toFixed(0)}), fov=${activeTween.toFov.toFixed(1)}°`);
 }
 
 // Smoothstep — easeInOut in [0,1]. Avoids the abrupt start/stop of linear lerp
@@ -1082,7 +1089,11 @@ function stepTween() {
   controls.target.lerpVectors(activeTween.fromTarget, activeTween.toTarget, e);
   camera.fov = activeTween.fromFov + (activeTween.toFov - activeTween.fromFov) * e;
   camera.updateProjectionMatrix();
-  if (u >= 1) activeTween = null;
+  camera.lookAt(controls.target);
+  if (u >= 1) {
+    activeTween = null;
+    controls.enableDamping = true;  // restore for orbit/zoom after the fly
+  }
 }
 
 // Play / pause is now global — every ready video starts/stops together so the rectangle
